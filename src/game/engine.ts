@@ -878,7 +878,7 @@ export class Game {
       this.mods.emp = Math.max(this.mods.emp, 0.55);
     }
     this.status = 'playing';
-    this.setBanner('OPERATION IRON VEIL', 'ENEMY COMMAND IS ALREADY HUNTING YOU');
+    this.setBanner('PROTOCOL SOLAR ECLIPSE', 'ENEMY COMMAND IS ALREADY HUNTING YOU');
     this.tellStory(PROLOGUE, 14);
     sfx.resume();
   }

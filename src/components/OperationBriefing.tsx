@@ -6,7 +6,7 @@ export default function OperationBriefing({ onBegin, onBack }: { onBegin: () => 
     <div className="briefing-document">
       <div className="briefing-stamp"><ShieldMark/><div><span>S.H.I.E.L.D.</span><small>DIRECTORATE / EYES ONLY</small></div><b>FILE 07-0317</b></div>
       <div className="briefing-classification">CLASSIFIED TRANSMISSION <span>03:17:00 ZULU</span></div>
-      <small className="briefing-chapter">IRON VEIL / CAMPAIGN PROLOGUE</small>
+      <small className="briefing-chapter">PROTOCOL SOLAR ECLIPSE / CAMPAIGN PROLOGUE</small>
       <h1 id="briefing-title">The night the<br/><em>badges changed.</em></h1>
       <p>{PROLOGUE.text}</p>
       <div className="briefing-orders"><span>MISSION DIRECTIVES</span><ol><li><b>01</b> Recover the five occupied command sectors.</li><li><b>02</b> Disrupt Goliath's transport and supply network.</li><li><b>03</b> Find the Mnemosyne cipher. Bring our people home.</li></ol></div>

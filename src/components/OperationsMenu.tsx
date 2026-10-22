@@ -20,7 +20,7 @@ export default function OperationsMenu(p: Props) {
     <nav className="operations-tabs" aria-label="Main menu">{[['operation', 'OPERATION'], ['loadout', 'LOADOUT'], ['intel', 'FIELD INTEL'], ['story', 'DOSSIER'], ['records', 'SERVICE RECORD']].map(([key, text]) => <button className={tab === key ? 'selected' : ''} onClick={() => setTab(key)} key={key}>{text}</button>)}</nav>
     {tab === 'operation' ? <main className="operation-hero">
       <div className="operation-eyebrow"><span/> OPERATION BLACK VAULT</div>
-      <h1>IRON<span>VEIL</span><i>TACTICAL CAMPAIGN</i></h1>
+      <h1>PROTOCOL<span>SOLAR ECLIPSE</span><i>TACTICAL CAMPAIGN</i></h1>
       <h2>They took our bases.<br/>Take them back.</h2>
       <p>Five HYDRA strongholds. One S.H.I.E.L.D. operative.<br className="desktop-break"/> Reclaim the technology. Break the chain of command.</p>
       <div className="operation-cta"><button className="deploy-button" onClick={p.onStart}>DEPLOY OPERATIVE <span>&#8599;</span></button><button className="tour-button" onClick={p.onTour}>EXPLORE THE VAULT <span>3D TOUR</span></button></div>
@@ -56,6 +56,6 @@ export default function OperationsMenu(p: Props) {
       {tab === 'story' && <div className="field-intel dossier-entries">{[PROLOGUE, ...Object.values(PHASE_STORY)].map(s => <article key={s.id}><small>{s.channel}</small><h3>{s.title}</h3><p>{s.text}</p></article>)}</div>}
       {tab === 'records' && <div className="service-records"><div className="record-head"><span>RANK / CALLSIGN</span><span>WAVE</span><span>SCORE</span></div>{p.scores.length ? p.scores.map((s, i) => <div className="record-line" key={`${s.date}-${i}`}><span><small>{String(i + 1).padStart(2, '0')}</small>{s.name}</span><span>{s.wave}</span><strong>{s.score.toLocaleString()}</strong></div>) : <p>No records yet. Complete an operation to register your callsign.</p>}<small className="records-note">Stored on this device. Campaign scores are saved at defeat or final victory.</small></div>}
     </section>}
-    <footer className="operations-footer"><div><span className="secure-dot"/> SECURE CHANNEL ESTABLISHED</div><span>FIVE SECTORS <i>/</i> NO CAMERA SHAKE <i>/</i> KEYBOARD + TOUCH</span><small>IRON VEIL / NIGHTFALL PROTOCOL</small></footer>
+    <footer className="operations-footer"><div><span className="secure-dot"/> SECURE CHANNEL ESTABLISHED</div><span>FIVE SECTORS <i>/</i> NO CAMERA SHAKE <i>/</i> KEYBOARD + TOUCH</span><small>PROTOCOL SOLAR ECLIPSE / NIGHTFALL PROTOCOL</small></footer>
   </div>;
 }

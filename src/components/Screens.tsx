@@ -424,7 +424,7 @@ export function MenuScreen({
           </div>
           <div className="font-tech text-[10px] tracking-[0.6em] text-teal-300/70 md:text-xs">S.H.I.E.L.D. BASE OVERRUN // HYDRA OCCUPATION</div>
           <h1 className="mt-1 text-4xl leading-none font-bold tracking-[0.1em] text-amber-300 text-glow sm:text-6xl md:text-7xl">
-            IRON VEIL
+            PROTOCOL SOLAR ECLIPSE
           </h1>
           <div className="relative mx-auto mt-2 h-[2px] w-56 overflow-hidden bg-teal-300/20 md:w-80">
             <span className="animate-sweep absolute inset-y-0 w-1/3 bg-amber-300/80" />
