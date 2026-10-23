@@ -43,7 +43,9 @@ export interface Rect {
 
 export interface Zone {
   x: number; y: number; w: number; h: number;
-  kind: 'road' | 'concrete' | 'sand' | 'grass' | 'blood' | 'plaza' | 'helipad' | 'fuel' | 'runway' | 'parade';
+  kind: 'road' | 'concrete' | 'sand' | 'grass' | 'blood' | 'plaza' | 'helipad' | 'fuel' | 'runway' | 'parade'
+  /** Flooded north-west lagoon that carries the prison island. Additive: drawn under everything. */
+  | 'lagoon';
 }
 
 /** A hangar looks sealed from outside; its roof splits open once you step inside. */
