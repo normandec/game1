@@ -8,7 +8,7 @@ import { FacilityPainter } from './facilityArt';
 import { PROLOGUE, PHASE_STORY, PHASE_TACTICS, LIBRARY_VOLUMES, type StoryEntry } from './campaign';
 import { newSecurityState, updateSearchlights, drawSearchlight, type Searchlight } from './security';
 import { prepareStructures, structuralHealth, distanceToBlock, drawRuins, type Ruin } from './destruction';
-import { prisonIslandStructures, PRISON_DOOR, COMPOUND, ISLAND, LAGOON } from './prisonIsland';
+import { prisonIslandStructures, PRISON_DOOR, ISLAND } from './prisonIsland';
 import type { PrisonStats } from './prison';
 import { drawFixedWing, drawMantis, drawAirborne, type AirTransport, type AirborneTrooper } from './airlift';
 import { GOLIATH, MNEMOSYNE, type CampaignSites, type MegaCrate } from './campaignSites';
@@ -430,6 +430,8 @@ export class Game {
   private arrestCount = 0;
   /** One-time field report the first time the operative sees the island. */
   private prisonHinted = false;
+  /** Seconds before the sally port can pull the operative in again (stops instant re-entry). */
+  private prisonReentry = 0;
   mines: Mine[] = [];
   helis: Heli[] = [];
   barriers: Barrier[] = [];
@@ -1181,7 +1183,7 @@ export class Game {
     if (this.vaultOpen && this.vaultChoice === 'offer' &&
         Math.hypot(this.planeSpot.x - this.px, this.planeSpot.y - this.py) < 260) return 'F · CLAIM AIR WING';
     if (this.plane && Math.hypot(this.plane.x - this.px, this.plane.y - this.py) < 170) return 'F · BOARD BOMBER';
-    if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 160) return 'F · ENTER THE CAGE';
+    if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 230) return 'F · ENTER THE CAGE';
     if (this.parkedPlaneNear(210)) return 'F · SEIZE BOMBER';
     const l = this.lasers.find((q) => !q.captured && Math.hypot(q.x - this.px, q.y - this.py) < 120);
     if (l) return 'F · CAPTURE BEAM';
@@ -1961,6 +1963,7 @@ export class Game {
   private updatePlayer(dt: number) {
     this.updateVault(dt);
     this.updatePrisonHint();
+    this.updatePrisonDoor(dt);
     if (this.status !== 'playing') return;
     if (this.flyingPlane) { this.updatePlane(dt); return; }
     if (this.drivingVan) { this.updateDrivenVan(dt); return; }
@@ -2081,7 +2084,7 @@ export class Game {
       else this.startBaseOverride(poiCore);
       return;
     }
-    if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 160) { this.enterPrison('visit'); return; }
+    if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 230) { this.enterPrison('visit'); return; }
     if (Math.hypot(this.px - VAULT_ENTRY.x, this.py - VAULT_ENTRY.y) < 130) { this.enterVault(); return; }
     const sites = this.campaignSites;
     const volume = sites?.volumes.find(v => Math.hypot(v.x - this.px, v.y - this.py) < 88);
@@ -2268,6 +2271,18 @@ export class Game {
     }
   }
 
+  /**
+   * Walking into the sally port IS the entry: the operative does not need to find F.
+   * The F prompt still works, this simply removes the chance of standing in the doorway
+   * and nothing happening.
+   */
+  private updatePrisonDoor(dt: number) {
+    if (this.prisonReentry > 0) this.prisonReentry = Math.max(0, this.prisonReentry - dt);
+    if (this.status !== 'playing' || this.prisonReentry > 0) return;
+    if (this.piloting || this.flyingPlane || this.drivingVan || this.playerTank) return;
+    if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 78) this.enterPrison('visit');
+  }
+
   /** The Cage is optional content, so the island announces itself once you get close. */
   private updatePrisonHint() {
     if (this.prisonHinted) return;
@@ -2411,7 +2426,6 @@ export class Game {
     ctx.fillStyle = '#9fc2ff'; ctx.fillRect(W * 0.25, H * 0.9, W * 0.5 * p, 5);
     ctx.textAlign = 'left';
     ctx.restore();
-    void ISLAND; void COMPOUND; void LAGOON;
   }
 
   /** Step through the sally port on the island, or wake up here after an arrest. */
@@ -2429,9 +2443,11 @@ export class Game {
     const reward = escaped ? 25000 + stats.freed * 400 + stats.guardsDown * 250 : 1500;
     this.score += reward;
     this.status = 'playing';
+    // Step out of the gate and down the apron: never straight back into the trigger.
     this.px = PRISON_DOOR.x;
-    this.py = PRISON_DOOR.y;
+    this.py = PRISON_DOOR.y + 150;
     this.pvx = 0; this.pvy = 0;
+    this.prisonReentry = 2.5;
     this.hp = Math.max(40, Math.min(this.maxHp, this.hp));
     this.weapon = 'pistol'; this.ammo = Infinity;
     this.weaponAmmo.set('pistol', Infinity);
@@ -6477,7 +6493,8 @@ export class Game {
     if (near) {
       ctx.fillStyle = 'rgba(216,180,90,0.5)';
       ctx.font = '11px ui-monospace, monospace';
-      ctx.fillText('SALLY PORT · FOLLOW THE PIER', PRISON_DOOR.x, PRISON_DOOR.y + 44);
+      ctx.fillText('SALLY PORT · FOLLOW THE CAUSEWAY', PRISON_DOOR.x, PRISON_DOOR.y + 52);
+      ctx.fillText('STEP INTO THE GATE TO ENTER', PRISON_DOOR.x, PRISON_DOOR.y + 68);
       ctx.strokeStyle = 'rgba(216,180,90,0.35)'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(PRISON_DOOR.x, PRISON_DOOR.y + 30); ctx.lineTo(PRISON_DOOR.x, PRISON_DOOR.y + 8); ctx.stroke();
     }
@@ -6844,21 +6861,24 @@ export class Game {
           g.addColorStop(1, 'rgba(14,44,52,0.90)');
           ctx.fillStyle = g; ctx.fillRect(z.x, z.y, z.w, z.h);
           const t = this.simulationTime;
+          // The western sea is huge: only tessellate the water that is on screen.
+          const x0 = Math.max(z.x, camX - 80), x1 = Math.min(z.x + z.w, camX + this.w + 80);
+          const y0 = Math.max(z.y, camY - 80), y1 = Math.min(z.y + z.h, camY + this.h + 80);
           ctx.strokeStyle = 'rgba(126,206,214,0.10)'; ctx.lineWidth = 2;
-          for (let y = z.y + 40; y < z.y + z.h; y += 74) {
+          for (let y = Math.ceil((y0 - z.y - 40) / 74) * 74 + z.y + 40; y < y1; y += 74) {
             ctx.beginPath();
-            for (let x = z.x; x < z.x + z.w; x += 46) {
+            for (let x = x0; x < x1; x += 46) {
               const wave = Math.sin((x * 0.011) + (y * 0.017) + t * 1.25) * 7;
-              if (x === z.x) ctx.moveTo(x, y + wave); else ctx.lineTo(x, y + wave);
+              if (x === x0) ctx.moveTo(x, y + wave); else ctx.lineTo(x, y + wave);
             }
             ctx.stroke();
           }
           ctx.strokeStyle = 'rgba(196,240,244,0.05)'; ctx.lineWidth = 1;
-          for (let y = z.y + 14; y < z.y + z.h; y += 37) {
+          for (let y = Math.ceil((y0 - z.y - 14) / 37) * 37 + z.y + 14; y < y1; y += 37) {
             ctx.beginPath();
-            for (let x = z.x; x < z.x + z.w; x += 70) {
+            for (let x = x0; x < x1; x += 70) {
               const wave = Math.sin((x * 0.02) - (y * 0.013) - t * 1.9) * 4;
-              if (x === z.x) ctx.moveTo(x, y + wave); else ctx.lineTo(x, y + wave);
+              if (x === x0) ctx.moveTo(x, y + wave); else ctx.lineTo(x, y + wave);
             }
             ctx.stroke();
           }
@@ -8871,6 +8891,16 @@ export class Game {
         ctx.beginPath(); ctx.moveTo(13, 0); ctx.lineTo(-8, 8); ctx.lineTo(-8, -8); ctx.closePath(); ctx.fill();
         ctx.restore();
         const km = (Math.hypot(ISLAND.x - this.px, ISLAND.y - this.py) / 1000).toFixed(1);
+        const toGate = Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py);
+        if (toGate < 2600) {
+          const txt = toGate < 230 ? 'THE CAGE · SALLY PORT — STEP IN' : `THE CAGE · SALLY PORT ${Math.round(toGate / 10)} m · FOLLOW THE CAUSEWAY`;
+          ctx.font = '700 11px "Chakra Petch", sans-serif';
+          const tw = ctx.measureText(txt).width;
+          ctx.fillStyle = 'rgba(6,18,22,0.72)';
+          ctx.fillRect(this.w / 2 - tw / 2 - 10, 44, tw + 20, 22);
+          ctx.fillStyle = '#bfe9f3';
+          ctx.fillText(txt, this.w / 2, 59);
+        }
         ctx.save();
         ctx.textAlign = 'center'; ctx.font = '700 10px "Chakra Petch", sans-serif';
         ctx.fillStyle = 'rgba(190,232,242,0.85)';
