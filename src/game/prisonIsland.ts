@@ -1,141 +1,171 @@
 import type { Rect, StructKind, Zone } from './world';
 
 /**
- * PRISON ISLAND — THE CAGE.
+ * PRISON ISLAND — THE CAGE (eastern expansion).
  *
- * The theatre was WIDENED to the west instead of carving water out of the old map:
- * `PRISON_LAND_W` new metres of open sea and island were bolted onto the left edge, and
- * the whole legacy world (fortress, Goliath, air station, every facility) was shifted
- * east by exactly that amount. Nothing that existed before ever stands in water, and the
- * island sits in ground nobody else claimed.
+ * The legacy theatre is 12000 × 8200 and is NEVER modified: every base, road, wall and
+ * POI keeps the exact coordinate it always had. `PRISON_EAST` metres of brand-new ground
+ * were added east of it, and the prison lives in that new space only:
  *
- * Layout, west to east:
- *   open sea → island (beach → plateau → walled compound) → causeway → mainland coast.
- * The sally port faces the mainland, so the approach is a straight road instead of a
- * pier that had to be found first.
+ *   legacy mainland (x ≤ 12000) → coastal shelf → open water → causeway bridge →
+ *   island → forecourt → the prison's gate → 3D prison
  *
- * Coordinates here are final world coordinates (x 0 … PRISON_LAND_W is the new water).
+ * Everything here is expressed in final world coordinates, east of `LEGACY_W`.
  */
 
-/** New ground added west of the legacy theatre. The legacy world moves east by this much. */
-export const PRISON_LAND_W = 3600;
+/** New ground added east of the legacy theatre (used by world.ts to widen the arena). */
+export const PRISON_EAST = 5200;
 
-/** Open water: only inside the new strip, so it never covers a single legacy structure. */
-export const SEA = { x: 0, y: 0, w: PRISON_LAND_W, h: 5000 };
+/** East edge of the legacy map — the coastal shelf starts here. */
+export const LEGACY_W = 12000;
 
-/** Island footprint (beach) and the plateau the prison is built on. Read as ellipses. */
-export const LAND = { x: 150, y: 390, w: 2900, h: 2600 };
-export const PLATEAU = { x: 660, y: 880, w: 1900, h: 1680 };
+/** Open water filling the new ground, so the island is genuinely surrounded by sea. */
+export const SEA = { x: 12500, y: 0, w: 4700, h: 8200 };
 
-/** Inside the sea wall: a big, airy compound with a wide yard. */
-export const COMPOUND = { x: 700, y: 950, w: 1800, h: 1450 };
+/** Coastal shelf: dry land bridging the legacy map and the bridge head. */
+export const COAST = { x: LEGACY_W - 80, y: 3820, w: 600, h: 510 };
+/** Apron at the bridge head, so the crossing starts on solid ground. */
+export const BRIDGEHEAD = { x: LEGACY_W - 40, y: 3760, w: 480, h: 630 };
 
-/** The sally port — east wall, facing the mainland. Walk in to enter the 3D prison. */
-export const PRISON_DOOR = { x: 2500, y: 2000 };
+/** Island footprint (beach) and its plateau. Both are read as ellipses. */
+export const LAND = { x: 13980, y: 2320, w: 2420, h: 3580 };
+export const PLATEAU = { x: 14240, y: 2600, w: 1900, h: 3020 };
 
-/** Label anchor (the island's middle) and the surf radius around it. */
-export const ISLAND = { x: 1600, y: 1900, r: 1450 };
+/** The prison compound: a big walled complex with the gate facing the bridge. */
+export const COMPOUND = { x: 14550, y: 3400, w: 1600, h: 1350 };
 
-/** Causeway across the last stretch of water, east of the island. */
-export const CAUSEWAY = { x: 3050, y: 1880, w: 560, h: 240 };
+/** The gate itself — walk into it and the 3D prison opens. */
+export const PRISON_DOOR = { x: 14550, y: 4075 };
+
+/** Label anchor (island middle) and surf radius. */
+export const ISLAND = { x: 15190, y: 4100, r: 1800 };
+
+/** Causeway bridge from the mainland shelf over the water to the island. */
+export const BRIDGE = { x: 12440, y: 3940, w: 1700, h: 290 };
 
 export interface IslandLight { x: number; y: number; speed: number; sweep: number }
 
-export function prisonIslandStructures(): { rects: Rect[]; zones: Zone[]; lights: IslandLight[] } {
+export function prisonIslandStructures(): {
+  rects: Rect[]; zones: Zone[]; lights: IslandLight[];
+  /** Garrison posts for the prison detail (custody officers). */
+  policePosts: { x: number; y: number }[];
+} {
   const rects: Rect[] = [];
   const zones: Zone[] = [];
   const lights: IslandLight[] = [];
+  const policePosts: { x: number; y: number }[] = [];
   const add = (x: number, y: number, w: number, h: number, kind: StructKind, tint?: string) =>
     rects.push({ x, y, w, h, kind, h3d: kind === 'wall' ? 96 : kind === 'tower' ? 150 : kind === 'keep' ? 128 : 52, tint });
 
-  /* ---------------- water and land, drawn in that order ---------------- */
+  /* ---------------- water, coast and island ---------------- */
   zones.push({ x: SEA.x, y: SEA.y, w: SEA.w, h: SEA.h, kind: 'lagoon' });
+  zones.push({ x: COAST.x, y: COAST.y, w: COAST.w, h: COAST.h, kind: 'sand' });
+  zones.push({ x: BRIDGEHEAD.x, y: BRIDGEHEAD.y, w: BRIDGEHEAD.w, h: BRIDGEHEAD.h, kind: 'concrete' });
   zones.push({ x: LAND.x, y: LAND.y, w: LAND.w, h: LAND.h, kind: 'sand' });
   zones.push({ x: PLATEAU.x, y: PLATEAU.y, w: PLATEAU.w, h: PLATEAU.h, kind: 'grass' });
-  // Mainland shore: a sand band along the eastern edge of the water so the new coast
-  // does not end in a ruler-straight line against the legacy ground.
-  zones.push({ x: SEA.w - 40, y: 0, w: 250, h: SEA.h, kind: 'sand' });
 
-  /* ---------------- the sea wall, with one wide gate facing the mainland ---------------- */
-  const T = 36;
+  /* ---------------- the bridge: a real crossing you walk over ---------------- */
+  const bx0 = BRIDGE.x, bx1 = BRIDGE.x + BRIDGE.w, byC = BRIDGE.y + BRIDGE.h / 2;
+  add(bx0, BRIDGE.y - 14, BRIDGE.w, 14, 'fence');            // north railing
+  add(bx0, BRIDGE.y + BRIDGE.h, BRIDGE.w, 14, 'fence');       // south railing
+  for (let x = bx0 + 120; x < bx1 - 60; x += 400) {           // piers, outside the deck
+    add(x, BRIDGE.y - 96, 60, 82, 'pillar');
+    add(x, BRIDGE.y + BRIDGE.h + 14, 60, 82, 'pillar');
+    lights.push({ x, y: BRIDGE.y - 60, speed: 0.5, sweep: 0.9 });
+  }
+  // Bridge heads: guard houses at both ends, so the crossing reads as a checkpoint.
+  add(bx0 - 70, BRIDGE.y - 90, 70, 120, 'checkpoint');
+  add(bx0 - 70, BRIDGE.y + BRIDGE.h - 30, 70, 120, 'checkpoint');
+  add(bx1 - 10, BRIDGE.y - 90, 70, 120, 'checkpoint');
+  add(bx1 - 10, BRIDGE.y + BRIDGE.h - 30, 70, 120, 'checkpoint');
+  // Bridge checkpoints: the detail stands on the walkway shoulders, not in the lane.
+  policePosts.push(
+    { x: bx0 + 60, y: byC - 210 }, { x: bx0 + 60, y: byC + 210 },
+    { x: bx1 - 120, y: byC - 220 }, { x: bx1 - 120, y: byC + 220 },
+  );
+
+  /* ---------------- the compound walls, with the gate facing the bridge ---------------- */
+  const T = 42;
   const { x: cx0, y: cy0, w: cw, h: ch } = COMPOUND;
   const gateY = PRISON_DOOR.y;
-  const gateHalf = 110;
-  const eastX = cx0 + cw - T;
-  add(cx0, cy0, cw, T, 'wall');                                            // north
-  add(cx0, cy0 + ch - T, cw, T, 'wall');                                   // south
-  add(cx0, cy0, T, ch, 'wall');                                            // west
-  add(eastX, cy0, T, gateY - gateHalf - cy0, 'wall');                      // east, north of the gate
-  add(eastX, gateY + gateHalf, T, cy0 + ch - (gateY + gateHalf), 'wall');   // east, south of the gate
+  const gateHalf = 115;
+  const westX = cx0;
+  add(cx0, cy0, cw, T, 'wall');                                     // north
+  add(cx0, cy0 + ch - T, cw, T, 'wall');                            // south
+  add(cx0 + cw - T, cy0, T, ch, 'wall');                            // east
+  add(westX, cy0, T, gateY - gateHalf - cy0, 'wall');               // west, north of the gate
+  add(westX, gateY + gateHalf, T, cy0 + ch - (gateY + gateHalf), 'wall'); // west, south of the gate
 
-  // Gate house: two lit bastions flanking the sally port.
-  add(eastX - 30, gateY - gateHalf - 78, 120, 78, 'tower');
-  add(eastX - 30, gateY + gateHalf, 120, 78, 'tower');
-  lights.push({ x: eastX + 10, y: gateY - gateHalf - 39, speed: 0.9, sweep: 0.8 });
-  lights.push({ x: eastX + 10, y: gateY + gateHalf + 39, speed: 0.9, sweep: 0.8 });
+  // Gate house: two tall bastions flanking the sally port.
+  add(westX - 90, gateY - gateHalf - 90, 130, 90, 'tower');
+  add(westX - 90, gateY + gateHalf, 130, 90, 'tower');
+  lights.push({ x: westX - 30, y: gateY - gateHalf - 45, speed: 0.9, sweep: 0.85 });
+  lights.push({ x: westX - 30, y: gateY + gateHalf + 45, speed: 0.9, sweep: 0.85 });
 
-  /* ---------------- eight watchtowers along the wall ---------------- */
+  /* ---------------- eight watchtowers ---------------- */
   const towers: [number, number][] = [
-    [cx0 - 12, cy0 - 12], [cx0 + cw - 100, cy0 - 12],
-    [cx0 - 12, cy0 + ch - 124], [cx0 + cw - 100, cy0 + ch - 124],
-    [cx0 + cw / 2 - 44, cy0 - 14], [cx0 + cw / 2 - 44, cy0 + ch - 126],
-    [cx0 - 14, cy0 + ch / 2 - 44], [cx0 + cw / 2 - 44, cy0 + ch / 2 - 44],
+    [cx0 - 14, cy0 - 14], [cx0 + cw - 100, cy0 - 14],
+    [cx0 - 14, cy0 + ch - 126], [cx0 + cw - 100, cy0 + ch - 126],
+    [cx0 + cw / 2 - 44, cy0 - 16], [cx0 + cw / 2 - 44, cy0 + ch - 128],
+    [cx0 + cw / 2 - 44, cy0 + ch / 3 - 44], [cx0 + cw / 2 - 44, cy0 + (ch * 2) / 3 - 44],
   ];
   for (const [tx, ty] of towers) {
     add(tx, ty, 88, 88, 'tower');
     lights.push({ x: tx + 44, y: ty + 44, speed: 0.55, sweep: 1.25 });
   }
 
-  /* ---------------- the cell house and its outbuildings ---------------- */
-  add(cx0 + 300, cy0 + 250, cw - 640, 620, 'keep');                      // main cell house
-  add(cx0 + 180, cy0 + 930, 320, 190, 'bunker');                         // west administration wing
-  add(cx0 + cw - 500, cy0 + 930, 320, 190, 'bunker');                    // east administration wing
-  add(cx0 + cw / 2 - 150, cy0 + 930, 300, 120, 'warehouse');             // intake / processing hall
-  add(cx0 + 150, cy0 + 180, 240, 150, 'barrack');                        // workshop A
-  add(cx0 + 150, cy0 + 380, 240, 150, 'barrack');                        // workshop B
-  add(cx0 + cw - 390, cy0 + 180, 240, 150, 'barrack');                   // laundry
-  add(cx0 + cw - 390, cy0 + 380, 240, 150, 'barrack');                   // chapel
-  add(cx0 + 70, cy0 + 620, 90, 90, 'checkpoint');                        // west gate post
-  add(cx0 + cw - 160, cy0 + 620, 90, 90, 'checkpoint');                  // east gate post
-  add(cx0 + 210, cy0 + 1180, 120, 90, 'armory');                         // armoury
-  add(cx0 + cw - 330, cy0 + 1180, 120, 90, 'armory');                    // second armoury
+  /* ---------------- the prison itself: one big, readable building ---------------- */
+  // Main cell house: the mass you see from the bridge.
+  add(cx0 + 250, cy0 + 210, cw - 500, 620, 'keep');
+  // Service wings that make the facade read as a government complex.
+  add(cx0 + 150, cy0 + 900, 380, 230, 'bunker');
+  add(cx0 + cw - 530, cy0 + 900, 380, 230, 'bunker');
+  add(cx0 + cw / 2 - 170, cy0 + 900, 340, 150, 'warehouse');      // intake / processing
+  // Inner yard, fence with a gate on the axis, and the workshops behind it.
+  add(cx0 + 60, cy0 + 830, 560, 20, 'fence');
+  add(cx0 + cw - 60 - 560, cy0 + 830, 560, 20, 'fence');
+  add(cx0 + 90, cy0 + 180, 200, 120, 'barrack');
+  add(cx0 + cw - 290, cy0 + 180, 200, 120, 'barrack');
+  add(cx0 + 80, cy0 + 1180, 120, 90, 'armory');
+  add(cx0 + cw - 200, cy0 + 1180, 120, 90, 'armory');
 
-  // Inner fence that splits the yard from the vehicle apron, with a gap on the gate axis.
-  add(cx0 + 60, cy0 + 830, 620, 20, 'fence');
-  add(cx0 + cw - 60 - 640, cy0 + 830, 640, 20, 'fence');
+  // Forecourt in front of the gate: where the detail musters.
+  zones.push({ x: westX - 420, y: gateY - 330, w: 420, h: 660, kind: 'concrete' });
+  zones.push({ x: cx0 + 300, y: cy0 + 880, w: cw - 600, h: 200, kind: 'parade' });
+  zones.push({ x: cx0 + cw / 2 - 150, y: cy0 + 1150, w: 300, h: 300, kind: 'helipad' });
 
-  /* ---------------- yard clutter: crates, drums, parked transports ---------------- */
+  // Yard clutter: crates, transports, drums.
   const yardBits: [number, number, StructKind][] = [
-    [cx0 + 120, cy0 + 1040, 'crate'], [cx0 + 190, cy0 + 1040, 'crate'], [cx0 + 155, cy0 + 1105, 'crate'],
-    [cx0 + cw - 220, cy0 + 1040, 'crate'], [cx0 + cw - 150, cy0 + 1040, 'crate'],
-    [cx0 + 300, cy0 + 1290, 'truck'], [cx0 + 520, cy0 + 1290, 'truck'], [cx0 + 300, cy0 + 1420, 'truck'],
-    [cx0 + cw - 400, cy0 + 1290, 'truck'], [cx0 + cw - 400, cy0 + 1420, 'truck'],
-    [cx0 + 90, cy0 + 300, 'crate'], [cx0 + cw - 150, cy0 + 320, 'crate'],
-    [cx0 + 90, cy0 + 520, 'crate'], [cx0 + cw - 150, cy0 + 540, 'crate'],
+    [cx0 + 120, cy0 + 1000, 'crate'], [cx0 + 190, cy0 + 1000, 'crate'], [cx0 + 155, cy0 + 1065, 'crate'],
+    [cx0 + cw - 220, cy0 + 1000, 'crate'], [cx0 + cw - 150, cy0 + 1000, 'crate'],
+    [cx0 + 330, cy0 + 1230, 'truck'], [cx0 + 540, cy0 + 1230, 'truck'], [cx0 + 330, cy0 + 1300, 'truck'],
+    [cx0 + cw - 420, cy0 + 1230, 'truck'], [cx0 + cw - 420, cy0 + 1300, 'truck'],
+    [cx0 + 100, cy0 + 380, 'crate'], [cx0 + cw - 160, cy0 + 400, 'crate'],
   ];
   for (const [bx, by, kind] of yardBits) add(bx, by, kind === 'truck' ? 96 : 62, kind === 'truck' ? 190 : 62, kind);
 
-  // Parade ground in front of the cell house, and a helipad inside the walls.
-  zones.push({ x: cx0 + 340, y: cy0 + 900, w: cw - 680, h: 220, kind: 'parade' });
-  zones.push({ x: cx0 + cw / 2 - 150, y: cy0 + 1150, w: 300, h: 300, kind: 'helipad' });
-  // Vehicle apron inside the gate.
-  zones.push({ x: eastX - 340, y: gateY - 130, w: 340, h: 260, kind: 'concrete' });
+  /* ---------------- the prison detail ---------------- */
+  policePosts.push(
+    { x: westX - 200, y: gateY - 180 }, { x: westX - 200, y: gateY + 180 },
+    { x: westX - 330, y: gateY }, { x: westX - 120, y: gateY },
+    { x: cx0 + cw / 2, y: gateY + 120 }, { x: cx0 + cw / 2 + 180, y: gateY - 140 },
+  );
 
-  /* ---------------- shore rocks on the beach ---------------- */
-  for (let i = 0; i < 16; i++) {
-    const a = (i / 16) * Math.PI * 2 + 0.35;
-    const rx = LAND.x + LAND.w / 2 + Math.cos(a) * (LAND.w / 2 - 40);
-    const ry = LAND.y + LAND.h / 2 + Math.sin(a) * (LAND.h / 2 - 40);
-    add(rx - 24, ry - 20, 48 + (i % 3) * 14, 40 + (i % 4) * 10, 'crate');
+  /* ---------------- shore rocks ---------------- */
+  for (let i = 0; i < 18; i++) {
+    const a = (i / 18) * Math.PI * 2 + 0.3;
+    const rx = LAND.x + LAND.w / 2 + Math.cos(a) * (LAND.w / 2 - 36);
+    const ry = LAND.y + LAND.h / 2 + Math.sin(a) * (LAND.h / 2 - 36);
+    add(rx - 26, ry - 22, 52 + (i % 3) * 14, 44 + (i % 4) * 10, 'crate');
   }
 
-  /* ---------------- the approach, last so beach and grass cannot paint over it ---------------- */
-  // Causeway rails across the water gap.
-  add(CAUSEWAY.x, CAUSEWAY.y - 12, CAUSEWAY.w, 12, 'fence');
-  add(CAUSEWAY.x, CAUSEWAY.y + CAUSEWAY.h, CAUSEWAY.w, 12, 'fence');
-  zones.push({ x: CAUSEWAY.x, y: CAUSEWAY.y, w: CAUSEWAY.w, h: CAUSEWAY.h, kind: 'concrete' });
-  // Road from the sally port across the island's east shoulder to the causeway.
-  zones.push({ x: eastX, y: gateY - 120, w: CAUSEWAY.x + 20 - eastX, h: 240, kind: 'road' });
+  /* ---------------- roads last, so beach and grass cannot paint over them ---------------- */
+  // Mainland approach along the coast.
+  zones.push({ x: LEGACY_W - 520, y: byC - 150, w: (COAST.x + COAST.w) - (LEGACY_W - 520), h: 300, kind: 'road' });
+  // Bridge deck.
+  zones.push({ x: BRIDGE.x, y: BRIDGE.y, w: BRIDGE.w, h: BRIDGE.h, kind: 'road' });
+  // Island road from the bridge head to the forecourt.
+  zones.push({ x: bx1 - 20, y: byC - 150, w: (westX - 420) - (bx1 - 20), h: 300, kind: 'road' });
 
-  return { rects, zones, lights };
+  return { rects, zones, lights, policePosts };
 }

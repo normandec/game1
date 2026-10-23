@@ -3,23 +3,26 @@
  * 10x larger theatre with a colossal fortress HQ.
  * ------------------------------------------------------------------ */
 
-import { PRISON_LAND_W } from './prisonIsland';
+import { PRISON_EAST } from './prisonIsland';
 import { populateFacilities, type Facility, type FacilityGuard } from './facilities';
 import {
-  addCampaignSites, CORE_GOLIATH, CORE_MNEMOSYNE, CORE_HQ_YARD, CORE_KRAKEN_YARD,
-  type CampaignSites, type PatrolRoute,
+  addCampaignSites, GOLIATH, MNEMOSYNE, HQ_YARD, KRAKEN_YARD, type CampaignSites, type PatrolRoute,
 } from './campaignSites';
 import { buildPowerYard, type PowerCell, type PowerSite } from './powerGrid';
 
 /**
- * The legacy theatre (12000 × 8200) is generated first and then shifted east by
- * PRISON_LAND_W, which is how the map gained its western coast: the prison island lives
- * in brand-new ground instead of a lagoon painted over existing bases.
+ * The legacy theatre is 12000 × 8200, and it is NEVER moved: not a single existing
+ * structure changes coordinates when the prison is added. Instead the world is extended
+ * eastward by PRISON_EAST metres of brand-new ground (open water, the island and its
+ * causeway bridge). Generation below still runs in the legacy frame; the expansion is
+ * laid on top of the untouched map.
  */
 const GEN_W = 12000;
 export const GEN_H = 8200;
-export const ARENA_W = GEN_W + PRISON_LAND_W;
+export const ARENA_W = GEN_W + PRISON_EAST;
 export const ARENA_H = GEN_H;
+/** East edge of the legacy theatre: the new ground begins here. */
+export const LEGACY_W = GEN_W;
 
 export interface SectorTheme {
   id: number; name: string; codename: string; brief: string;
@@ -74,17 +77,16 @@ export interface PoiDef {
   gates: { x: number; y: number }[];
 }
 
-/* Fortress layout (center-north of the map).
- * CORE_* values live in the generation frame; the exported ones are in final world space. */
+/* Fortress layout (center-north of the map). These are final world coordinates. */
 const CORE_HQ = { cx: GEN_W / 2, cy: 2150, w: 3900, h: 2950 };
-export const HQ = { ...CORE_HQ, cx: CORE_HQ.cx + PRISON_LAND_W };
+export const HQ = { ...CORE_HQ };
 
 const CORE_PLAYER_START = { x: GEN_W / 2, y: ARENA_H - 1400 };
-export const PLAYER_START = { x: CORE_PLAYER_START.x + PRISON_LAND_W, y: CORE_PLAYER_START.y };
+export const PLAYER_START = { ...CORE_PLAYER_START };
 const CORE_VAULT_ENTRY = { x: 980, y: 7040 };
-export const VAULT_ENTRY = { x: CORE_VAULT_ENTRY.x + PRISON_LAND_W, y: CORE_VAULT_ENTRY.y };
+export const VAULT_ENTRY = { ...CORE_VAULT_ENTRY };
 const CORE_AIRFIELD = { x: 9650, y: 4400, w: 3300, h: 2500 };
-export const AIRFIELD = { ...CORE_AIRFIELD, x: CORE_AIRFIELD.x + PRISON_LAND_W };
+export const AIRFIELD = { ...CORE_AIRFIELD };
 
 const rnd = (a: number, b: number) => a + Math.random() * (b - a);
 
@@ -194,9 +196,9 @@ export function generateWorld(sector = 1): WorldData {
   const laserSpots: { x: number; y: number }[] = [];
   /** Ground owned by named installations: never scatter clutter or outposts on it. */
   const reservedSites: { x: number; y: number; w: number; h: number }[] = [];
-  // THE CAGE approach lane: the causeway has to reach the western coast through clear
-  // ground, so this corridor is reserved before any random structure is placed.
-  reservedSites.push({ x: 0, y: 1760, w: 2400, h: 560 });
+  // THE CAGE: the whole eastern extension is new ground — nothing random may be built
+  // there, and the eastern rampart is opened so the two halves join into one map.
+  reservedSites.push({ x: GEN_W - 400, y: 0, w: PRISON_EAST + 400, h: GEN_H });
   const pois: PoiDef[] = [];
   const facilities: Facility[] = [];
   const facilityGuards: FacilityGuard[] = [];
@@ -468,7 +470,7 @@ export function generateWorld(sector = 1): WorldData {
     for (const rs of reservedSites) {
       if (x < rs.x + rs.w + 150 && x + w > rs.x - 150 && y < rs.y + rs.h + 150 && y + h > rs.y - 150) return false;
     }
-    for (const site of [CORE_GOLIATH, CORE_MNEMOSYNE]) {
+    for (const site of [GOLIATH, MNEMOSYNE]) {
       if (x < site.x + site.w / 2 + 110 && x + w > site.x - site.w / 2 - 110
         && y < site.y + site.h / 2 + 110 && y + h > site.y - site.h / 2 - 110) return false;
     }
@@ -620,17 +622,17 @@ export function generateWorld(sector = 1): WorldData {
   };
   const hqYard = buildYard({
     id: 'fortress-power', name: 'FORTRESS FEEDER YARD', code: 'PWR-H',
-    cx: CORE_HQ_YARD.cx, cy: CORE_HQ_YARD.cy, generators: 3, servers: 2, defenders: 4, patrolTeams: 2,
+    cx: HQ_YARD.cx, cy: HQ_YARD.cy, generators: 3, servers: 2, defenders: 4, patrolTeams: 2,
   });
   const krakenYard = buildYard({
     id: 'kraken-power', name: 'KRAKEN FEEDER YARD', code: 'PWR-K',
-    cx: CORE_KRAKEN_YARD.cx, cy: CORE_KRAKEN_YARD.cy, generators: 3, servers: 2, defenders: 4, patrolTeams: 2,
+    cx: KRAKEN_YARD.cx, cy: KRAKEN_YARD.cy, generators: 3, servers: 2, defenders: 4, patrolTeams: 2,
   });
   // Service roads tying each yard to the highway network.
-  zones.push({ x: CORE_HQ_YARD.cx - 110, y: hqYard.y + hqYard.h, w: 220, h: cy - (hqYard.y + hqYard.h) + 120, kind: 'road' });
-  zones.push({ x: CORE_HQ_YARD.cx - CORE_HQ_YARD.w / 2 - 500, y: CORE_HQ_YARD.cy - 100, w: 500, h: 200, kind: 'road' });
+  zones.push({ x: HQ_YARD.cx - 110, y: hqYard.y + hqYard.h, w: 220, h: cy - (hqYard.y + hqYard.h) + 120, kind: 'road' });
+  zones.push({ x: HQ_YARD.cx - HQ_YARD.w / 2 - 500, y: HQ_YARD.cy - 100, w: 500, h: 200, kind: 'road' });
   zones.push({ x: krakenYard.x + krakenYard.w / 2 - 110, y: krakenYard.y - 320, w: 220, h: 320, kind: 'road' });
-  zones.push({ x: krakenYard.x + krakenYard.w, y: CORE_KRAKEN_YARD.cy - 100, w: CORE_AIRFIELD.x - 120 - (krakenYard.x + krakenYard.w), h: 200, kind: 'road' });
+  zones.push({ x: krakenYard.x + krakenYard.w, y: KRAKEN_YARD.cy - 100, w: CORE_AIRFIELD.x - 120 - (krakenYard.x + krakenYard.w), h: 200, kind: 'road' });
 
   /* ---- HYDRA LASER BATTERIES: two-shot annihilation, capturable ---- */
   const laserAt = (lx: number, ly: number, id: string, label: string) => {
@@ -928,51 +930,22 @@ export function generateWorld(sector = 1): WorldData {
   );
 
   /* ================================================================== *
-   * WESTWARD EXPANSION
+   * EASTWARD EXPANSION
    *
-   * Everything above was laid out in the legacy 12000-wide frame. Slide all of it east
-   * by PRISON_LAND_W so the new western coast (sea + prison island) has unused ground,
-   * then wrap the whole widened arena in fresh border ramparts.
+   * Nothing above moved: the legacy 12000 × 8200 theatre keeps every coordinate it had.
+   * The prison gets genuinely new ground east of it, enclosed by its own ramparts so the
+   * two halves read as one continuous map.
    * ================================================================== */
-  const SX = PRISON_LAND_W;
-  const shiftPt = (p: { x: number }) => { p.x += SX; };
-  const shiftPts = (arr: { x: number }[]) => { for (const p of arr) p.x += SX; };
-
-  for (const r of rects) r.x += SX;
-  for (const z of zones) z.x += SX;
-  shiftPts(serverSpots); shiftPt(generalSpot); shiftPts(coderSpots); shiftPts(garrisonSpots);
-  shiftPts(cacheSpots); shiftPts(gateSpots); shiftPts(helipads); shiftPt(hangarSpot);
-  shiftPts(beaconSpots); shiftPts(satcomSpots); shiftPts(barrelSpots); shiftPts(spotlightSpots);
-  shiftPts(vanSpots); shiftPts(paradeSpots); shiftPts(parkedHelis); shiftPts(laserSpots);
-  shiftPt(vaultSpot); shiftPt(planeSpot);
-  for (const h of hangars) { h.x += SX; h.doorX += SX; }
-  for (const f of facilities) {
-    f.x += SX;
-    for (const prop of f.props) prop.x += SX;
-    for (const door of f.doors) door.x += SX;
-  }
-  for (const g of facilityGuards) { g.x += SX; shiftPts(g.patrol); }
-  for (const poi of pois) { poi.x += SX; shiftPts(poi.gates); }
-  const cs = campaignSites;
-  for (const block of [cs.warehouse, cs.library, cs.helios]) block.x += SX;
-  shiftPts(cs.volumes); shiftPts(cs.megaCrates); shiftPts(cs.powerCells);
-  for (const route of cs.patrols) shiftPts(route.points);
-  for (const site of cs.powerSites) {
-    site.x += SX;
-    const yard = site as Partial<{ doors: { x: number }[]; padSpots: { x: number }[] }>;
-    if (yard.doors) shiftPts(yard.doors);
-    if (yard.padSpots) shiftPts(yard.padSpots);
-  }
-
-  // Mainland service road: ties the island causeway into the legacy ring road.
-  zones.push({ x: 3610, y: 1880, w: 2260, h: 240, kind: 'road' });
-
-  // Map border ramparts, now hugging the widened arena (west edge x = 0).
   const B2 = 60;
-  add(0, 0, ARENA_W, B2, 'curtain', 26);
-  add(0, ARENA_H - B2, ARENA_W, B2, 'curtain', 26);
-  add(0, 0, B2, ARENA_H, 'curtain', 26);
-  add(ARENA_W - B2, 0, B2, ARENA_H, 'curtain', 26);
+  add(0, 0, GEN_W, B2, 'curtain', 26);                     // north, legacy
+  add(0, GEN_H - B2, GEN_W, B2, 'curtain', 26);            // south, legacy
+  add(0, 0, B2, GEN_H, 'curtain', 26);                     // west
+  add(GEN_W, 0, PRISON_EAST, B2, 'curtain', 26);           // north, new ground
+  add(GEN_W, GEN_H - B2, PRISON_EAST, B2, 'curtain', 26);   // south, new ground
+  add(ARENA_W - B2, 0, B2, GEN_H, 'curtain', 26);          // east edge of the extension
+
+  // Service road along the new coast, tying the bridge head into the legacy ring road.
+  zones.push({ x: GEN_W - 300, y: 3900, w: 700, h: 420, kind: 'road' });
 
   return {
     rects, zones, serverSpots, generalSpot, coderSpots, garrisonSpots,
