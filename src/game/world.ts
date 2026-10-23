@@ -396,6 +396,31 @@ export function generateWorld(sector = 1): WorldData {
   garrisonSpots.push({ x: cx - 1400, y: Bo - 480 }, { x: cx + 1780, y: Bo - 480 });
   cacheSpots.push({ x: cx - 1400, y: Bo - 640 }, { x: L + 900, y: Bo - 480 });
 
+  // Abandoned warehouse, south-west corner of the bailey: a low, weathered shed
+  // with a caved-in south wall, an east door and old debris still inside.
+  {
+    const abW = 380, abH = 200, abT = 30;
+    const abX = L + 96, abY = Bo - 630;
+    const tint = '#4c5250';
+    zone(abX - 34, abY - 30, abW + 68, abH + 66, 'concrete');
+    // Standing shell: north and west walls, a split east wall with a door.
+    add(abX, abY, abW, abT, 'warehouse', 34, tint);
+    add(abX, abY, abT, abH, 'warehouse', 34, tint);
+    add(abX + abW - abT, abY, abT, 70, 'warehouse', 34, tint);
+    add(abX + abW - abT, abY + 130, abT, abH - 130, 'warehouse', 34, tint);
+    // The south wall has caved in: two stubs and rubble in the breach.
+    add(abX, abY + abH - abT, 140, abT, 'warehouse', 30, tint);
+    add(abX + abW - abT - 120, abY + abH - abT, 120, abT, 'warehouse', 30, tint);
+    add(abX + 150, abY + abH - 26, 40, 26, 'crate', 14, tint);
+    add(abX + abW + 20, abY + 30, 30, 24, 'crate', 8, tint);
+    // Forgotten stock left to rot under the leaking roof.
+    add(abX + 60, abY + 54, 50, 42, 'crate', 22);
+    add(abX + 130, abY + 112, 40, 32, 'crate', 16);
+    add(abX + 220, abY + 50, 56, 40, 'crate', 26);
+    add(abX + 290, abY + 118, 44, 32, 'crate', 20);
+    barrelSpots.push({ x: abX + 40, y: abY + 46 }, { x: abX + 300, y: abY + 42 }, { x: abX + 250, y: abY + 130 });
+  }
+
   // Inside the second ring: barracks, armoury cages, an inner motor pool and a pad.
   add(ringL + 60, ringB - 470, 520, 320, 'barrack', 40);
   add(ringR - 580, ringT + 60, 520, 300, 'bunker', 40);
