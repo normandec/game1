@@ -2,21 +2,42 @@ import type { WorldData, Rect, Zone, PoiDef, StructKind } from './world';
 import type { Facility, FacilityGuard } from './facilities';
 import type { Block, Point } from './navigation';
 import { buildPowerYard, yardSize, type PowerCell, type PowerSite } from './powerGrid';
+import { PRISON_LAND_W } from './prisonIsland';
 
 export type { PowerCell, PowerSite } from './powerGrid';
 export { yardSize };
 
 /* Goliath logistics fortress: six enormous warehouses around a drive-through cargo lane. */
-export const GOLIATH = { x: 2600, y: 4520, w: 2600, h: 2400 };
-export const MNEMOSYNE = { x: 2100, y: 2700, w: 920, h: 740 };
+/* ---------------------------------------------------------------- *
+ * Coordinate frames.
+ *
+ * The theatre is generated in the legacy 12000-wide frame and then shifted east by
+ * PRISON_LAND_W, which is the ground the prison island was given. Everything here keeps
+ * its CORE_* (generation frame) values; the plain names are the shifted, runtime values
+ * that the engine uses to place markers, tanks and drops.
+ * ---------------------------------------------------------------- */
+const SHIFT = () => PRISON_LAND_W;
+const dx = <T extends { x: number }>(o: T): T => ({ ...o, x: o.x + SHIFT() });
+const dcx = <T extends { cx: number }>(o: T): T => ({ ...o, cx: o.cx + SHIFT() });
+
+export const CORE_GOLIATH = { x: 2600, y: 4520, w: 2600, h: 2400 };
+export const CORE_MNEMOSYNE = { x: 2100, y: 2700, w: 920, h: 740 };
 /** HELIOS: the sector grid, standing clear of the fortress so it reads as its own stronghold. */
-export const HELIOS = { x: 7000, y: 4950, ...yardSize(12, 8) };
+export const CORE_HELIOS = { x: 7000, y: 4950, ...yardSize(12, 8) };
 /** Feeder yards attached to the other big bases (built in world.ts). */
-export const HQ_YARD = { cx: 8425, cy: 1300, ...yardSize(3, 2) };
+export const CORE_HQ_YARD = { cx: 8425, cy: 1300, ...yardSize(3, 2) };
 // South of the highway, across from Goliath's south gate: keeps the yard's service apron
 // (helipad, van park, supply crates) clear of SSR RELAY "ROSE" and the depot's east wall.
-export const GOLIATH_YARD = { cx: 4620, cy: 6600, ...yardSize(4, 3) };
-export const KRAKEN_YARD = { cx: 8700, cy: 6560, ...yardSize(3, 2) };
+export const CORE_GOLIATH_YARD = { cx: 4620, cy: 6600, ...yardSize(4, 3) };
+export const CORE_KRAKEN_YARD = { cx: 8700, cy: 6560, ...yardSize(3, 2) };
+
+/* Runtime (final world space) copies. */
+export const GOLIATH = dx(CORE_GOLIATH);
+export const MNEMOSYNE = dx(CORE_MNEMOSYNE);
+export const HELIOS = dx(CORE_HELIOS);
+export const HQ_YARD = dcx(CORE_HQ_YARD);
+export const GOLIATH_YARD = dcx(CORE_GOLIATH_YARD);
+export const KRAKEN_YARD = dcx(CORE_KRAKEN_YARD);
 
 export interface PatrolRoute {
   id: string; points: Point[]; members: string[];
@@ -44,8 +65,8 @@ interface Context {
 }
 
 export function addCampaignSites(c: Context): CampaignSites {
-  const depot = { x: GOLIATH.x - GOLIATH.w / 2, y: GOLIATH.y - GOLIATH.h / 2, w: GOLIATH.w, h: GOLIATH.h };
-  const archive = { x: MNEMOSYNE.x - MNEMOSYNE.w / 2, y: MNEMOSYNE.y - MNEMOSYNE.h / 2, w: MNEMOSYNE.w, h: MNEMOSYNE.h };
+  const depot = { x: CORE_GOLIATH.x - CORE_GOLIATH.w / 2, y: CORE_GOLIATH.y - CORE_GOLIATH.h / 2, w: CORE_GOLIATH.w, h: CORE_GOLIATH.h };
+  const archive = { x: CORE_MNEMOSYNE.x - CORE_MNEMOSYNE.w / 2, y: CORE_MNEMOSYNE.y - CORE_MNEMOSYNE.h / 2, w: CORE_MNEMOSYNE.w, h: CORE_MNEMOSYNE.h };
   const patrols: PatrolRoute[] = [];
   const powerCells: PowerCell[] = [];
   const powerSites: PowerSite[] = [];
@@ -85,7 +106,7 @@ export function addCampaignSites(c: Context): CampaignSites {
   c.zones.push({ x: depot.x - 70, y: depot.y - 70, w: depot.w + 140, h: depot.h + 140, kind: 'concrete' });
   const entrances = enclose(depot, 'curtain', 360, 40, true);
   c.pois.push({
-    id: 'goliath', kind: 'depot', x: GOLIATH.x, y: GOLIATH.y, r: 1500,
+    id: 'goliath', kind: 'depot', x: CORE_GOLIATH.x, y: CORE_GOLIATH.y, r: 1500,
     name: 'GOLIATH LOGISTICS FORTRESS', sub: 'SIX WAREHOUSES / MOTOR COLUMN / FLIGHT CARGO',
     secret: false, gates: entrances,
   });
@@ -165,8 +186,8 @@ export function addCampaignSites(c: Context): CampaignSites {
   }
 
   // Central cargo lane: the depot's vehicle spine, running out through the south gate.
-  c.zones.push({ x: GOLIATH.x - LANE / 2, y: depot.y, w: LANE, h: depot.h, kind: 'road' });
-  c.zones.push({ x: GOLIATH.x - 110, y: depot.y + depot.h, w: 220, h: 700, kind: 'road' });
+  c.zones.push({ x: CORE_GOLIATH.x - LANE / 2, y: depot.y, w: LANE, h: depot.h, kind: 'road' });
+  c.zones.push({ x: CORE_GOLIATH.x - 110, y: depot.y + depot.h, w: 220, h: 700, kind: 'road' });
   // Cross aisles double as the motor pool: ranks of transports between the warehouses.
   aisleY.forEach((ay, i) => {
     c.zones.push({ x: depot.x + 60, y: ay - 150, w: depot.w - 120, h: 300, kind: 'concrete' });
@@ -186,13 +207,13 @@ export function addCampaignSites(c: Context): CampaignSites {
   for (const x of [depot.x + 46, depot.x + depot.w - 46]) {
     for (const y of [depot.y + 46, depot.y + depot.h - 46]) c.lights.push({ x, y, speed: 0.53, sweep: 1.05, site: 'goliath-power' });
   }
-  c.lights.push({ x: GOLIATH.x - 200, y: depot.y + 24, speed: 0.66, sweep: 0.9, site: 'goliath-power' });
-  c.lights.push({ x: GOLIATH.x + 200, y: depot.y + depot.h - 24, speed: 0.72, sweep: 0.9, site: 'goliath-power' });
+  c.lights.push({ x: CORE_GOLIATH.x - 200, y: depot.y + 24, speed: 0.66, sweep: 0.9, site: 'goliath-power' });
+  c.lights.push({ x: CORE_GOLIATH.x + 200, y: depot.y + depot.h - 24, speed: 0.72, sweep: 0.9, site: 'goliath-power' });
   c.garrison.push({ x: depot.x + 150, y: depot.y + 150 }, { x: depot.x + depot.w - 150, y: depot.y + 150 },
     { x: depot.x + 150, y: depot.y + depot.h - 150 }, { x: depot.x + depot.w - 150, y: depot.y + depot.h - 150 });
   // Service strip between the depot's north wall and the bay headers, and the matching
   // strip at the south end: both stay clear of the 30px header courses.
-  c.caches.push({ x: GOLIATH.x - 210, y: depot.y + 65 }, { x: GOLIATH.x + 210, y: depot.y + depot.h - 65 });
+  c.caches.push({ x: CORE_GOLIATH.x - 210, y: depot.y + 65 }, { x: CORE_GOLIATH.x + 210, y: depot.y + depot.h - 65 });
 
   /* --- Giant experimental crates stocked in Goliath's bays --- */
   const mid = (n: number) => ({ x: bays[n - 1].x + bays[n - 1].w / 2, y: bays[n - 1].y + bays[n - 1].h / 2 });
@@ -218,7 +239,7 @@ export function addCampaignSites(c: Context): CampaignSites {
    * ================================================================== */
   const helios = buildPowerYard({
     id: 'helios', name: 'HELIOS POWER COMPLEX', code: 'PWR-X',
-    cx: HELIOS.x, cy: HELIOS.y, generators: 12, servers: 8,
+    cx: CORE_HELIOS.x, cy: CORE_HELIOS.y, generators: 12, servers: 8,
     defenders: 10, patrolTeams: 4, major: true, poi: true,
   }, yardCtx);
   powerCells.push(...helios.cells);
@@ -226,24 +247,24 @@ export function addCampaignSites(c: Context): CampaignSites {
   c.pads.push(...helios.padSpots);
   const grid: Block = { x: helios.x, y: helios.y, w: helios.w, h: helios.h };
   // Service roads: highway spur from the north, ring-road spur from the south.
-  c.zones.push({ x: HELIOS.x - 110, y: HELIOS.y - HELIOS.h / 2 - 1000, w: 220, h: 1000, kind: 'road' });
-  c.zones.push({ x: HELIOS.x - 110, y: HELIOS.y + HELIOS.h / 2, w: 220, h: 900, kind: 'road' });
-  c.zones.push({ x: HELIOS.x - HELIOS.w / 2 - 700, y: HELIOS.y - 100, w: 700, h: 200, kind: 'road' });
+  c.zones.push({ x: CORE_HELIOS.x - 110, y: CORE_HELIOS.y - CORE_HELIOS.h / 2 - 1000, w: 220, h: 1000, kind: 'road' });
+  c.zones.push({ x: CORE_HELIOS.x - 110, y: CORE_HELIOS.y + CORE_HELIOS.h / 2, w: 220, h: 900, kind: 'road' });
+  c.zones.push({ x: CORE_HELIOS.x - CORE_HELIOS.w / 2 - 700, y: CORE_HELIOS.y - 100, w: 700, h: 200, kind: 'road' });
   patrols.push(
     {
       id: 'helios-column', columns: 4, spacing: 40, speed: 52, kind: 'foot', site: 'helios',
-      points: [{ x: HELIOS.x - HELIOS.w / 2 - 260, y: grid.y - 260 }, { x: HELIOS.x + HELIOS.w / 2 + 260, y: grid.y - 260 },
-        { x: HELIOS.x + HELIOS.w / 2 + 260, y: grid.y + grid.h + 260 }, { x: HELIOS.x - HELIOS.w / 2 - 260, y: grid.y + grid.h + 260 }],
+      points: [{ x: CORE_HELIOS.x - CORE_HELIOS.w / 2 - 260, y: grid.y - 260 }, { x: CORE_HELIOS.x + CORE_HELIOS.w / 2 + 260, y: grid.y - 260 },
+        { x: CORE_HELIOS.x + CORE_HELIOS.w / 2 + 260, y: grid.y + grid.h + 260 }, { x: CORE_HELIOS.x - CORE_HELIOS.w / 2 - 260, y: grid.y + grid.h + 260 }],
       members: ['warden', 'grunt', 'grunt', 'grunt', 'gunner', 'grunt', 'grunt', 'medic', 'grunt', 'grunt', 'grunt', 'flamer'],
     },
     {
       id: 'helios-road-north', columns: 2, spacing: 50, speed: 62, kind: 'road', site: 'helios',
-      points: [{ x: HELIOS.x, y: HELIOS.y - HELIOS.h / 2 - 940 }, { x: HELIOS.x, y: HELIOS.y - HELIOS.h / 2 - 120 }],
+      points: [{ x: CORE_HELIOS.x, y: CORE_HELIOS.y - CORE_HELIOS.h / 2 - 940 }, { x: CORE_HELIOS.x, y: CORE_HELIOS.y - CORE_HELIOS.h / 2 - 120 }],
       members: ['sentinel', 'pathfinder', 'grunt', 'grunt', 'grunt', 'grunt', 'pathfinder', 'medic'],
     },
     {
       id: 'helios-road-south', columns: 2, spacing: 50, speed: 60, kind: 'road', site: 'helios',
-      points: [{ x: HELIOS.x, y: HELIOS.y + HELIOS.h / 2 + 840 }, { x: HELIOS.x, y: HELIOS.y + HELIOS.h / 2 + 120 }],
+      points: [{ x: CORE_HELIOS.x, y: CORE_HELIOS.y + CORE_HELIOS.h / 2 + 840 }, { x: CORE_HELIOS.x, y: CORE_HELIOS.y + CORE_HELIOS.h / 2 + 120 }],
       members: ['commander', 'warden', 'grunt', 'grunt', 'gunner', 'grunt', 'breacher', 'guard'],
     },
   );
@@ -251,15 +272,15 @@ export function addCampaignSites(c: Context): CampaignSites {
   /* --- Goliath's own feeder yard keeps the warehouses lit --- */
   const goliathYard = buildPowerYard({
     id: 'goliath-power', name: 'GOLIATH FEEDER YARD', code: 'PWR-G',
-    cx: GOLIATH_YARD.cx, cy: GOLIATH_YARD.cy, generators: 4, servers: 3, defenders: 4, patrolTeams: 2,
+    cx: CORE_GOLIATH_YARD.cx, cy: CORE_GOLIATH_YARD.cy, generators: 4, servers: 3, defenders: 4, patrolTeams: 2,
   }, yardCtx);
   powerCells.push(...goliathYard.cells);
   powerSites.push(goliathYard);
   c.pads.push(...goliathYard.padSpots);
   // Highway spur: depot's south face -> feeder yard's north gate.
   c.zones.push({
-    x: GOLIATH_YARD.cx - 110, y: depot.y + depot.h, w: 220,
-    h: GOLIATH_YARD.cy - GOLIATH_YARD.h / 2 - depot.y - depot.h, kind: 'road',
+    x: CORE_GOLIATH_YARD.cx - 110, y: depot.y + depot.h, w: 220,
+    h: CORE_GOLIATH_YARD.cy - CORE_GOLIATH_YARD.h / 2 - depot.y - depot.h, kind: 'road',
   });
   patrols.push({
     id: 'goliath-yard-ring', columns: 2, spacing: 48, speed: 58, kind: 'road', site: 'goliath-power',
@@ -278,7 +299,7 @@ export function addCampaignSites(c: Context): CampaignSites {
   const library: Facility = { ...archive, id: 'mnemosyne', code: 'SSR-0', kind: 'library', name: 'MNEMOSYNE LIBRARY', props: [], roofed: true, doors: libraryDoors };
   c.facilities.push(library);
   c.pois.push({
-    id: 'mnemosyne', kind: 'library', x: MNEMOSYNE.x, y: MNEMOSYNE.y, r: 550,
+    id: 'mnemosyne', kind: 'library', x: CORE_MNEMOSYNE.x, y: CORE_MNEMOSYNE.y, r: 550,
     name: 'MNEMOSYNE LIBRARY', sub: 'THE LAST WATCH / THE FIRST OATH / THE SECOND DAWN',
     secret: true, gates: libraryDoors,
   });
@@ -289,19 +310,19 @@ export function addCampaignSites(c: Context): CampaignSites {
   for (const side of [0, 1]) for (let i = 0; i < 4; i++) {
     shelf(archive.x + (side ? archive.w - 300 : 70), archive.y + 70 + i * 147);
   }
-  add(MNEMOSYNE.x - 74, MNEMOSYNE.y - 70, 148, 110, 'library', 26, true);
-  library.props.push({ kind: 'table', x: MNEMOSYNE.x - 74, y: MNEMOSYNE.y - 70, w: 148, h: 110, solid: true, color: '#d6b982' });
+  add(CORE_MNEMOSYNE.x - 74, CORE_MNEMOSYNE.y - 70, 148, 110, 'library', 26, true);
+  library.props.push({ kind: 'table', x: CORE_MNEMOSYNE.x - 74, y: CORE_MNEMOSYNE.y - 70, w: 148, h: 110, solid: true, color: '#d6b982' });
   library.props.push({ kind: 'cable', x: archive.x + 40, y: archive.y + archive.h - 40, w: archive.w - 80, h: 16, solid: false, color: '#8a7a5c' });
   const volumes: LibraryVolume[] = [
-    { x: MNEMOSYNE.x - 143, y: MNEMOSYNE.y - 206, number: 1, read: false },
-    { x: MNEMOSYNE.x + 143, y: MNEMOSYNE.y + 202, number: 2, read: false },
-    { x: MNEMOSYNE.x + 143, y: MNEMOSYNE.y - 206, number: 3, read: false },
+    { x: CORE_MNEMOSYNE.x - 143, y: CORE_MNEMOSYNE.y - 206, number: 1, read: false },
+    { x: CORE_MNEMOSYNE.x + 143, y: CORE_MNEMOSYNE.y + 202, number: 2, read: false },
+    { x: CORE_MNEMOSYNE.x + 143, y: CORE_MNEMOSYNE.y - 206, number: 3, read: false },
   ];
   ['sentinel', 'pathfinder', 'guard', 'warden', 'guard', 'medic', 'sentinel', 'guard'].forEach((type, i) => c.guards.push({
-    x: MNEMOSYNE.x + (i % 2 ? 94 : -94), y: archive.y + 140 + Math.floor(i / 2) * 165,
+    x: CORE_MNEMOSYNE.x + (i % 2 ? 94 : -94), y: archive.y + 140 + Math.floor(i / 2) * 165,
     type, facilityId: 'mnemosyne', role: i === 0 ? 'leader' : i === 5 ? 'support' : 'sentry', patrol: [],
   }));
-  c.caches.push({ x: MNEMOSYNE.x - 80, y: archive.y + archive.h - 92 });
+  c.caches.push({ x: CORE_MNEMOSYNE.x - 80, y: archive.y + archive.h - 92 });
 
   /* ================================================================== *
    * ROAD & APRON PATROLS — ranks and columns on the highway network
@@ -315,7 +336,7 @@ export function addCampaignSites(c: Context): CampaignSites {
     },
     {
       id: 'goliath-lane', columns: 2, spacing: 52, speed: 50, kind: 'road', site: 'goliath-power',
-      points: [{ x: GOLIATH.x, y: depot.y + 140 }, { x: GOLIATH.x, y: depot.y + depot.h - 140 }],
+      points: [{ x: CORE_GOLIATH.x, y: depot.y + 140 }, { x: CORE_GOLIATH.x, y: depot.y + depot.h - 140 }],
       members: ['grunt', 'grunt', 'gunner', 'grunt', 'grunt', 'gunner', 'grunt', 'grunt', 'medic', 'grunt'],
     },
     {

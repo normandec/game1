@@ -3,12 +3,23 @@
  * 10x larger theatre with a colossal fortress HQ.
  * ------------------------------------------------------------------ */
 
+import { PRISON_LAND_W } from './prisonIsland';
 import { populateFacilities, type Facility, type FacilityGuard } from './facilities';
-import { addCampaignSites, GOLIATH, MNEMOSYNE, HQ_YARD, KRAKEN_YARD, type CampaignSites, type PatrolRoute } from './campaignSites';
+import {
+  addCampaignSites, CORE_GOLIATH, CORE_MNEMOSYNE, CORE_HQ_YARD, CORE_KRAKEN_YARD,
+  type CampaignSites, type PatrolRoute,
+} from './campaignSites';
 import { buildPowerYard, type PowerCell, type PowerSite } from './powerGrid';
 
-export const ARENA_W = 12000;
-export const ARENA_H = 8200;
+/**
+ * The legacy theatre (12000 × 8200) is generated first and then shifted east by
+ * PRISON_LAND_W, which is how the map gained its western coast: the prison island lives
+ * in brand-new ground instead of a lagoon painted over existing bases.
+ */
+const GEN_W = 12000;
+export const GEN_H = 8200;
+export const ARENA_W = GEN_W + PRISON_LAND_W;
+export const ARENA_H = GEN_H;
 
 export interface SectorTheme {
   id: number; name: string; codename: string; brief: string;
@@ -63,17 +74,17 @@ export interface PoiDef {
   gates: { x: number; y: number }[];
 }
 
-/* Fortress layout (center-north of the map) */
-export const HQ = {
-  cx: ARENA_W / 2,
-  cy: 2150,
-  w: 3900,
-  h: 2950,
-};
+/* Fortress layout (center-north of the map).
+ * CORE_* values live in the generation frame; the exported ones are in final world space. */
+const CORE_HQ = { cx: GEN_W / 2, cy: 2150, w: 3900, h: 2950 };
+export const HQ = { ...CORE_HQ, cx: CORE_HQ.cx + PRISON_LAND_W };
 
-export const PLAYER_START = { x: ARENA_W / 2, y: ARENA_H - 1400 };
-export const VAULT_ENTRY = { x: 980, y: 7040 };
-export const AIRFIELD = { x: 9650, y: 4400, w: 3300, h: 2500 };
+const CORE_PLAYER_START = { x: GEN_W / 2, y: ARENA_H - 1400 };
+export const PLAYER_START = { x: CORE_PLAYER_START.x + PRISON_LAND_W, y: CORE_PLAYER_START.y };
+const CORE_VAULT_ENTRY = { x: 980, y: 7040 };
+export const VAULT_ENTRY = { x: CORE_VAULT_ENTRY.x + PRISON_LAND_W, y: CORE_VAULT_ENTRY.y };
+const CORE_AIRFIELD = { x: 9650, y: 4400, w: 3300, h: 2500 };
+export const AIRFIELD = { ...CORE_AIRFIELD, x: CORE_AIRFIELD.x + PRISON_LAND_W };
 
 const rnd = (a: number, b: number) => a + Math.random() * (b - a);
 
@@ -183,6 +194,9 @@ export function generateWorld(sector = 1): WorldData {
   const laserSpots: { x: number; y: number }[] = [];
   /** Ground owned by named installations: never scatter clutter or outposts on it. */
   const reservedSites: { x: number; y: number; w: number; h: number }[] = [];
+  // THE CAGE approach lane: the causeway has to reach the western coast through clear
+  // ground, so this corridor is reserved before any random structure is placed.
+  reservedSites.push({ x: 0, y: 1760, w: 2400, h: 560 });
   const pois: PoiDef[] = [];
   const facilities: Facility[] = [];
   const facilityGuards: FacilityGuard[] = [];
@@ -192,15 +206,11 @@ export function generateWorld(sector = 1): WorldData {
     rects.push({ x, y, w, h, kind, h3d, tint });
   };
 
-  /* ---------------- Map border ramparts ---------------- */
-  const B = 60;
-  add(0, 0, ARENA_W, B, 'curtain', 26);
-  add(0, ARENA_H - B, ARENA_W, B, 'curtain', 26);
-  add(0, 0, B, ARENA_H, 'curtain', 26);
-  add(ARENA_W - B, 0, B, ARENA_H, 'curtain', 26);
+  /* Map border ramparts are added after the westward expansion (see the tail of this
+   * function): they have to enclose the widened arena, not the legacy frame. */
 
   /* ---------------- THE FORTRESS ---------------- */
-  const { cx, cy, w: FW, h: FH } = HQ;
+  const { cx, cy, w: FW, h: FH } = CORE_HQ;
   const L = cx - FW / 2, T = cy - FH / 2, R = cx + FW / 2, Bo = cy + FH / 2;
   // South-central aircraft bay: clear runway access through the main gate.
   const hangarSpot = { x: cx, y: Bo - 300 };
@@ -251,7 +261,7 @@ export function generateWorld(sector = 1): WorldData {
   bail(L + 190, Bo - 410, 420, 210);
   bail(R - 610, Bo - 410, 420, 210);
 
-  // Second defensive ring. Four breaches preserve routes while making the enlarged HQ feel layered.
+  // Second defensive ring. Four breaches preserve routes while making the enlarged fortress feel layered.
   const RW = 2380, RH = 1640, RT = 38, RG = 240;
   add(cx - RW / 2, cy - RH / 2, RW / 2 - RG / 2, RT, 'curtain', 36);
   add(cx + RG / 2, cy - RH / 2, RW / 2 - RG / 2, RT, 'curtain', 36);
@@ -446,19 +456,19 @@ export function generateWorld(sector = 1): WorldData {
     // never build inside the fortress footprint
     if (x < R + 260 && x + w > L - 260 && y < Bo + 260 && y + h > T - 260) return false;
     // keep the player's landing zone clear
-    if (Math.hypot(x + w / 2 - PLAYER_START.x, y + h / 2 - PLAYER_START.y) < 620) return false;
+    if (Math.hypot(x + w / 2 - CORE_PLAYER_START.x, y + h / 2 - CORE_PLAYER_START.y) < 620) return false;
     // Reserve installations and road corridors before random cover is placed.
-    if (x < AIRFIELD.x + AIRFIELD.w / 2 + 120 && x + w > AIRFIELD.x - AIRFIELD.w / 2 - 120
-      && y < AIRFIELD.y + AIRFIELD.h / 2 + 120 && y + h > AIRFIELD.y - AIRFIELD.h / 2 - 120) return false;
+    if (x < CORE_AIRFIELD.x + CORE_AIRFIELD.w / 2 + 120 && x + w > CORE_AIRFIELD.x - CORE_AIRFIELD.w / 2 - 120
+      && y < CORE_AIRFIELD.y + CORE_AIRFIELD.h / 2 + 120 && y + h > CORE_AIRFIELD.y - CORE_AIRFIELD.h / 2 - 120) return false;
     if (x < 2160 && x + w > 490 && y < 8020 && y + h > 6960) return false;
     if (x < cx + 170 && x + w > cx - 170 && y > Bo - 20) return false;
     if (y < 5990 && y + h > 5650) return false;
-    if (x < ARENA_W - 520 && x + w > ARENA_W - 780 && y > 3300) return false;
+    if (x < GEN_W - 520 && x + w > GEN_W - 780 && y > 3300) return false;
     // Named installations (power yards, depots) own their ground plus a service apron.
     for (const rs of reservedSites) {
       if (x < rs.x + rs.w + 150 && x + w > rs.x - 150 && y < rs.y + rs.h + 150 && y + h > rs.y - 150) return false;
     }
-    for (const site of [GOLIATH, MNEMOSYNE]) {
+    for (const site of [CORE_GOLIATH, CORE_MNEMOSYNE]) {
       if (x < site.x + site.w / 2 + 110 && x + w > site.x - site.w / 2 - 110
         && y < site.y + site.h / 2 + 110 && y + h > site.y - site.h / 2 - 110) return false;
     }
@@ -482,8 +492,8 @@ export function generateWorld(sector = 1): WorldData {
    * ================================================================= */
 
   /* ---- HYDRA AIR STATION KRAKEN: seven hangars, taxiway, motor pool, parade ---- */
-  const afx = AIRFIELD.x, afy = AIRFIELD.y;
-  const AFW = AIRFIELD.w, AFH = AIRFIELD.h;
+  const afx = CORE_AIRFIELD.x, afy = CORE_AIRFIELD.y;
+  const AFW = CORE_AIRFIELD.w, AFH = CORE_AIRFIELD.h;
   const afL = afx - AFW / 2, afT = afy - AFH / 2;
   const afR = afx + AFW / 2, afB = afy + AFH / 2;
   zones.push({ x: afL - 120, y: afT - 120, w: AFW + 240, h: AFH + 240, kind: 'concrete' });
@@ -610,17 +620,17 @@ export function generateWorld(sector = 1): WorldData {
   };
   const hqYard = buildYard({
     id: 'fortress-power', name: 'FORTRESS FEEDER YARD', code: 'PWR-H',
-    cx: HQ_YARD.cx, cy: HQ_YARD.cy, generators: 3, servers: 2, defenders: 4, patrolTeams: 2,
+    cx: CORE_HQ_YARD.cx, cy: CORE_HQ_YARD.cy, generators: 3, servers: 2, defenders: 4, patrolTeams: 2,
   });
   const krakenYard = buildYard({
     id: 'kraken-power', name: 'KRAKEN FEEDER YARD', code: 'PWR-K',
-    cx: KRAKEN_YARD.cx, cy: KRAKEN_YARD.cy, generators: 3, servers: 2, defenders: 4, patrolTeams: 2,
+    cx: CORE_KRAKEN_YARD.cx, cy: CORE_KRAKEN_YARD.cy, generators: 3, servers: 2, defenders: 4, patrolTeams: 2,
   });
   // Service roads tying each yard to the highway network.
-  zones.push({ x: HQ_YARD.cx - 110, y: hqYard.y + hqYard.h, w: 220, h: cy - (hqYard.y + hqYard.h) + 120, kind: 'road' });
-  zones.push({ x: HQ_YARD.cx - HQ_YARD.w / 2 - 500, y: HQ_YARD.cy - 100, w: 500, h: 200, kind: 'road' });
+  zones.push({ x: CORE_HQ_YARD.cx - 110, y: hqYard.y + hqYard.h, w: 220, h: cy - (hqYard.y + hqYard.h) + 120, kind: 'road' });
+  zones.push({ x: CORE_HQ_YARD.cx - CORE_HQ_YARD.w / 2 - 500, y: CORE_HQ_YARD.cy - 100, w: 500, h: 200, kind: 'road' });
   zones.push({ x: krakenYard.x + krakenYard.w / 2 - 110, y: krakenYard.y - 320, w: 220, h: 320, kind: 'road' });
-  zones.push({ x: krakenYard.x + krakenYard.w, y: KRAKEN_YARD.cy - 100, w: AIRFIELD.x - 120 - (krakenYard.x + krakenYard.w), h: 200, kind: 'road' });
+  zones.push({ x: krakenYard.x + krakenYard.w, y: CORE_KRAKEN_YARD.cy - 100, w: CORE_AIRFIELD.x - 120 - (krakenYard.x + krakenYard.w), h: 200, kind: 'road' });
 
   /* ---- HYDRA LASER BATTERIES: two-shot annihilation, capturable ---- */
   const laserAt = (lx: number, ly: number, id: string, label: string) => {
@@ -647,7 +657,7 @@ export function generateWorld(sector = 1): WorldData {
     });
   };
   laserAt(1500, 1500, 'laser-a', 'HYDRA BEAM SITE ALPHA');
-  laserAt(ARENA_W - 1500, ARENA_H - 1500, 'laser-b', 'HYDRA BEAM SITE OMEGA');
+  laserAt(GEN_W - 1500, GEN_H - 1500, 'laser-b', 'HYDRA BEAM SITE OMEGA');
 
   /* ---- PEGGY CARTER SSR STATIONS: old S.H.I.E.L.D. roots, Hydra-held ---- */
   const peggyAt = (px: number, py: number, id: string, label: string, sub: string) => {
@@ -667,12 +677,12 @@ export function generateWorld(sector = 1): WorldData {
       secret: false, gates: [{ x: px, y: py - 205 }],
     });
   };
-  peggyAt(1650, ARENA_H - 1500, 'peggy-a', 'SSR STATION “CARTER”', 'FOUNDED 1946 — HYDRA OCCUPIED');
+  peggyAt(1650, GEN_H - 1500, 'peggy-a', 'SSR STATION “CARTER”', 'FOUNDED 1946 — HYDRA OCCUPIED');
   peggyAt(9300, 1400, 'peggy-b', 'SSR VAULT “MARGARET”', 'ORIGINAL S.H.I.E.L.D. ARCHIVE');
   peggyAt(4620, 5450, 'peggy-c', 'SSR RELAY “ROSE”', 'PRE-HYDRA COMMS OUTPOST');
 
   /* ---- THE HIDDEN S.H.I.E.L.D. VAULT: never marked, never captured ---- */
-  const vaultSpot = { x: 980, y: ARENA_H - 780 };
+  const vaultSpot = { x: 980, y: GEN_H - 780 };
   const planeSpot = { x: vaultSpot.x + 470, y: vaultSpot.y - 60 };
   zones.push({ x: vaultSpot.x - 420, y: vaultSpot.y - 420, w: 1500, h: 840, kind: 'plaza' });
   {
@@ -687,21 +697,21 @@ export function generateWorld(sector = 1): WorldData {
     pois.push({
       id: 'vault', kind: 'vault', x: vx + 300, y: vy, r: 700,
       name: 'S.H.I.E.L.D. BLACK VAULT “ATTIC”', sub: 'NEVER FELL — AIR WING STANDING BY',
-      secret: true, gates: [{ x: VAULT_ENTRY.x, y: VAULT_ENTRY.y + 20 }],
+      secret: true, gates: [{ x: CORE_VAULT_ENTRY.x, y: CORE_VAULT_ENTRY.y + 20 }],
     });
   }
 
   // Highways radiating from the fortress
   const roadW = 190;
-  zones.push({ x: cx - roadW / 2, y: Bo, w: roadW, h: ARENA_H - Bo - 80, kind: 'road' });
+  zones.push({ x: cx - roadW / 2, y: Bo, w: roadW, h: GEN_H - Bo - 80, kind: 'road' });
   zones.push({ x: 80, y: cy - roadW / 2, w: L - 80, h: roadW, kind: 'road' });
-  zones.push({ x: R, y: cy - roadW / 2, w: ARENA_W - R - 80, h: roadW, kind: 'road' });
+  zones.push({ x: R, y: cy - roadW / 2, w: GEN_W - R - 80, h: roadW, kind: 'road' });
   zones.push({ x: cx - roadW / 2, y: 80, w: roadW, h: T - 80, kind: 'road' });
   // Ring road
-  zones.push({ x: 900, y: ARENA_H - 2400, w: ARENA_W - 1800, h: roadW, kind: 'road' });
-  zones.push({ x: 900, y: 1200, w: roadW, h: ARENA_H - 3600, kind: 'road' });
-  zones.push({ x: ARENA_W - 600, y: 1200, w: roadW, h: ARENA_H - 3600, kind: 'road' });
-  zones.push({ x: AIRFIELD.x - 120, y: AIRFIELD.y + AFH / 2, w: 240, h: 600, kind: 'road' });
+  zones.push({ x: 900, y: GEN_H - 2400, w: GEN_W - 1800, h: roadW, kind: 'road' });
+  zones.push({ x: 900, y: 1200, w: roadW, h: GEN_H - 3600, kind: 'road' });
+  zones.push({ x: GEN_W - 600, y: 1200, w: roadW, h: GEN_H - 3600, kind: 'road' });
+  zones.push({ x: CORE_AIRFIELD.x - 120, y: CORE_AIRFIELD.y + AFH / 2, w: 240, h: 600, kind: 'road' });
 
   const campaignSites = addCampaignSites({ sector: Math.max(1, Math.min(5, sector)),
     rects, zones, pois, facilities, guards: facilityGuards,
@@ -715,7 +725,7 @@ export function generateWorld(sector = 1): WorldData {
   for (const site of campaignSites.powerSites) reservedSites.push({ x: site.x - 150, y: site.y - 150, w: site.w + 300, h: site.h + 520 });
 
   populateFacilities({
-    sector: Math.max(1, Math.min(5, sector)), width: ARENA_W, height: ARENA_H,
+    sector: Math.max(1, Math.min(5, sector)), width: GEN_W, height: GEN_H,
     rects, zones, facilities, guards: facilityGuards,
     gates: gateSpots, caches: cacheSpots, spotlights: spotlightSpots,
     canPlace: noOverlap,
@@ -746,7 +756,7 @@ export function generateWorld(sector = 1): WorldData {
   let wtries = 0, built = 0;
   while (built < 30 + sectorPressure * 5 && wtries++ < 900) {
     const fw = rnd(420, 760), fh = rnd(360, 620);
-    const fx = rnd(700, ARENA_W - 700), fy = rnd(700, ARENA_H - 700);
+    const fx = rnd(700, GEN_W - 700), fy = rnd(700, GEN_H - 700);
     if (compound(fx, fy, fw, fh)) built++;
   }
 
@@ -754,7 +764,7 @@ export function generateWorld(sector = 1): WorldData {
   wtries = 0; built = 0;
   while (built < 60 + sectorPressure * 12 && wtries++ < 1600) {
     const w = rnd(180, 460), h = rnd(160, 380);
-    const x = rnd(300, ARENA_W - 300 - w), y = rnd(300, ARENA_H - 300 - h);
+    const x = rnd(300, GEN_W - 300 - w), y = rnd(300, GEN_H - 300 - h);
     if (!noOverlap(x, y, w, h, 190)) continue;
     add(x, y, w, h, 'barrack', rnd(30, 52));
     zones.push({ x: x - 40, y: y - 40, w: w + 80, h: h + 80, kind: 'concrete' });
@@ -785,7 +795,7 @@ export function generateWorld(sector = 1): WorldData {
       w = horiz ? rnd(200, 420) : 38; h = horiz ? 38 : rnd(200, 420);
       kind = 'wall'; h3 = 30;
     }
-    const x = rnd(200, ARENA_W - 200 - w), y = rnd(200, ARENA_H - 200 - h);
+    const x = rnd(200, GEN_W - 200 - w), y = rnd(200, GEN_H - 200 - h);
     if (!noOverlap(x, y, w, h, 96)) continue;
     add(x, y, w, h, kind, h3);
     built++;
@@ -795,7 +805,7 @@ export function generateWorld(sector = 1): WorldData {
   for (let i = 0; i < 70 + sectorPressure * 8; i++) {
     const w = rnd(400, 1400), h = rnd(350, 1200);
     zones.push({
-      x: rnd(100, ARENA_W - 100 - w), y: rnd(100, ARENA_H - 100 - h),
+      x: rnd(100, GEN_W - 100 - w), y: rnd(100, GEN_H - 100 - h),
       w, h, kind: sectorPressure === 2 ? 'sand' : sectorPressure === 3 ? 'concrete' : Math.random() < 0.55 ? 'sand' : 'grass',
     });
   }
@@ -803,8 +813,8 @@ export function generateWorld(sector = 1): WorldData {
   // Extra caches along the approach corridors
   for (let i = 0; i < 22; i++) {
     cacheSpots.push({
-      x: rnd(500, ARENA_W - 500),
-      y: rnd(500, ARENA_H - 500),
+      x: rnd(500, GEN_W - 500),
+      y: rnd(500, GEN_H - 500),
     });
   }
 
@@ -832,9 +842,9 @@ export function generateWorld(sector = 1): WorldData {
   // outer pads scattered near roads
   let padsPlaced = helipads.length, ptries = 0;
   while (padsPlaced < helipads.length + 5 && ptries++ < 2000) {
-    const x = rnd(700, ARENA_W - 700), y = rnd(700, ARENA_H - 700);
-    if (Math.hypot(x - cx, y - cy) < HQ.w * 0.62) continue;
-    if (Math.hypot(x - PLAYER_START.x, y - PLAYER_START.y) < 800) continue;
+    const x = rnd(700, GEN_W - 700), y = rnd(700, GEN_H - 700);
+    if (Math.hypot(x - cx, y - cy) < CORE_HQ.w * 0.62) continue;
+    if (Math.hypot(x - CORE_PLAYER_START.x, y - CORE_PLAYER_START.y) < 800) continue;
     if (!noOverlap(x - 140, y - 140, 280, 280, 100)) continue;
     pad(x, y);
     padsPlaced++;
@@ -854,9 +864,9 @@ export function generateWorld(sector = 1): WorldData {
     add(x - 50, y - 50, 100, 100, 'tower', 60);
     beaconSpots.push({ x, y: y - 74 });
   };
-  towerAt(900, 1200); towerAt(ARENA_W - 600, 1200);
-  towerAt(900, ARENA_H - 2210); towerAt(ARENA_W - 600, ARENA_H - 2210);
-  towerAt(cx, ARENA_H - 2210); towerAt(cx, 1200);
+  towerAt(900, 1200); towerAt(GEN_W - 600, 1200);
+  towerAt(900, GEN_H - 2210); towerAt(GEN_W - 600, GEN_H - 2210);
+  towerAt(cx, GEN_H - 2210); towerAt(cx, 1200);
 
   // SATCOM arrays — secondary command-net infrastructure (destructible)
   const satAt = (x: number, y: number) => {
@@ -865,17 +875,17 @@ export function generateWorld(sector = 1): WorldData {
     zones.push({ x: x - 160, y: y - 160, w: 320, h: 320, kind: 'concrete' });
   };
   satAt(cx, 760);
-  satAt(1100, ARENA_H * 0.5);
-  satAt(ARENA_W - 1100, ARENA_H * 0.55);
-  satAt(ARENA_W * 0.25, ARENA_H - 1500);
-  satAt(ARENA_W * 0.75, ARENA_H - 1900);
+  satAt(1100, GEN_H * 0.5);
+  satAt(GEN_W - 1100, GEN_H * 0.55);
+  satAt(GEN_W * 0.25, GEN_H - 1500);
+  satAt(GEN_W * 0.75, GEN_H - 1900);
 
   // FUEL YARDS — chain-reaction explosive barrels
   let yards = 0, ytries = 0;
   while (yards < 11 && ytries++ < 500) {
-    const yx = rnd(600, ARENA_W - 600), yy = rnd(600, ARENA_H - 600);
-    if (Math.hypot(yx - cx, yy - cy) < HQ.w * 0.6) continue;
-    if (Math.hypot(yx - PLAYER_START.x, yy - PLAYER_START.y) < 700) continue;
+    const yx = rnd(600, GEN_W - 600), yy = rnd(600, GEN_H - 600);
+    if (Math.hypot(yx - cx, yy - cy) < CORE_HQ.w * 0.6) continue;
+    if (Math.hypot(yx - CORE_PLAYER_START.x, yy - CORE_PLAYER_START.y) < 700) continue;
     if (!noOverlap(yx - 110, yy - 90, 220, 180, 80)) continue;
     zones.push({ x: yx - 120, y: yy - 100, w: 240, h: 200, kind: 'fuel' });
     const n = 5 + Math.floor(rnd(0, 3));
@@ -899,7 +909,7 @@ export function generateWorld(sector = 1): WorldData {
   };
   truckRow(R + 200, cy + 240, 5, 0, 230);
   truckRow(L - 296, cy - 420, 5, 0, 230);
-  truckRow(cx - 1600, ARENA_H - 2600, 5, 240, 0);
+  truckRow(cx - 1600, GEN_H - 2600, 5, 240, 0);
 
   // SPOTLIGHTS sweeping from towers and gatehouse tops
   for (const [tx, ty] of towers) spotlightSpots.push({ x: tx + TW / 2, y: ty + TW / 2 - 40, speed: rnd(0.5, 0.9), sweep: rnd(0.9, 1.5), site: 'fortress-power' });
@@ -916,6 +926,53 @@ export function generateWorld(sector = 1): WorldData {
     { x: bailW + 400, y: T + 460, speed: 0.64, sweep: 1.15, site: 'fortress-power' },
     { x: bailE - 400, y: Bo - 460, speed: 0.58, sweep: 1.25, site: 'fortress-power' },
   );
+
+  /* ================================================================== *
+   * WESTWARD EXPANSION
+   *
+   * Everything above was laid out in the legacy 12000-wide frame. Slide all of it east
+   * by PRISON_LAND_W so the new western coast (sea + prison island) has unused ground,
+   * then wrap the whole widened arena in fresh border ramparts.
+   * ================================================================== */
+  const SX = PRISON_LAND_W;
+  const shiftPt = (p: { x: number }) => { p.x += SX; };
+  const shiftPts = (arr: { x: number }[]) => { for (const p of arr) p.x += SX; };
+
+  for (const r of rects) r.x += SX;
+  for (const z of zones) z.x += SX;
+  shiftPts(serverSpots); shiftPt(generalSpot); shiftPts(coderSpots); shiftPts(garrisonSpots);
+  shiftPts(cacheSpots); shiftPts(gateSpots); shiftPts(helipads); shiftPt(hangarSpot);
+  shiftPts(beaconSpots); shiftPts(satcomSpots); shiftPts(barrelSpots); shiftPts(spotlightSpots);
+  shiftPts(vanSpots); shiftPts(paradeSpots); shiftPts(parkedHelis); shiftPts(laserSpots);
+  shiftPt(vaultSpot); shiftPt(planeSpot);
+  for (const h of hangars) { h.x += SX; h.doorX += SX; }
+  for (const f of facilities) {
+    f.x += SX;
+    for (const prop of f.props) prop.x += SX;
+    for (const door of f.doors) door.x += SX;
+  }
+  for (const g of facilityGuards) { g.x += SX; shiftPts(g.patrol); }
+  for (const poi of pois) { poi.x += SX; shiftPts(poi.gates); }
+  const cs = campaignSites;
+  for (const block of [cs.warehouse, cs.library, cs.helios]) block.x += SX;
+  shiftPts(cs.volumes); shiftPts(cs.megaCrates); shiftPts(cs.powerCells);
+  for (const route of cs.patrols) shiftPts(route.points);
+  for (const site of cs.powerSites) {
+    site.x += SX;
+    const yard = site as Partial<{ doors: { x: number }[]; padSpots: { x: number }[] }>;
+    if (yard.doors) shiftPts(yard.doors);
+    if (yard.padSpots) shiftPts(yard.padSpots);
+  }
+
+  // Mainland service road: ties the island causeway into the legacy ring road.
+  zones.push({ x: 3610, y: 1880, w: 2260, h: 240, kind: 'road' });
+
+  // Map border ramparts, now hugging the widened arena (west edge x = 0).
+  const B2 = 60;
+  add(0, 0, ARENA_W, B2, 'curtain', 26);
+  add(0, ARENA_H - B2, ARENA_W, B2, 'curtain', 26);
+  add(0, 0, B2, ARENA_H, 'curtain', 26);
+  add(ARENA_W - B2, 0, B2, ARENA_H, 'curtain', 26);
 
   return {
     rects, zones, serverSpots, generalSpot, coderSpots, garrisonSpots,
