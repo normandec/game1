@@ -21,7 +21,7 @@ const emptyHud: Hud = {
   trucksActive: 0, helisActive: 0, woundedCount: 0, barriersActive: 0, phase: 'RECON',
   piloting: false, heliHp: 0, heliMaxHp: 0, heliFuel: 0, hangarDist: 0,
   sector: 1, basesCleared: 0, sectorName: 'THE FALLEN HUB', destination: '', transitPct: 0,
-  driving: false, flyingPlane: false, allies: 0, barricades: 0, siegeActive: false,
+  driving: false, tank: false, flyingPlane: false, allies: 0, barricades: 0, siegeActive: false,
   lasersHeld: 0, poisCaptured: 0, poisTotal: 5, vaultFound: false, nearPrompt: '',
   coords: 'X 6000  Y 6800', gatePrompt: '', aegisCharges: 0, aegisTime: 0,
   vehicleHp: 0, vehicleMax: 1, vehicleFuel: 100,
@@ -49,6 +49,7 @@ export default function App() {
   const [entryDate, setEntryDate] = useState(0);
   const [isBest, setIsBest] = useState(false);
   const [touch, setTouch] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   const [tour, setTour] = useState(false);
   const [briefing, setBriefing] = useState(false);
   const [choices, setChoices] = useState<Perk[]>([]);
@@ -191,6 +192,23 @@ export default function App() {
     setMuted((m) => { sfx.setMuted(!m); return !m; });
   }, []);
 
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      const exit = document.exitFullscreen?.();
+      if (exit && typeof exit.catch === 'function') exit.catch(() => {});
+      return;
+    }
+    const req = document.documentElement.requestFullscreen?.();
+    if (req && typeof req.catch === 'function') req.catch(() => {}); // embedded players may refuse
+  }, []);
+
+  useEffect(() => {
+    const onFullscreenChange = () => setFullscreen(!!document.fullscreenElement);
+    onFullscreenChange();
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
   const showHud = status === 'playing' || status === 'paused' || status === 'upgrade';
 
   return (
@@ -208,6 +226,7 @@ export default function App() {
 
       {showHud && (
         <CombatHud hud={hud} best={best} muted={muted} onPause={togglePause} onMute={toggleMute}
+          fullscreen={fullscreen} onFullscreen={toggleFullscreen}
           onDash={() => gameRef.current?.doDash()}
           onSecondary={() => gameRef.current?.throwGrenade()}
           onUse={() => gameRef.current?.interactHeli()}

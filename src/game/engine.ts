@@ -69,7 +69,7 @@ export interface Hud {
   barriersActive: number; phase: string;
   piloting: boolean; heliHp: number; heliMaxHp: number; heliFuel: number; hangarDist: number;
   sector: number; basesCleared: number; sectorName: string; destination: string; transitPct: number;
-  driving: boolean; flyingPlane: boolean; allies: number; barricades: number;
+  driving: boolean; tank: boolean; flyingPlane: boolean; allies: number; barricades: number;
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
   vaultFound: boolean; nearPrompt: string;
   coords: string; gatePrompt: string; aegisCharges: number; aegisTime: number;
@@ -182,7 +182,16 @@ interface Truck {
   hp: number; maxHp: number; dead: boolean; announced: boolean;
   speed: number; lean: number;
   rescue: boolean; carrying: number; rescueWait: number;
+  /** Blown tyre from a grenade: the rig slews, smokes and never drives again. */
+  disabled?: boolean; skidT?: number; wreckT?: number;
   mission?: string; orderedTarget?: Point; launchDelay?: number; parking?: Van;
+}
+/** Armoured convoy escort: shrugs off almost everything, hits like a siege gun, capturable. */
+interface Tank {
+  x: number; y: number; goalX: number; goalY: number;
+  ang: number; turret: number; lean: number;
+  hp: number; maxHp: number; speed: number;
+  cool: number; dead: boolean; announced: boolean; captured: boolean; driven?: boolean; ttl: number; aimT?: number; id: number;
 }
 interface Mine { x: number; y: number; t: number; armed: boolean; }
 /** Attack gunship — strafes, hovers, rockets the player. */
@@ -208,6 +217,8 @@ interface Van {
   x: number; y: number; ang: number; speed: number; lean: number;
   hp: number; maxHp: number; dead: boolean; driving: boolean; boost: number;
   gunCd?: number; turretAng?: number; reserved?: boolean; blockT?: number;
+  /** Grenade-hit ground vehicle: tyres blown, engine dead, it never moves again. */
+  disabled?: boolean; skidT?: number;
 }
 /** Capturable Hydra beam battery. Two hits will erase you. */
 interface Laser {
@@ -249,7 +260,11 @@ interface Wounded {
 interface Pickup { kind: 'health' | 'grenade' | 'weapon' | 'shield' | 'aegis'; weapon?: string; x: number; y: number; t: number; life: number; }
 interface FloatText { x: number; y: number; vy: number; life: number; max: number; text: string; color: string; size: number; }
 interface Grenade { x: number; y: number; vx: number; vy: number; t: number; z: number; vz: number; dmg: number; big?: boolean; bomb?: boolean; }
-interface EGrenade { x: number; y: number; tx: number; ty: number; t: number; total: number; z: number; }
+interface EGrenade {
+  x: number; y: number; tx: number; ty: number; t: number; total: number; z: number;
+  /** Tank main-gun round: heavier blast than a thrown grenade. */
+  dmg?: number; radius?: number; shell?: boolean;
+}
 interface Shock { x: number; y: number; r: number; max: number; life: number; t: number; color: string; width: number; }
 interface Decal { x: number; y: number; r: number; a: number; color: string; }
 interface SpawnMark { x: number; y: number; t: number; }
@@ -389,6 +404,10 @@ export class Game {
   private archiveReadCooldown = 0;
   vtols: VTOL[] = [];
   trucks: Truck[] = [];
+  /** Convoy tanks — the escort that makes a moving column so hard to break. */
+  tanks: Tank[] = [];
+  playerTank: Tank | null = null;
+  private tankSeq = 1;
   mines: Mine[] = [];
   helis: Heli[] = [];
   barriers: Barrier[] = [];
@@ -519,6 +538,8 @@ export class Game {
   // input
   keys: Record<string, boolean> = {};
   mouseX = 0; mouseY = 0; firing = false; isTouch = false;
+  /** Mouse is captured by the canvas, so the cursor cannot escape to the browser chrome. */
+  pointerLocked = false;
   moveStick: Stick = { id: -1, ox: 0, oy: 0, x: 0, y: 0, active: false };
   aimStick: Stick = { id: -1, ox: 0, oy: 0, x: 0, y: 0, active: false };
 
@@ -551,6 +572,8 @@ export class Game {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('pointerup', this.onWindowUp);
+    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    if (this.pointerLocked && document.exitPointerLock) document.exitPointerLock();
     const c = this.canvas;
     c.removeEventListener('pointerdown', this.onPointerDown);
     c.removeEventListener('pointermove', this.onPointerMove);
@@ -564,6 +587,7 @@ export class Game {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('pointerup', this.onWindowUp);
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
     const c = this.canvas;
     c.addEventListener('pointerdown', this.onPointerDown);
     c.addEventListener('pointermove', this.onPointerMove);
@@ -703,7 +727,7 @@ export class Game {
     this.texts = []; this.nades = []; this.enemyNades = []; this.shocks = [];
     this.decals = []; this.marks = []; this.lights = [];
     this.squads = []; this.spawnQueue = []; this.nextSquadId = 1;
-    this.trucks = []; this.mines = []; this.helis = []; this.barriers = []; this.wounded = [];
+    this.trucks = []; this.tanks = []; this.playerTank = null; this.mines = []; this.helis = []; this.barriers = []; this.wounded = [];
     this.supply = []; this.supplyCd = 26;
     this.piloting = false;
     this.support = 'aegis'; this.supportCd = 0; this.droneAng = 0;
@@ -894,11 +918,11 @@ export class Game {
     this.keys[k] = true;
     if (k === 'escape' || k === 'p') this.onPauseToggle();
     if (this.status !== 'playing') return;
-    if (k === ' ' || k === 'shift') { if (!this.piloting && !this.flyingPlane && !this.drivingVan) this.doDash(); }
+    if (k === ' ' || k === 'shift') { if (!this.piloting && !this.flyingPlane && !this.drivingVan && !this.playerTank) this.doDash(); }
     if (k === 'g' || k === 'q' || k === 'e') {
       if (this.flyingPlane) this.dropBombs();
       else if (this.piloting && this.playerHeli) this.fireHeliRocket(this.playerHeli);
-      else if (!this.drivingVan) this.throwGrenade();
+      else if (!this.drivingVan && !this.playerTank) this.throwGrenade();
     }
     if (k === 'f') this.interactHeli();
     if (k === 'l') this.toggleGate();
@@ -923,15 +947,47 @@ export class Game {
     } else {
       this.isTouch = false;
       this.mouseX = p.x; this.mouseY = p.y;
-      if (e.button === 0) this.firing = true;
+      if (e.button === 0) {
+        this.firing = true;
+        // Capture the cursor inside the canvas: fast mouse movement can no longer
+        // leave the game area and click browser tabs or other windows.
+        this.requestPointerLock();
+      }
       if (e.button === 2) this.throwGrenade();
     }
   };
+  private requestPointerLock() {
+    if (this.pointerLocked || this.isTouch) return;
+    try {
+      const req = this.canvas.requestPointerLock() as unknown as Promise<void> | undefined;
+      if (req && typeof req.catch === 'function') req.catch(() => { /* embedded viewers may refuse */ });
+    } catch { /* older browsers return nothing; refusal is harmless */ }
+  }
+  private onPointerLockChange = () => {
+    const locked = document.pointerLockElement === this.canvas;
+    const wasLocked = this.pointerLocked;
+    this.pointerLocked = locked;
+    if (locked) return;
+    this.clearInput();
+    // ESC releases the cursor: drop straight into the pause screen instead of
+    // continuing to run while the mouse is back in the browser. Only a real
+    // transition out of the lock counts — a refused request must not pause.
+    if (wasLocked && this.status === 'playing') this.onPauseToggle();
+  };
   private onPointerMove = (e: PointerEvent) => {
-    const p = this.local(e);
     if (e.pointerType === 'touch') {
+      const p = this.local(e);
       for (const s of [this.moveStick, this.aimStick]) if (s.active && s.id === e.pointerId) { s.x = p.x; s.y = p.y; }
-    } else { this.mouseX = p.x; this.mouseY = p.y; }
+      return;
+    }
+    if (this.pointerLocked) {
+      // Relative motion: the cursor is hidden and pinned, aim moves with the mouse.
+      this.mouseX = clamp(this.mouseX + e.movementX, 0, this.w);
+      this.mouseY = clamp(this.mouseY + e.movementY, 0, this.h);
+      return;
+    }
+    const p = this.local(e);
+    this.mouseX = p.x; this.mouseY = p.y;
   };
   private onPointerUp = (e: PointerEvent) => {
     if (e.pointerType === 'touch') {
@@ -1002,6 +1058,10 @@ export class Game {
       const s = dt * 0.45;
       this.updateParticles(s); this.updateFx(s); this.updateCamera(s);
     }
+    // Never leave the cursor captured behind a menu, upgrade card or end screen.
+    if (this.pointerLocked && this.status !== 'playing' && this.status !== 'paused' && document.exitPointerLock) {
+      document.exitPointerLock();
+    }
     if (this.status !== 'interior' && this.status !== 'menu') this.render();
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) { this.hudTimer = 0.06; this.pushHud(); }
@@ -1016,6 +1076,7 @@ export class Game {
   /** Context prompt shown on the HUD for whatever the operative can interact with. */
   private nearPrompt(): string {
     if (this.flyingPlane) return 'F · LAND BOMBER';
+    if (this.playerTank) return 'F · EXIT TANK';
     if (this.drivingVan) return 'F · EXIT TRANSPORT';
     if (this.piloting) return 'F · LAND GUNSHIP';
     const mcNear = this.megaCrates.find((c) => !c.dead && Math.hypot(this.px - c.x, this.py - c.y) < 100);
@@ -1032,6 +1093,7 @@ export class Game {
     if (this.vaultOpen && this.vaultChoice === 'offer' &&
         Math.hypot(this.planeSpot.x - this.px, this.planeSpot.y - this.py) < 260) return 'F · CLAIM AIR WING';
     if (this.plane && Math.hypot(this.plane.x - this.px, this.plane.y - this.py) < 170) return 'F · BOARD BOMBER';
+    if (this.parkedPlaneNear(210)) return 'F · SEIZE BOMBER';
     const l = this.lasers.find((q) => !q.captured && Math.hypot(q.x - this.px, q.y - this.py) < 120);
     if (l) return 'F · CAPTURE BEAM';
     for (const poi of this.pois) {
@@ -1041,7 +1103,11 @@ export class Game {
     }
     const p = this.parkedHelis.find((q, index) => !q.taken && !this.helis.some(h => h.home === index) && Math.hypot(q.x - this.px, q.y - this.py) < 120);
     if (p) return 'F · SEIZE GUNSHIP';
-    const v = this.vans.find((q) => !q.dead && !q.reserved && Math.hypot(q.x - this.px, q.y - this.py) < 110);
+    const ownTank = this.tanks.find((q) => !q.dead && q.captured && !q.driven && Math.hypot(q.x - this.px, q.y - this.py) < 170);
+    if (ownTank) return 'F · BOARD TANK';
+    const nearTank = this.tanks.find((q) => !q.dead && !q.captured && Math.hypot(q.x - this.px, q.y - this.py) < 170);
+    if (nearTank) return 'F · SEIZE TANK';
+    const v = this.vans.find((q) => !q.dead && !q.reserved && !q.disabled && Math.hypot(q.x - this.px, q.y - this.py) < 110);
     if (v) return 'F · DRIVE TRANSPORT';
     if (this.playerHeli && Math.hypot(this.playerHeli.x - this.px, this.playerHeli.y - this.py) < 94) return 'F · BOARD GUNSHIP';
     return '';
@@ -1103,7 +1169,8 @@ export class Game {
       sectorName: SECTORS[this.sector - 1]?.name || 'UNKNOWN SECTOR',
       destination: this.destination,
       transitPct: this.status === 'transit' ? clamp(1 - this.transitT / this.transitDuration, 0, 1) : 0,
-      driving: !!this.drivingVan,
+      driving: !!(this.drivingVan || this.playerTank),
+      tank: !!this.playerTank,
       flyingPlane: this.flyingPlane,
       allies: this.allies.length,
       barricades: this.barricades.length,
@@ -1116,8 +1183,8 @@ export class Game {
       coords: `X ${Math.round(this.px)}  Y ${Math.round(this.py)}`,
       gatePrompt: this.gates.some(g => g.hp > 0 && Math.hypot(g.x - this.px, g.y - this.py) < 165) ? 'L / LOCK OR UNLOCK GATE' : '',
       aegisCharges: this.aegisCharges, aegisTime: this.aegisTime,
-      vehicleHp: this.flyingPlane ? this.plane?.hp || 0 : this.drivingVan ? this.drivingVan.hp : this.piloting ? this.playerHeli?.hp || 0 : 0,
-      vehicleMax: this.flyingPlane ? this.plane?.maxHp || 1 : this.drivingVan ? this.drivingVan.maxHp : this.piloting ? this.playerHeli?.maxHp || 1 : 1,
+      vehicleHp: this.flyingPlane ? this.plane?.hp || 0 : this.playerTank ? this.playerTank.hp : this.drivingVan ? this.drivingVan.hp : this.piloting ? this.playerHeli?.hp || 0 : 0,
+      vehicleMax: this.flyingPlane ? this.plane?.maxHp || 1 : this.playerTank ? this.playerTank.maxHp : this.drivingVan ? this.drivingVan.maxHp : this.piloting ? this.playerHeli?.maxHp || 1 : 1,
       vehicleFuel: this.flyingPlane ? this.plane?.fuel || 0 : this.piloting ? this.playerHeli?.fuel || 0 : 100,
       facilityLabel: this.nearbyFacility ? `${this.nearbyFacility.code} / ${this.nearbyFacility.name}` : '',
       facilityStatus: this.nearbyFacility ? this.nearbyFacility.secured ? 'SECURED / SUPPLIES RELEASED'
@@ -1427,9 +1494,155 @@ export class Game {
       orderedTarget: mission ? stop : undefined, launchDelay: stagger, parking });
   }
 
+  /**
+   * Armoured convoy escort. Tanks are the reason a moving column is so hard to
+   * break: they soak enormous damage, hit like a siege gun, and can be captured.
+   */
+  private dispatchTank(target: Point) {
+    const parking = this.vans.filter(v => !v.dead && !v.reserved && !v.driving && !v.disabled)
+      .sort((a, b) => Math.hypot(a.x - target.x, a.y - target.y) - Math.hypot(b.x - target.x, b.y - target.y))[0];
+    let departure = this.routes.nearest(parking || {
+      x: GOLIATH.x + (this.tankSeq % 2 ? 260 : -260),
+      y: GOLIATH.y - 520 + (this.tankSeq % 5) * 190,
+    });
+    for (let i = 0; i < 12 && this.tanks.some(t => !t.dead && Math.hypot(t.x - departure.x, t.y - departure.y) < 210); i++) {
+      departure = this.routes.nearest({ x: departure.x + (i % 2 ? -260 : 260), y: departure.y + 220 });
+    }
+    const a = Math.atan2(target.y - departure.y, target.x - departure.x);
+    this.tanks.push({
+      x: departure.x, y: departure.y,
+      goalX: target.x - Math.cos(a) * 340, goalY: target.y - Math.sin(a) * 340,
+      ang: a, turret: a, lean: 0,
+      hp: 2400, maxHp: 2400, speed: 0,
+      cool: rand(2.5, 4.5), dead: false, announced: false, captured: false,
+      ttl: 165 + rand(0, 30), id: this.tankSeq++,
+    });
+  }
+
+  /** Convoy tank AI: roll with the column, stop at range, fire the main gun. */
+  private updateTanks(dt: number) {
+    for (let i = this.tanks.length - 1; i >= 0; i--) {
+      const t = this.tanks[i];
+      if (t.dead) { this.tanks.splice(i, 1); continue; }
+      if (t.captured) continue;                     // the operative is driving it
+      const pdx = this.px - t.x, pdy = this.py - t.y;
+      const pd = Math.hypot(pdx, pdy) || 1;
+      // Its escort duty ends: once the column withdraws the tank leaves the field.
+      t.ttl -= dt;
+      if (t.ttl <= 0 && pd > 1600) { this.tanks.splice(i, 1); continue; }
+      if (!t.announced && pd < 1700) {
+        t.announced = true;
+        this.addText(t.x, t.y - 96, '⚠ CONVOY TANK / MAIN GUN', '#ffb0b0', 16);
+        sfx.rotor();
+      }
+
+      /* ---- main gun: slow turret, long reload, enormous round ---- */
+      const want = Math.atan2(pdy, pdx);
+      t.turret = lerpAngle(t.turret, want, 1 - Math.exp(-1.9 * dt));
+      t.cool -= dt;
+      const aligned = Math.abs(Math.atan2(Math.sin(want - t.turret), Math.cos(want - t.turret)));
+      if (t.cool <= 0 && pd < 1500 && aligned < 0.22 && this.hasLine(t.x, t.y, this.px, this.py)) {
+        t.cool = 3.6;
+        const lead = 0.34;
+        const tx = this.px + this.pvx * lead, ty = this.py + this.pvy * lead;
+        const travel = clamp(Math.hypot(tx - t.x, ty - t.y) / 900, 0.4, 1.5);
+        this.enemyNades.push({
+          x: t.x + Math.cos(t.turret) * 66, y: t.y + Math.sin(t.turret) * 66,
+          tx, ty, t: travel, total: travel, z: 0, dmg: 240, radius: 175, shell: true,
+        });
+        this.addText(t.x, t.y - 88, 'MAIN GUN', '#ffcf7a', 15);
+        this.addLight(t.x, t.y, 460, '255,190,110', 0.55);
+        this.shocks.push({ x: t.x + Math.cos(t.turret) * 70, y: t.y + Math.sin(t.turret) * 70, r: 6, max: 90, life: 0.22, t: 0.22, color: '255,205,140', width: 6 });
+        sfx.shoot('rocket');
+      }
+
+      /* ---- heavy, deliberate tracks ---- */
+      // If the operative slips away the escort rolls after them: armour follows
+      // the column, and the column is wherever the shooting is.
+      t.aimT = (t.aimT ?? 0) - dt;
+      if (pd > 1150 && t.aimT <= 0) {
+        t.aimT = 2.5;
+        t.goalX = this.px - Math.cos(Math.atan2(pdy, pdx)) * 360;
+        t.goalY = this.py - Math.sin(Math.atan2(pdy, pdx)) * 360;
+      }
+      const gx = t.goalX - t.x, gy = t.goalY - t.y;
+      const gd = Math.hypot(gx, gy) || 1;
+      let targetSpeed = pd < 520 || gd < 110 ? 0 : 132;
+      const desired = Math.atan2(gy, gx);
+      const turn = Math.atan2(Math.sin(desired - t.ang), Math.cos(desired - t.ang));
+      t.ang += clamp(turn, -dt * 0.8, dt * 0.8);
+      t.lean = lerp(t.lean, clamp(turn * 0.3, -0.2, 0.2), 1 - Math.exp(-3 * dt));
+      if (Math.abs(turn) > 0.9) targetSpeed = Math.min(targetSpeed, 26);
+      t.speed = lerp(t.speed, targetSpeed, 1 - Math.pow(0.05, dt));
+      if (t.speed > 0.5) {
+        const next = { x: t.x + Math.cos(t.ang) * t.speed * dt, y: t.y + Math.sin(t.ang) * t.speed * dt };
+        const probe = { ...next }; this.collide(probe, 48);
+        if (Math.hypot(probe.x - next.x, probe.y - next.y) < 0.5) { t.x = next.x; t.y = next.y; }
+        else {
+          // Heavy hull grinds to a stop, then pivots for a fresh line.
+          t.speed = 0;
+          t.ang += (t.id % 2 ? 1 : -1) * dt * 0.9;
+          t.goalX += Math.cos(t.ang) * 90; t.goalY += Math.sin(t.ang) * 90;
+        }
+      }
+      // Tracks churn dust; a hurt tank bleeds smoke.
+      if (t.speed > 18 && Math.random() < dt * 16)
+        this.addParticle(t.x - Math.cos(t.ang) * 84 + rand(-24, 24), t.y - Math.sin(t.ang) * 84 + rand(-24, 24),
+          rand(-14, 14), rand(-18, 8), rand(0.5, 1), rand(3, 6), '#6f7a72', false);
+      if (t.hp < t.maxHp * 0.65 && Math.random() < dt * 22)
+        this.addParticle(t.x + rand(-26, 26), t.y + rand(-26, 26), rand(-10, 10), -rand(20, 52),
+          rand(0.5, 1.2), rand(3, 7), t.hp < t.maxHp * 0.3 ? '#20211f' : '#6d6257', true);
+    }
+  }
+
+  /** Tanks only feel explosives, and even then they shrug most of it off. */
+  private hurtTank(t: Tank, dmg: number) {
+    if (t.dead) return;
+    t.hp -= dmg * 0.5;
+    this.sparks(t.x, t.y, '#ffd166', 6);
+    if (t.hp <= 0) this.killTank(t);
+  }
+
+  private killTank(t: Tank) {
+    if (t.dead) return;
+    const mine = t.captured;
+    t.dead = true;
+    if (this.playerTank === t) this.playerTank = null;
+    if (mine) {
+      this.explode(t.x, t.y, 250, 0, true);
+      this.addText(t.x, t.y - 96, 'TANK DESTROYED', '#ff8f7a', 18);
+      return;
+    }
+    this.score += 6000;
+    this.addText(t.x, t.y - 96, 'CONVOY TANK DESTROYED +6000', '#ffd166', 18);
+    this.setBanner('CONVOY TANK DESTROYED', 'THEIR ARMOUR WILL REMEMBER THIS');
+    this.explode(t.x, t.y, 250, 0, true);
+    for (let i = 0; i < 46; i++) {
+      const a = rand(0, TAU), v = rand(90, 520);
+      this.addParticle(t.x, t.y, Math.cos(a) * v, Math.sin(a) * v, rand(0.4, 1.1), rand(3, 9), i % 3 ? '#4a4a44' : '#ffb25c', true);
+    }
+  }
+
+  /** Spark a blown tyre: skid, smoke, engine dead. Tanks ignore this entirely. */
+  private disableTruck(t: Truck) {
+    if (t.dead || t.disabled) return;
+    t.disabled = true; t.skidT = 1.15;
+    this.addText(t.x, t.y - 62, 'TYRE BLOWN / VEHICLE STOPPED', '#ffb08a', 13);
+    this.sparks(t.x, t.y, '#ffd166', 10);
+    this.addLight(t.x, t.y, 240, '255,180,120', 0.3);
+  }
+
+  private disableVan(v: Van) {
+    if (v.dead || v.disabled) return;
+    v.disabled = true; v.skidT = 1;
+    v.speed = Math.min(v.speed, 80);
+    this.addText(v.x, v.y - 58, 'TYRE BLOWN / TRANSPORT STOPPED', '#ffb08a', 12);
+    this.sparks(v.x, v.y, '#ffd166', 8);
+  }
+
   private updateResponseOrders(dt: number) {
     this.responseTimer -= dt;
-    if (this.responseTimer > 0 || !this.responseOrders.length || this.trucks.filter(t => !t.dead && t.state !== 'leave').length >= 22) return;
+    if (this.responseTimer > 0 || !this.responseOrders.length || this.trucks.filter(t => !t.dead && !t.disabled && t.state !== 'leave').length >= 22) return;
     const order = this.responseOrders[0];
     const roster = ['commander', 'warden', 'grunt', 'gunner', 'pathfinder', 'breacher', 'grunt', 'medic'];
     const comp = roster.slice(0, Math.min(order.size, order.units));
@@ -1625,6 +1838,7 @@ export class Game {
     if (this.status !== 'playing') return;
     if (this.flyingPlane) { this.updatePlane(dt); return; }
     if (this.drivingVan) { this.updateDrivenVan(dt); return; }
+    if (this.playerTank) { this.updateDrivenTank(dt); return; }
     if (this.piloting) {
       this.updatePlayerHeli(dt);
       return;
@@ -1685,11 +1899,48 @@ export class Game {
     }
   }
 
+  /** Hydra hangars park real bombers: the nearest one you could seize with F. */
+  private parkedPlaneNear(range = 210): Rect | null {
+    let best: Rect | null = null, bd = range;
+    for (const o of this.obstacles) {
+      if (o.kind !== 'plane' || o.dead) continue;
+      const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+      const d = Math.hypot(cx - this.px, cy - this.py);
+      if (d < bd) { bd = d; best = o; }
+    }
+    return best;
+  }
+
+  /**
+   * Seize a bomber parked inside a Hydra hangar. It uses exactly the same
+   * NIGHTJAR systems as the vault aircraft (flight, cannons, carpet bombing),
+   * so nothing new has to be learned to fly it.
+   */
+  private seizeParkedPlane(o: Rect) {
+    const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+    if (this.plane) {
+      this.addText(cx, cy - 80, 'BOMBER ALREADY IN SERVICE', '#ffcf7a', 13);
+      return;
+    }
+    o.dead = true;
+    this.navigationDirty = true;
+    this.plane = {
+      x: cx, y: cy, vx: 0, vy: 0, ang: -Math.PI / 2, bank: 0,
+      hp: 1200, maxHp: 1200, bombCd: 0, gunCd: 0, fuel: 100, active: false,
+    };
+    this.score += 2500;
+    this.addText(cx, cy - 80, 'HYDRA BOMBER SEIZED +2500', '#8be8ff', 18);
+    this.setBanner('HYDRA BOMBER SEIZED', 'IT FLIES UNDER S.H.I.E.L.D. COLORS NOW');
+    sfx.wave();
+    this.enterPlane();
+  }
+
   /** Master interact: aircraft, vans, beam batteries, barricades, the black vault. */
   interactHeli() {
     if (this.status !== 'playing') return;
     // exit whatever we are piloting first
     if (this.flyingPlane && this.plane) { this.exitPlane(); return; }
+    if (this.playerTank) { this.exitTank(); return; }
     if (this.drivingVan) { this.exitVan(); return; }
     if (this.piloting) { this.boardGunship(); return; }
     const mc = this.megaCrates.find((c) => !c.dead && Math.hypot(this.px - c.x, this.py - c.y) < 100);
@@ -1733,6 +1984,9 @@ export class Game {
     if (this.plane && !this.flyingPlane && Math.hypot(this.plane.x - this.px, this.plane.y - this.py) < 170) {
       this.enterPlane(); return;
     }
+    // 2b) a bomber parked inside a Hydra hangar — seize it
+    const parkedPlane = this.parkedPlaneNear(210);
+    if (parkedPlane) { this.seizeParkedPlane(parkedPlane); return; }
     // 3) capture a beam battery
     const laser = this.lasers.find((l) => !l.captured && Math.hypot(l.x - this.px, l.y - this.py) < 120);
     if (laser) {
@@ -1765,8 +2019,13 @@ export class Game {
       this.boardGunship();
       return;
     }
+    // 5b) seize a convoy tank — the hardest and best prize on the road
+    const ownTank = this.tanks.find((q) => !q.dead && q.captured && !q.driven && Math.hypot(q.x - this.px, q.y - this.py) < 170);
+    if (ownTank) { this.boardTank(ownTank, true); return; }
+    const tank = this.tanks.find((q) => !q.dead && !q.captured && Math.hypot(q.x - this.px, q.y - this.py) < 170);
+    if (tank) { this.boardTank(tank); return; }
     // 6) drive a van
-    const van = this.vans.find((v) => !v.dead && !v.reserved && Math.hypot(v.x - this.px, v.y - this.py) < 110);
+    const van = this.vans.find((v) => !v.dead && !v.reserved && !v.disabled && Math.hypot(v.x - this.px, v.y - this.py) < 110);
     if (van) { this.enterVan(van); return; }
     // 7) fall back to the personal gunship
     this.boardGunship();
@@ -1885,7 +2144,7 @@ export class Game {
   /** Reveal the vault when the operative stumbles onto the buried hatch. */
   private updateVault(dt: number) {
     void dt;
-    if (this.piloting || this.flyingPlane || this.drivingVan) return;
+    if (this.piloting || this.flyingPlane || this.drivingVan || this.playerTank) return;
     if (Math.hypot(this.px - VAULT_ENTRY.x, this.py - VAULT_ENTRY.y) < 48) this.enterVault();
   }
 
@@ -2037,10 +2296,113 @@ export class Game {
     sfx.rotor();
   }
 
+  /** Climb into a convoy tank you walked up to. */
+  private boardTank(t: Tank, reboard = false) {
+    t.captured = true;
+    t.driven = true;
+    t.cool = Math.max(t.cool, 1.2);
+    this.playerTank = t;
+    t.speed = 0;
+    this.px = t.x; this.py = t.y;
+    this.pang = t.ang;
+    if (reboard) {
+      this.setBanner('S.H.I.E.L.D. TANK', 'WASD DRIVE · LMB MAIN GUN · F DISMOUNT');
+      sfx.click();
+      return;
+    }
+    this.score += 4000;
+    this.setBanner('HYDRA TANK CAPTURED', 'WASD DRIVE · LMB MAIN GUN · F DISMOUNT');
+    this.addText(t.x, t.y - 96, 'TANK SEIZED +4000', '#8be8ff', 18);
+    sfx.wave();
+  }
+
+  private exitTank() {
+    const t = this.playerTank;
+    if (!t) return;
+    if (Math.abs(t.speed) > 90) { this.addText(t.x, t.y - 70, 'STOP THE TANK FIRST', '#ffcf7a', 13); return; }
+    t.driven = false; t.speed = 0;
+    // It stays yours: nobody else drives it, but the operative is back on foot.
+    this.playerTank = null;
+    this.px = t.x - Math.sin(t.ang) * 82;
+    this.py = t.y + Math.cos(t.ang) * 82;
+    this.pvx = 0; this.pvy = 0;
+    sfx.click();
+  }
+
+  /** Captured tank: heavy tracks, slow turret, one enormous main gun. */
+  private updateDrivenTank(dt: number) {
+    const t = this.playerTank;
+    if (!t || t.dead) { this.playerTank = null; return; }
+    const k = this.keys;
+    const m = this.moveVector();
+    const fwd = this.isTouch ? -m.y : (k['w'] || k['arrowup'] ? 1 : 0) - (k['s'] || k['arrowdown'] ? 1 : 0);
+    const steer = this.isTouch ? m.x : (k['d'] || k['arrowright'] ? 1 : 0) - (k['a'] || k['arrowleft'] ? 1 : 0);
+    t.speed = lerp(t.speed, fwd > 0 ? 250 : fwd < 0 ? -120 : 0, 1 - Math.pow(fwd !== 0 ? 0.3 : 0.08, dt));
+    const grip = clamp(Math.abs(t.speed) / 190, 0, 1);
+    t.ang += steer * 1.05 * grip * dt * Math.sign(t.speed || 1);
+    t.lean = lerp(t.lean, steer * grip * 0.2, 1 - Math.pow(0.02, dt));
+
+    const next = { x: t.x + Math.cos(t.ang) * t.speed * dt, y: t.y + Math.sin(t.ang) * t.speed * dt };
+    const probe = { ...next }; this.collide(probe, 50);
+    if (Math.hypot(probe.x - next.x, probe.y - next.y) < 0.5) { t.x = next.x; t.y = next.y; }
+    else t.speed *= 0.15;
+
+    // Tracks flatten infantry that stand in front of it.
+    if (Math.abs(t.speed) > 60) {
+      for (const e of this.enemies) {
+        if (e.def.civilian) continue;
+        if (Math.hypot(e.x - t.x, e.y - t.y) < 82) {
+          this.hurtEnemy(e, Math.abs(t.speed) / 2.6, Math.cos(t.ang) * 420, Math.sin(t.ang) * 420);
+          e.stun = 0.45;
+          t.speed *= 0.94;
+        }
+      }
+    }
+
+    let aim = this.isTouch ? t.ang : Math.atan2(this.mouseY + this.camY - t.y, this.mouseX + this.camX - t.x);
+    let trigger = this.firing;
+    if (this.aimStick.active) {
+      const dx = this.aimStick.x - this.aimStick.ox, dy = this.aimStick.y - this.aimStick.oy;
+      if (Math.hypot(dx, dy) > 12) { aim = Math.atan2(dy, dx); trigger = true; }
+    }
+    t.turret = lerpAngle(t.turret, aim, 1 - Math.exp(-3.5 * dt));
+    this.pang = t.turret;
+    t.cool = Math.max(0, t.cool - dt);
+    if (trigger && t.cool <= 0) {
+      t.cool = 1.5;
+      const sx = t.x + Math.cos(t.turret) * 72, sy = t.y + Math.sin(t.turret) * 72;
+      this.bullets.push({
+        x: sx, y: sy, px: sx, py: sy,
+        vx: Math.cos(t.turret) * 900, vy: Math.sin(t.turret) * 900,
+        dmg: 120, life: 1.5, friendly: true, rocket: true, color: '#ffd9a0', r: 8, hits: [],
+      });
+      this.addLight(sx, sy, 420, '255,200,130', 0.35);
+      this.shocks.push({ x: sx, y: sy, r: 6, max: 110, life: 0.2, t: 0.2, color: '255,215,150', width: 7 });
+      this.hitstop = Math.max(this.hitstop, 0.03);
+      sfx.shoot('rocket');
+    }
+
+    this.px = t.x; this.py = t.y; this.pvx = Math.cos(t.ang) * t.speed; this.pvy = Math.sin(t.ang) * t.speed;
+    if (t.speed > 20 && Math.random() < dt * 16)
+      this.addParticle(t.x - Math.cos(t.ang) * 84 + rand(-24, 24), t.y - Math.sin(t.ang) * 84 + rand(-24, 24),
+        rand(-14, 14), rand(-18, 8), rand(0.5, 1), rand(3, 6), '#6f7a72', false);
+  }
+
   /** Ground vehicle handling: throttle, steering, weight and ramming. */
   private updateDrivenVan(dt: number) {
     const v = this.drivingVan;
     if (!v || v.dead) { this.drivingVan = null; return; }
+    if (v.disabled) {
+      // Tyres blown: no throttle, no steering, smoke pouring off the wheels.
+      v.speed = Math.max(0, v.speed - 320 * dt);
+      v.boost = Math.max(0, v.boost - dt);
+      v.lean = lerp(v.lean, 0.3, 1 - Math.exp(-3 * dt));
+      v.x += Math.cos(v.ang) * v.speed * dt; v.y += Math.sin(v.ang) * v.speed * dt;
+      if (Math.random() < dt * 18)
+        this.addParticle(v.x + rand(-26, 26), v.y + rand(-26, 26), rand(-8, 8), -rand(18, 44), rand(0.6, 1.2), rand(3, 6), '#2f3230', true);
+      this.px = v.x; this.py = v.y;
+      return;
+    }
     const k = this.keys;
     const joystick = this.moveVector();
     const fwd = this.isTouch ? -joystick.y : (k['w'] || k['arrowup'] ? 1 : 0) - (k['s'] || k['arrowdown'] ? 1 : 0);
@@ -2804,6 +3166,11 @@ export class Game {
         }
       }
       motion.door = lerp(motion.door, t.state === 'loading' || t.state === 'deploy' ? 1 : 0, 1 - Math.exp(-2 * dt));
+      if (t.disabled) {
+        this.plantTruck(t, dt);
+        // A knocked-out rig never rolls again: its crew bails out where it stopped.
+        if (t.state === 'loading' || t.state === 'drive') { t.state = 'deploy'; t.deployT = 1; }
+      }
       if (t.rescue) {
         this.updateRescueTruck(t, dt);
         continue;
@@ -2838,6 +3205,7 @@ export class Game {
         continue;
       }
       if (t.state === 'drive') {
+        if (t.disabled) { t.speed = 0; continue; }
         if (!t.announced && Math.hypot(t.x - this.px, t.y - this.py) < 1500) {
           t.announced = true;
           this.addText(t.x, t.y - 58, 'HYDRA TRANSPORT / APPROACHING', '#ffb0b0', 13);
@@ -2858,6 +3226,7 @@ export class Game {
           t.state = 'leave'; motion.replan = 0;
         }
       } else {
+        if (t.disabled) continue;
         this.moveTruck(t, dt);
         if (Math.hypot(t.x - motion.home.x, t.y - motion.home.y) < 60) {
           const bay = t.parking || this.vans.find(v => v.reserved && Math.hypot(v.x - motion.home.x, v.y - motion.home.y) < 100);
@@ -2918,6 +3287,30 @@ export class Game {
         this.trucks.splice(this.trucks.indexOf(t), 1);
       }
     }
+  }
+
+  /** Blown tyre: the rig slews sideways, sheds smoke and comes to rest for good. */
+  private plantTruck(t: Truck, dt: number) {
+    t.wreckT = (t.wreckT || 0) + dt;
+    if (t.wreckT > 45) { t.dead = true; return; }   // recovered by a Hydra tow rig
+    const sign = t.squadId % 2 ? 1 : -1;
+    const skidding = (t.skidT || 0) > 0;
+    if (skidding) t.skidT = Math.max(0, (t.skidT || 0) - dt);
+    t.speed = Math.max(0, t.speed - (skidding ? 110 : 520) * dt);
+    t.lean = lerp(t.lean, 0.42 * sign * (skidding ? 1 : 0.6), 1 - Math.exp(-2.5 * dt));
+    if (t.speed > 3) {
+      const nx = t.x + Math.cos(t.ang) * t.speed * dt, ny = t.y + Math.sin(t.ang) * t.speed * dt;
+      const probe = { x: nx, y: ny }; this.collide(probe, 34);
+      if (Math.hypot(probe.x - nx, probe.y - ny) < 0.5) { t.x = nx; t.y = ny; }
+      else t.speed = 0;
+      if (skidding) t.ang += sign * dt * 1.5;
+    }
+    if (Math.random() < dt * 22)
+      this.addParticle(t.x - Math.cos(t.ang) * 70 + rand(-16, 16), t.y - Math.sin(t.ang) * 70 + rand(-16, 16),
+        rand(-24, 24), rand(-8, 28), rand(0.4, 0.9), rand(2, 4), '#43413c', true);
+    if (Math.random() < dt * 9)
+      this.addParticle(t.x + rand(-20, 20), t.y + rand(-20, 20), rand(-6, 6), -rand(18, 46),
+        rand(0.8, 1.5), rand(4, 7), '#2b2d2b', true);
   }
 
   /** Truck collision uses a wide vehicle body, not a point, so convoys cannot ghost through walls. */
@@ -3086,17 +3479,14 @@ export class Game {
   private updateHelis(dt: number) {
     for (let i = this.helis.length - 1; i >= 0; i--) {
       const h = this.helis[i];
-      if (h.home === undefined) {
+      // Attacking gunships fly in from wherever they were launched. They only
+      // claim a parking bay on the way home, so a sortie never teleports an
+      // aircraft onto a pad (and never hides the aircraft parked there).
+      if (h.home === undefined && h.state === 'egress') {
         const slot = this.parkedHelis.findIndex((p, index) => !p.taken && ![...this.hangarClaims.values()].includes(index));
-        h.home = slot;
         if (slot >= 0) {
-          this.hangarClaims.set(h, slot); h.x = this.parkedHelis[slot].x; h.y = this.parkedHelis[slot].y;
-          h.state = 'startup'; h.t = 0; h.rotor = 0; h.altitude = 0; h.sortieT = 0;
-        } else {
-          // No free bay: hold over the airfield instead of vanishing mid-sortie.
-          const pad = this.helipads.find(pd => Math.hypot(pd.x - h.x, pd.y - h.y) > 400) || this.helipads[0];
-          if (pad) { h.tx = pad.x; h.ty = pad.y; }
-          h.altitude = 65;
+          h.home = slot;
+          this.hangarClaims.set(h, slot);
         }
       }
       h.sortieT = (h.sortieT || 0) + dt;
@@ -3520,6 +3910,7 @@ export class Game {
     this.updateVTOLs(dt);
     this.updateAirlifts(dt);
     this.updateTrucks(dt);
+    this.updateTanks(dt);
     this.updateHelis(dt);
     this.updateWounded(dt);
     this.updateBarriers(dt);
@@ -3542,7 +3933,7 @@ export class Game {
     const fieldEnemies = this.enemies.filter((e) => !e.garrison).length;
     if (this.status === 'playing' && !this.siege.active && !this.baseOverride.active && this.responseOrders.length === 0
         && !this.airTransports.some(a => !['return', 'land'].includes(a.state)) && this.airTroops.length === 0
-        && this.spawnQueue.length === 0 && fieldEnemies === 0 && !this.trucks.some(t => !t.dead && t.state !== 'leave')
+        && this.spawnQueue.length === 0 && fieldEnemies === 0 && !this.trucks.some(t => !t.dead && !t.disabled && t.state !== 'leave')
         && !this.vtols.some(v => v.state !== 'out') && !this.helis.some(h => !['egress', 'landing', 'taxi-in', 'service'].includes(h.state)) && this.wounded.length === 0) {
       this.waveActive = false;
       this.intermission = 0.9;
@@ -3692,6 +4083,18 @@ export class Game {
         total += p.comp.length;
       }
     });
+
+    // -------- CONVOY ARMOUR: tanks roll with the column --------
+    const tankCount =
+      this.phase === 'convoy' ? 2
+      : this.phase === 'siege' ? 2
+      : this.phase === 'assault' || this.phase === 'bombard' ? 1
+      : 0;
+    // A column can only field so much armour at once; the rest stays at the depot.
+    for (let i = 0; i < tankCount && this.tanks.filter((t) => !t.dead && !t.captured).length < 3; i++) {
+      this.dispatchTank({ x: this.px + rand(-140, 140), y: this.py + rand(-140, 140) });
+    }
+    if (tankCount > 0) this.tellStory({ id: `tanks-${this.wave}`, channel: 'LOGISTICS INTERCEPT / CONVOY ESCORT', title: 'Armour is moving with the column.', text: 'Every convoy now runs with a tank escort. Small arms do nothing to that hull: break the trucks with grenades, then either avoid the tank or take it for yourself — stand beside it and press F.' }, 11);
 
     // -------- ATTACK GUNSHIPS --------
     for (let i = 0; i < heliCount; i++) {
@@ -4675,7 +5078,7 @@ export class Game {
             dead = true; a.hp -= b.dmg; a.flash = 0.12; this.sparks(b.x, b.y, '#9fd8ff', 6); break;
           }
         }
-        const hitRadius = this.flyingPlane ? 115 : this.piloting ? 49 : this.drivingVan ? 52 : 16;
+        const hitRadius = this.flyingPlane ? 115 : this.piloting ? 49 : this.playerTank ? 56 : this.drivingVan ? 52 : 16;
         if (!dead && segmentCircle({ x: b.px, y: b.py }, b, { x: this.px, y: this.py }, hitRadius)) {
           dead = true; this.damagePlayer(b.dmg, b.x - b.vx * 0.12, b.y - b.vy * 0.12); this.sparks(b.x, b.y, '#ff8f8f', 8);
         }
@@ -5106,7 +5509,7 @@ export class Game {
     this.pickups.push({ kind, weapon, x, y, t: 0, life: 20 });
   }
 
-  private explode(x: number, y: number, radius: number, dmg: number, sound: boolean) {
+  private explode(x: number, y: number, radius: number, dmg: number, sound: boolean, opts?: { ownBomb?: boolean; grenade?: boolean }) {
     if (sound) sfx.explode();
     this.hitstop = Math.max(this.hitstop, 0.06);
     this.addLight(x, y, radius * 2.4, '255,180,90', 0.45);
@@ -5185,9 +5588,26 @@ export class Game {
         if (l.hp <= 0) { this.lasers.splice(this.lasers.indexOf(l), 1); this.score += 4500; this.sparks(l.x, l.y, '#fb9c88', 22); }
       }
       for (const s of [...this.satcoms]) if (!s.dead && Math.hypot(s.x - x, s.y - y) < radius + 30) { s.hp -= dmg * 1.5; if (s.hp <= 0) this.destroySatcom(s); }
+      // Convoy armour: explosives only, and even then at half effect.
+      for (const tk of this.tanks) {
+        if (tk.dead) continue;
+        if (Math.hypot(tk.x - x, tk.y - y) < radius + 62) this.hurtTank(tk, dmg);
+      }
       for (const v of this.vans) if (!v.dead && !v.reserved && !v.driving && Math.hypot(v.x - x, v.y - y) < radius + 45) {
         v.hp -= dmg * 1.5;
         if (v.hp <= 0) { v.dead = true; this.score += 350; this.sparks(v.x, v.y, '#edb57d', 17); }
+      }
+    }
+    // A grenade under a wheel: every ground vehicle on the map skids to a stop,
+    // smokes, and stays put. Tanks are the only ones that drive it off.
+    if (opts?.grenade) {
+      for (const t of this.trucks) {
+        if (t.dead || t.disabled) continue;
+        if (Math.hypot(t.x - x, t.y - y) < radius + 72) this.disableTruck(t);
+      }
+      for (const v of this.vans) {
+        if (v.dead || v.disabled) continue;
+        if (Math.hypot(v.x - x, v.y - y) < radius + 62) this.disableVan(v);
       }
     }
     // explosions crack trucks too
@@ -5204,7 +5624,9 @@ export class Game {
       if (Math.hypot(br.x - x, br.y - y) < radius + 12) this.igniteBarrel(br);
     }
     const pd = Math.hypot(this.px - x, this.py - y);
-    if (pd < radius) {
+    // Your own carpet bombs never hurt the bomber dropping them: the run would
+    // otherwise chew through the plane's hull on every pass.
+    if (pd < radius && !(opts?.ownBomb && this.flyingPlane)) {
       const f = 1 - pd / radius;
       const a = Math.atan2(this.py - y, this.px - x);
       this.pvx += Math.cos(a) * 380 * f; this.pvy += Math.sin(a) * 380 * f;
@@ -5218,7 +5640,7 @@ export class Game {
       if (g.bomb) {
         g.t -= dt; g.z = Math.max(0, g.z - dt * 135);
         g.x += g.vx * dt; g.y += g.vy * dt;
-        if (g.t <= 0) { this.nades.splice(i, 1); this.explode(g.x, g.y, 210, g.dmg, true); }
+        if (g.t <= 0) { this.nades.splice(i, 1); this.explode(g.x, g.y, 210, g.dmg, true, { ownBomb: true }); }
         continue;
       }
       g.t -= dt; g.vz -= 300 * dt;
@@ -5228,7 +5650,7 @@ export class Game {
       if (this.pointBlocked(g.x, g.y)) { g.vx *= -0.6; g.vy *= -0.6; g.x += g.vx * dt * 2; g.y += g.vy * dt * 2; }
       if (Math.random() < 0.5) this.addParticle(g.x, g.y - g.z, rand(-20, 20), rand(-40, -10), 0.4, 2.4, '#b9c6c2', false);
       if (g.t <= 0) {
-        this.explode(g.x, g.y, g.big ? 190 : 155, g.dmg, true);
+        this.explode(g.x, g.y, g.big ? 190 : 155, g.dmg, true, { grenade: true });
         this.nades.splice(i, 1);
       }
     }
@@ -5239,7 +5661,7 @@ export class Game {
       g.x = lerp(g.x, g.tx, dt * 3.6); g.y = lerp(g.y, g.ty, dt * 3.6);
       g.z = Math.sin(k * Math.PI) * 100;
       if (Math.random() < 0.5) this.addParticle(g.x, g.y - g.z, rand(-14, 14), rand(-30, -8), 0.35, 2, '#c1cfc9', false);
-      if (g.t <= 0) { this.explode(g.x, g.y, 145, 64, true); this.enemyNades.splice(i, 1); }
+      if (g.t <= 0) { this.explode(g.x, g.y, g.radius ?? 145, g.dmg ?? 64, true); this.enemyNades.splice(i, 1); }
     }
     // fuel barrel chains ripple outward one fuse at a time
     for (let i = this.barrelFuses.length - 1; i >= 0; i--) {
@@ -5334,6 +5756,23 @@ export class Game {
         this.explode(x, y, 235, 50, true);
         const safe = this.routes.nearest({ x, y }); this.px = safe.x; this.py = safe.y;
         this.setBanner('NIGHTJAR LOST', 'EMERGENCY EJECTION / CONTINUE ON FOOT');
+      }
+      return;
+    }
+    // The captured tank eats the hit — armour takes only a fraction of it.
+    if (this.playerTank) {
+      const t = this.playerTank;
+      t.hp = Math.max(0, t.hp - dmg * 0.35);
+      this.sparks(t.x, t.y, '#ffd166', 9);
+      if (t.hp <= 0) {
+        this.playerTank = null;
+        const x = t.x, y = t.y;
+        t.dead = true;
+        this.explode(x, y, 240, 0, true);
+        this.addText(x, y - 96, 'TANK DESTROYED', '#ff8f7a', 18);
+        this.hp = Math.max(1, this.hp - 45); this.iFrames = 1.5;
+        const safe = this.routes.nearest({ x, y }); this.px = safe.x; this.py = safe.y;
+        this.setBanner('TANK LOST', 'CREW SURVIVED — CONTINUE ON FOOT');
       }
       return;
     }
@@ -5549,8 +5988,9 @@ export class Game {
     this.drawMarks(ctx);
     this.drawEnemies(ctx, camX, camY);
     if (this.support === 'drone' && !this.piloting) this.drawSupportDrone(ctx);
-    if (this.status !== 'over' && !this.piloting && !this.flyingPlane && !this.drivingVan) this.drawPlayer(ctx);
+    if (this.status !== 'over' && !this.piloting && !this.flyingPlane && !this.drivingVan && !this.playerTank) this.drawPlayer(ctx);
     if (this.playerHeli) this.drawPlayerHeli(ctx, camX, camY);
+    this.drawTanks(ctx, camX, camY);
     this.drawVans(ctx, camX, camY);
     this.drawLasers(ctx, camX, camY);
     this.drawAllies(ctx);
@@ -5897,6 +6337,48 @@ export class Game {
         ctx.beginPath(); ctx.arc(x + Math.sin(now + i) * 12, y, r, 0, TAU); ctx.fill();
       }
     }
+    // Sectors 2 and 4 keep their own weather (dust / toxic haze) and now get
+    // falling snow on top of it as well.
+    if (theme.weather !== 'snow' && (this.sector === 2 || this.sector === 4)) {
+      this.drawSnowfall(ctx, 82, 1);
+    }
+    ctx.restore();
+  }
+
+  /** Layered snowfall, drawn additively over whatever weather a sector already has. */
+  private drawSnowfall(ctx: CanvasRenderingContext2D, count: number, strength = 1) {
+    const now = performance.now() * 0.001;
+    ctx.save();
+    const wind = Math.sin(now * 0.18) * 26 + Math.sin(now * 0.07) * 44;
+    const layers = [
+      { scale: 0.45, speed: 30, sway: 14, alpha: 0.24 },
+      { scale: 0.75, speed: 56, sway: 22, alpha: 0.38 },
+      { scale: 1, speed: 88, sway: 34, alpha: 0.52 },
+    ];
+    for (let l = 0; l < layers.length; l++) {
+      const layer = layers[l];
+      const n = Math.max(4, Math.round(count * (l === 0 ? 0.46 : l === 1 ? 0.32 : 0.22)));
+      ctx.fillStyle = `rgba(228,247,255,${Math.min(0.85, layer.alpha * strength)})`;
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const speed = layer.speed * (0.8 + ((i * 37) % 41) / 100);
+        const x = ((i * 233 + now * (wind * layer.scale + 26 * layer.scale)) % (this.w + 80)) - 40;
+        const y = ((i * 149 + now * speed) % (this.h + 80)) - 40;
+        const px = x + Math.sin(now * 1.4 + i * 0.7) * layer.sway;
+        const py = y + Math.sin(now * 0.9 + i) * 6;
+        const r = layer.scale * (1.1 + ((i * 29) % 17) / 12);
+        ctx.moveTo(px + r, py);
+        ctx.arc(px, py, r, 0, TAU);
+      }
+      ctx.fill();
+    }
+    // Soft cold glare so the flakes read as snow rather than white dust.
+    const cold = ctx.createLinearGradient(0, 0, 0, this.h);
+    cold.addColorStop(0, `rgba(190,225,240,${0.05 * strength})`);
+    cold.addColorStop(0.55, 'rgba(190,225,240,0)');
+    cold.addColorStop(1, `rgba(210,235,245,${0.035 * strength})`);
+    ctx.fillStyle = cold;
+    ctx.fillRect(0, 0, this.w, this.h);
     ctx.restore();
   }
 
@@ -6380,13 +6862,99 @@ export class Game {
     }
   }
 
+  /** Convoy tanks: hull, tracks, turret and that very long main gun. */
+  private drawTanks(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    for (const t of this.tanks) {
+      if (t.dead) continue;
+      if (t.x < camX - 220 || t.x > camX + this.w + 220 || t.y < camY - 220 || t.y > camY + this.h + 220) continue;
+      ctx.save();
+      // ground shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.beginPath(); ctx.ellipse(t.x + 8, t.y + 16, 104, 46, 0, 0, TAU); ctx.fill();
+      ctx.translate(t.x, t.y);
+      ctx.rotate(t.ang);
+      ctx.rotate(t.lean * 0.1);
+      // tracks
+      for (const side of [-1, 1]) {
+        ctx.fillStyle = '#171d1c';
+        ctx.beginPath(); ctx.roundRect(-92, side * 40 - 17, 184, 34, 8); ctx.fill();
+        ctx.fillStyle = '#2a322f';
+        for (let i = 0; i < 9; i++) ctx.fillRect(-86 + i * 20, side * 40 - 15, 12, 30);
+        ctx.strokeStyle = '#0d1110'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.roundRect(-92, side * 40 - 17, 184, 34, 8); ctx.stroke();
+      }
+      // hull
+      ctx.fillStyle = '#3d4a3f';
+      ctx.beginPath(); ctx.roundRect(-96, -36, 190, 72, 10); ctx.fill();
+      ctx.fillStyle = '#4c5a4d';
+      ctx.beginPath(); ctx.roundRect(-92, -32, 182, 28, 8); ctx.fill();
+      ctx.strokeStyle = 'rgba(20,26,22,0.85)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.roundRect(-96, -36, 190, 72, 10); ctx.stroke();
+      // sloped front plate + tow hooks
+      ctx.fillStyle = '#354136';
+      ctx.beginPath(); ctx.moveTo(94, -34); ctx.lineTo(112, -20); ctx.lineTo(112, 20); ctx.lineTo(94, 34); ctx.closePath(); ctx.fill();
+      // stowage boxes and spare track links on the hull
+      ctx.fillStyle = '#2f3a31'; ctx.fillRect(-88, -30, 34, 18); ctx.fillRect(-88, 14, 34, 16);
+      ctx.fillStyle = '#586a58'; ctx.fillRect(-50, -30, 26, 8);
+      // engine deck grilles
+      ctx.fillStyle = '#222a24';
+      for (let i = 0; i < 4; i++) ctx.fillRect(-86 + i * 9, -6, 6, 22);
+      // turret (independent of the hull)
+      ctx.save();
+      ctx.rotate(t.turret - t.ang);
+      ctx.fillStyle = '#46543f';
+      ctx.beginPath(); ctx.arc(0, 0, 38, 0, TAU); ctx.fill();
+      ctx.strokeStyle = 'rgba(16,22,18,0.9)'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(0, 0, 38, 0, TAU); ctx.stroke();
+      ctx.fillStyle = '#37452f';
+      ctx.beginPath(); ctx.roundRect(-20, -18, 40, 36, 12); ctx.fill();
+      // mantlet + barrel
+      ctx.fillStyle = '#2e3a2c'; ctx.fillRect(30, -9, 20, 18);
+      ctx.fillStyle = '#232c22'; ctx.fillRect(46, -6, 62, 12);
+      ctx.fillStyle = '#151a15'; ctx.fillRect(100, -8, 14, 16);
+      // muzzle brake
+      ctx.fillStyle = '#3a4636'; ctx.fillRect(104, -11, 8, 22);
+      // commander hatch + periscope
+      ctx.fillStyle = '#5b6b52'; ctx.beginPath(); ctx.arc(-12, -12, 9, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#8fb98a'; ctx.fillRect(2, -30, 12, 5);
+      ctx.restore();
+      // headlight + tail lamp
+      ctx.fillStyle = '#ffe9a8'; ctx.beginPath(); ctx.arc(106, -26, 4, 0, TAU); ctx.fill();
+      ctx.fillStyle = t.captured ? '#8be8ff' : '#ff5d5d';
+      ctx.beginPath(); ctx.arc(-98, 24, 4, 0, TAU); ctx.fill();
+      ctx.restore();
+
+      // health bar — you can see how little you are actually hurting it
+      const frac = clamp(t.hp / t.maxHp, 0, 1);
+      ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(t.x - 62, t.y - 84, 124, 7);
+      ctx.fillStyle = frac > 0.5 ? '#a8c48f' : frac > 0.22 ? '#ffd166' : '#ff6a5a';
+      ctx.fillRect(t.x - 62, t.y - 84, 124 * frac, 7);
+      ctx.strokeStyle = 'rgba(230,255,220,0.35)'; ctx.lineWidth = 1;
+      ctx.strokeRect(t.x - 62, t.y - 84, 124, 7);
+      ctx.fillStyle = t.captured ? '#8be8ff' : '#e8b0b0';
+      ctx.font = '900 10px ui-monospace, monospace'; ctx.textAlign = 'center';
+      ctx.fillText(t.captured ? 'S.H.I.E.L.D. TANK' : 'HYDRA TANK / MAIN GUN', t.x, t.y - 94);
+      ctx.textAlign = 'left';
+    }
+  }
+
   /** Hydra transport vans: parked in ranks, drivable, wreckable. */
   private drawVans(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     for (const v of this.vans) {
       if (v.dead || v.reserved) continue;
       if (v.x < camX - 160 || v.x > camX + this.w + 160 || v.y < camY - 160 || v.y > camY + this.h + 160) continue;
-      const near = !v.driving && Math.hypot(v.x - this.px, v.y - this.py) < 130 && !this.piloting && !this.flyingPlane;
+      const near = !v.driving && !v.disabled && Math.hypot(v.x - this.px, v.y - this.py) < 130 && !this.piloting && !this.flyingPlane && !this.playerTank;
       drawTransport(ctx, v, this.simulationTime, 0, near ? '[F] ARMED TRANSPORT' : '');
+      if (v.disabled) {
+        const t = performance.now() * 0.001;
+        for (let i = 0; i < 3; i++) {
+          const k = (t * 0.9 + i * 0.33) % 1;
+          ctx.fillStyle = `rgba(48,52,50,${0.4 * (1 - k)})`;
+          ctx.beginPath();
+          ctx.arc(v.x - 26 + Math.sin(t + i) * 8, v.y - 26 - k * 46, 6 + k * 12, 0, TAU);
+          ctx.fill();
+        }
+      }
     }
   }
 
