@@ -8,7 +8,7 @@ import { FacilityPainter } from './facilityArt';
 import { PROLOGUE, PHASE_STORY, PHASE_TACTICS, LIBRARY_VOLUMES, type StoryEntry } from './campaign';
 import { newSecurityState, updateSearchlights, drawSearchlight, type Searchlight } from './security';
 import { prepareStructures, structuralHealth, distanceToBlock, drawRuins, type Ruin } from './destruction';
-import { prisonIslandStructures, PRISON_DOOR, ISLAND } from './prisonIsland';
+import { prisonIslandStructures, PRISON_DOOR, ISLAND, BRIDGE } from './prisonIsland';
 import type { PrisonStats } from './prison';
 import { drawFixedWing, drawMantis, drawAirborne, type AirTransport, type AirborneTrooper } from './airlift';
 import { GOLIATH, MNEMOSYNE, type CampaignSites, type MegaCrate } from './campaignSites';
@@ -175,6 +175,8 @@ interface Enemy {
   boardingTruck?: number; boardingOrder?: number; alert?: boolean;
   facilityId?: string; postRole?: PostRole; patrol?: Point[]; patrolNode?: number;
   patrolTeam?: string; patrolSlot?: number;
+  /** Gate detail: holds the prison approach and lets the operative walk up to the gate. */
+  policePost?: boolean;
 }
 interface Squad {
   id: number; tactic: Tactic; state: SquadState; doctrine: Doctrine;
@@ -430,6 +432,8 @@ export class Game {
   private arrestCount = 0;
   /** One-time field report the first time the operative sees the island. */
   private prisonHinted = false;
+  /** Custody-officer posts around the prison: a permanent detail, not a chance spawn. */
+  private prisonPolicePosts: { x: number; y: number }[] = [];
   /** Seconds before the sally port can pull the operative in again (stops instant re-entry). */
   private prisonReentry = 0;
   mines: Mine[] = [];
@@ -695,10 +699,11 @@ export class Game {
     if (newCampaign) this.sector = 1;
     this.makeGroundPattern();
     const world = generateWorld(this.sector);
-    // PRISON ISLAND: a flooded north-west lagoon carrying the HYDRA correctional
-    // facility. Purely additive — every structure that already stood there keeps its
-    // collision, its loot and its garrison.
+    // PRISON ISLAND: brand-new ground east of the untouched legacy map — open water, a
+    // causeway bridge, the island and the prison compound. Nothing that already stood on
+    // the map is moved, removed or covered.
     const island = prisonIslandStructures();
+    this.prisonPolicePosts = island.policePosts;
     world.rects.push(...island.rects);
     world.zones.push(...island.zones);
     world.spotlightSpots.push(...island.lights.map((l) => ({
@@ -916,6 +921,19 @@ export class Game {
       e.ang = post.role === 'leader' ? Math.PI / 2 : index % 2 ? Math.PI / 2 : -Math.PI / 2;
       this.enemies.push(e);
     });
+    // THE CAGE detail: a permanent squad of custody officers on the island, the forecourt
+    // and both ends of the causeway bridge. They hold their posts until the operative
+    // comes within reach — then they come to arrest him.
+    this.prisonPolicePosts.forEach((post, index) => {
+      const stand = this.infantryRoutesReadyPoint(post.x, post.y);
+      const e = this.makeEnemy('custodian', stand.x, stand.y, -4000000 - index, index);
+      e.spawnT = 0; e.garrison = true; e.alert = true; e.policePost = true;
+      e.homeX = stand.x; e.homeY = stand.y;
+      e.ang = index % 2 ? Math.PI / 2 : -Math.PI / 2;
+      this.collide(e, e.def.r);
+      this.enemies.push(e);
+    });
+
     // Every installation has one fixed heavy machine-gun emplacement.
     const emplacementSites: { id: string; x: number; y: number; r: number }[] = [
       ...this.pois.filter(p => !p.secret).map(p => ({ id: p.id, x: p.x, y: p.y, r: Math.min(260, p.r * 0.42) })),
@@ -1943,7 +1961,10 @@ export class Game {
   }
 
   groundFactor(x: number, y: number) {
-    for (const z of this.zones) {
+    // Zones are painted in list order, so the LAST match is the one the operative actually
+    // stands on (the bridge deck over the sea, a road over the beach, …).
+    for (let i = this.zones.length - 1; i >= 0; i--) {
+      const z = this.zones[i];
       if (x < z.x || x > z.x + z.w || y < z.y || y > z.y + z.h) continue;
       switch (z.kind) {
         case 'road': return 1.14;
@@ -2280,7 +2301,10 @@ export class Game {
     if (this.prisonReentry > 0) this.prisonReentry = Math.max(0, this.prisonReentry - dt);
     if (this.status !== 'playing' || this.prisonReentry > 0) return;
     if (this.piloting || this.flyingPlane || this.drivingVan || this.playerTank) return;
-    if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 78) this.enterPrison('visit');
+    // The sally port is a gateway: any step inside its mouth takes you through.
+    const inGate = this.px > PRISON_DOOR.x - 150 && this.px < PRISON_DOOR.x + 60
+      && Math.abs(this.py - PRISON_DOOR.y) < 150;
+    if (inGate) this.enterPrison('visit');
   }
 
   /** The Cage is optional content, so the island announces itself once you get close. */
@@ -2291,8 +2315,8 @@ export class Game {
     this.tellStory({
       id: 'the-cage',
       channel: 'HYDRA CORRECTIONAL / THE CAGE',
-      title: 'A prison island sits in the north-west water.',
-      text: 'Concrete walls, eight watchtowers and a single pier: THE CAGE. The sally port at the end of the pier is the only door. Walk into it and the 3D prison opens — shoot the lock on your cell bars, reach the control rooms, or let every inmate out and come back out with a pistol you were never supposed to have.',
+      title: 'THE CAGE — a prison island east of the theatre.',
+      text: 'Concrete walls, eight watchtowers and one gate: THE CAGE. Cross the causeway bridge from the eastern coast, walk up the forecourt and step into the sally port. The 3D prison opens the moment you do — shoot the lock on your cell bars, reach the control rooms, or let every inmate out and come back out with a pistol you were never supposed to have.',
     }, 16);
   }
 
@@ -2443,8 +2467,8 @@ export class Game {
     const reward = escaped ? 25000 + stats.freed * 400 + stats.guardsDown * 250 : 1500;
     this.score += reward;
     this.status = 'playing';
-    // Step out of the gate onto the causeway road: never straight back into the trigger.
-    this.px = PRISON_DOOR.x + 170;
+    // Step out of the gate onto the forecourt: never straight back into the trigger.
+    this.px = PRISON_DOOR.x - 210;
     this.py = PRISON_DOOR.y;
     this.pvx = 0; this.pvy = 0;
     this.prisonReentry = 2.5;
@@ -4487,8 +4511,8 @@ export class Game {
     if (this.phase === 'recon' || this.wave < 2) return type;
     if (type !== 'guard' && type !== 'grunt' && type !== 'shieldman' && type !== 'warden') return type;
     const already = this.enemies.filter((e) => e.type === 'custodian' && e.hp > 0).length;
-    if (already >= 2 + Math.floor(this.wave / 3)) return type;
-    return Math.random() < 0.075 ? 'custodian' : type;
+    if (already >= 8 + this.wave * 2) return type;
+    return Math.random() < 0.26 ? 'custodian' : type;
   }
 
   private spawnEnemy(type: string, squadId: number, slot: number, dropX?: number, dropY?: number) {
@@ -4989,7 +5013,10 @@ export class Game {
       if (e.type === 'custodian' && !this.piloting && !this.flyingPlane && !this.drivingVan
           && !this.playerTank && dist < def.r + 17 && this.status === 'playing') {
         // A dash or the AEGIS shield still beats a pair of handcuffs.
-        if (this.iFrames <= 0 && this.aegisTime <= 0 && this.dashT <= 0) { this.beginArrest(e); return; }
+        // The gate detail only steps in once the operative is past the sally port; on the
+        // bridge and the forecourt they let him walk up to the door.
+        const mayCuff = !e.policePost || this.px > PRISON_DOOR.x - 40;
+        if (mayCuff && this.iFrames <= 0 && this.aegisTime <= 0 && this.dashT <= 0) { this.beginArrest(e); return; }
       }
       // contact damage
       if (!this.piloting && !this.flyingPlane && dist < def.r + 15 && def.dmg > 0) {
@@ -6487,17 +6514,26 @@ export class Game {
     ctx.textAlign = 'center';
     ctx.fillStyle = `rgba(190,214,220,${near ? 0.55 : 0.32})`;
     ctx.font = 'bold 40px ui-monospace, monospace';
-    ctx.fillText('THE CAGE', ISLAND.x, ISLAND.y - 860);
+    ctx.fillText('THE CAGE', ISLAND.x, ISLAND.y - 1560);
     ctx.font = '12px ui-monospace, monospace';
     ctx.fillStyle = `rgba(150,180,186,${near ? 0.5 : 0.28})`;
-    ctx.fillText('HYDRA CORRECTIONAL FACILITY / NORTH ATLANTIC', ISLAND.x, ISLAND.y - 838);
+    ctx.fillText('HYDRA CORRECTIONAL FACILITY / THE EASTERN WATER', ISLAND.x, ISLAND.y - 1538);
+    // The crossing itself, so the way in is obvious from the mainland side.
+    ctx.strokeStyle = 'rgba(216,180,90,0.22)'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(BRIDGE.x, BRIDGE.y + BRIDGE.h / 2);
+    ctx.lineTo(BRIDGE.x + BRIDGE.w, BRIDGE.y + BRIDGE.h / 2);
+    ctx.stroke();
     if (near) {
+      ctx.fillStyle = 'rgba(216,180,90,0.45)';
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.fillText('CAUSEWAY BRIDGE · 1.7 km', BRIDGE.x + BRIDGE.w / 2, BRIDGE.y - 24);
       ctx.fillStyle = 'rgba(216,180,90,0.5)';
       ctx.font = '11px ui-monospace, monospace';
-      ctx.fillText('SALLY PORT · FROM THE CAUSEWAY', PRISON_DOOR.x - 150, PRISON_DOOR.y - 130);
-      ctx.fillText('STEP INTO THE GATE TO ENTER', PRISON_DOOR.x - 150, PRISON_DOOR.y - 114);
+      ctx.fillText('SALLY PORT · CROSS THE BRIDGE', PRISON_DOOR.x - 330, PRISON_DOOR.y - 250);
+      ctx.fillText('STEP INTO THE GATE TO ENTER', PRISON_DOOR.x - 330, PRISON_DOOR.y - 234);
       ctx.strokeStyle = 'rgba(216,180,90,0.35)'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(PRISON_DOOR.x - 60, PRISON_DOOR.y - 96); ctx.lineTo(PRISON_DOOR.x - 30, PRISON_DOOR.y - 40); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PRISON_DOOR.x - 200, PRISON_DOOR.y - 214); ctx.lineTo(PRISON_DOOR.x - 40, PRISON_DOOR.y - 30); ctx.stroke();
     }
     ctx.textAlign = 'left';
     ctx.restore();
@@ -8957,7 +8993,7 @@ export class Game {
         const km = (Math.hypot(ISLAND.x - this.px, ISLAND.y - this.py) / 1000).toFixed(1);
         const toGate = Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py);
         if (toGate > 260) {
-          const txt = toGate < 320 ? 'THE CAGE · SALLY PORT AHEAD — STEP INTO THE GATE' : `THE CAGE · SALLY PORT ${Math.round(toGate / 10)} m · FOLLOW THE CAUSEWAY`;
+          const txt = toGate < 320 ? 'THE CAGE · SALLY PORT AHEAD — STEP INTO THE GATE' : `THE CAGE · SALLY PORT ${Math.round(toGate / 10)} m · CROSS THE BRIDGE`;
           ctx.font = '700 11px "Chakra Petch", sans-serif';
           const tw = ctx.measureText(txt).width;
           ctx.fillStyle = 'rgba(6,18,22,0.72)';
