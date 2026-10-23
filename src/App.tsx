@@ -23,7 +23,7 @@ const emptyHud: Hud = {
   sector: 1, basesCleared: 0, sectorName: 'THE FALLEN HUB', destination: '', transitPct: 0,
   driving: false, tank: false, flyingPlane: false, allies: 0, barricades: 0, siegeActive: false,
   lasersHeld: 0, poisCaptured: 0, poisTotal: 5, vaultFound: false, nearPrompt: '',
-  coords: 'X 6000  Y 6800', gatePrompt: '', aegisCharges: 0, aegisTime: 0,
+  coords: 'X 6000  Y 6800', gatePrompt: '', aegisCharges: 0, aegisTime: 0, mouseSens: 1,
   vehicleHp: 0, vehicleMax: 1, vehicleFuel: 100,
   blackoutHud: false, facilityLabel: '', facilityStatus: '',
   alarmActive: false, alarmExposure: 0, alarmJammed: 0, responseRemaining: 0,
@@ -188,6 +188,16 @@ export default function App() {
     };
   }, [startRun, togglePause, chooseUpgrade, tour, briefing]);
 
+  const cycleMouse = useCallback(() => {
+    const g = gameRef.current;
+    if (!g) return;
+    const steps = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3];
+    const next = steps.find((v) => v > g.aimSens + 1e-6) ?? steps[0];
+    g.setAimSens(next);
+    setHud((h) => ({ ...h, mouseSens: g.aimSens }));
+    sfx.click();
+  }, []);
+
   const toggleMute = useCallback(() => {
     setMuted((m) => { sfx.setMuted(!m); return !m; });
   }, []);
@@ -233,6 +243,7 @@ export default function App() {
           onGate={() => gameRef.current?.toggleGate()}
           onAegis={() => gameRef.current?.activateAegis()}
           onGuide={() => gameRef.current?.toggleVaultRoute()}
+          onMouse={cycleMouse}
         />
       )}
 
