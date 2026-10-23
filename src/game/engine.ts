@@ -428,6 +428,8 @@ export class Game {
   private arrestStage = 0;
   private prisonVisits = 0;
   private arrestCount = 0;
+  /** One-time field report the first time the operative sees the island. */
+  private prisonHinted = false;
   mines: Mine[] = [];
   helis: Heli[] = [];
   barriers: Barrier[] = [];
@@ -802,6 +804,7 @@ export class Game {
     this.planeSpot = world.planeSpot;
     this.allies = []; this.barricades = [];
     this.plane = null; this.drivingVan = null; this.flyingPlane = false;
+    this.prisonHinted = false;
     this.vaultOpen = false; this.vaultChoice = 'none';
     this.siege = { active: false, t: 0, poi: '', waves: 0 };
     this.prompt = '';
@@ -1957,6 +1960,7 @@ export class Game {
 
   private updatePlayer(dt: number) {
     this.updateVault(dt);
+    this.updatePrisonHint();
     if (this.status !== 'playing') return;
     if (this.flyingPlane) { this.updatePlane(dt); return; }
     if (this.drivingVan) { this.updateDrivenVan(dt); return; }
@@ -2262,6 +2266,19 @@ export class Game {
       this.makeSquad(id, comp, m % 2 ? 'blitz' : 'column', { x: poi.x, y: poi.y });
       this.launchAirlift('mantis', comp, id, { x: poi.x + rand(-220, 220), y: poi.y + rand(-220, 220) });
     }
+  }
+
+  /** The Cage is optional content, so the island announces itself once you get close. */
+  private updatePrisonHint() {
+    if (this.prisonHinted) return;
+    if (Math.hypot(ISLAND.x - this.px, ISLAND.y - this.py) > 2600) return;
+    this.prisonHinted = true;
+    this.tellStory({
+      id: 'the-cage',
+      channel: 'HYDRA CORRECTIONAL / THE CAGE',
+      title: 'A prison island sits in the north-west water.',
+      text: 'Concrete walls, eight watchtowers and a single pier: THE CAGE. The sally port at the end of the pier is the only door. Walk into it and the 3D prison opens — shoot the lock on your cell bars, reach the control rooms, or let every inmate out and come back out with a pistol you were never supposed to have.',
+    }, 16);
   }
 
   /** Reveal the vault when the operative stumbles onto the buried hatch. */
@@ -8702,15 +8719,14 @@ export class Game {
     for (const b of this.bullets) glow(b.x, b.y, b.rocket ? 150 : 62, b.friendly ? '140,230,255' : '255,120,90', b.rocket ? 0.4 : 0.16);
     // pickups
     for (const p of this.pickups) glow(p.x, p.y, 100, p.kind === 'health' ? '90,255,150' : p.kind === 'grenade' ? '140,210,255' : '255,210,130', 0.16);
-    // gunship spotlights + engine glow
+    // Aircraft carry no light while they are airborne: gunships, the operative's
+    // gunship, the bomber, VTOLs and the transports are dark in flight.
     for (const h of this.helis) {
-      glow(h.x, h.y, 420, h.medevac ? '140,255,180' : '255,170,110', 0.4);
-      // downward searchlight cone tip
-      glow(h.x + Math.cos(h.ang) * 120, h.y + Math.sin(h.ang) * 120, 260, '255,240,200', 0.22);
+      if ((h.altitude ?? 65) >= 8) continue;
+      glow(h.x, h.y, 220, h.medevac ? '140,255,180' : '255,170,110', 0.16);
     }
-    if (this.playerHeli) {
-      glow(this.playerHeli.x, this.playerHeli.y, this.piloting ? 480 : 220, '120,235,255', this.piloting ? 0.48 : 0.18);
-      if (this.piloting) glow(this.playerHeli.x + Math.cos(this.playerHeli.ang) * 100, this.playerHeli.y + Math.sin(this.playerHeli.ang) * 100, 260, '255,235,180', 0.26);
+    if (this.playerHeli && !this.piloting) {
+      glow(this.playerHeli.x, this.playerHeli.y, 200, '120,235,255', 0.14);
     }
     // energy barriers
     for (const b of this.barriers) glow(b.x, b.y, 220, '120,210,255', 0.3);
@@ -8727,7 +8743,7 @@ export class Game {
     for (const v of this.vans) if (!v.dead && v.driving) glow(v.x + Math.cos(v.ang) * 110, v.y + Math.sin(v.ang) * 110, 340, '255,235,170', 0.3);
     for (const a of this.allies) glow(a.x, a.y, 120, '120,255,200', 0.14);
     for (const h of this.hangars) if (h.open > 0.15) glow(h.x + h.w / 2, h.y + h.h / 2, 340 * h.open, '140,232,255', 0.28 * h.open);
-    if (this.plane) glow(this.plane.x, this.plane.y, this.flyingPlane ? 640 : 320, '150,240,255', this.flyingPlane ? 0.5 : 0.22);
+    if (this.plane && !this.flyingPlane) glow(this.plane.x, this.plane.y, 300, '150,240,255', 0.2);
     if (this.vaultOpen) glow(this.vaultSpot.x + 300, this.vaultSpot.y, 620, '140,255,220', 0.3);
     // truck headlights
     for (const t of this.trucks) {
@@ -8735,12 +8751,7 @@ export class Game {
       glow(t.x + Math.cos(t.ang) * 110, t.y + Math.sin(t.ang) * 110, 340, '255,235,170', 0.3);
       glow(t.x, t.y, 220, '255,200,120', 0.15);
     }
-    // VTOL engine light + rotor wash
-    for (const a of this.airTransports) glow(a.x, a.y - a.altitude * 0.55, 210, '177,206,222', 0.13);
-    for (const v of this.vtols) {
-      glow(v.x, v.y, v.state === 'hover' ? 500 : 300, '160,220,240', v.state === 'hover' ? 0.5 : 0.3);
-      if (v.state === 'hover') glow(v.x, v.y + 30, 380, '255,180,100', 0.25);
-    }
+    // VTOLs and air transports are dark in flight as well: no engine halo, no hover glow.
     // blinking beacons on watchtowers
     const tBlink = performance.now();
     if (!dark) for (const bp of this.beaconSpots) {
@@ -8846,6 +8857,26 @@ export class Game {
       ctx.restore(); ctx.save(); ctx.textAlign = 'center'; ctx.font = '10px monospace'; ctx.fillStyle = '#b7ebdb';
       ctx.fillText('VAULT / 980 : 7040', clamp(x, 100, this.w - 100), y + 24);
       ctx.restore();
+    }
+    // THE CAGE: an optional landmark, so it always keeps a bearing marker on screen.
+    {
+      const sx = ISLAND.x - camX, sy = ISLAND.y - camY;
+      if (sx < 80 || sy < 80 || sx > this.w - 80 || sy > this.h - 80) {
+        const ang = Math.atan2(ISLAND.y - this.py, ISLAND.x - this.px);
+        const ex = cx + Math.cos(ang) * (this.w / 2 - pad);
+        const ey = cy + Math.sin(ang) * (this.h / 2 - pad);
+        ctx.save();
+        ctx.translate(ex, ey); ctx.rotate(ang);
+        ctx.fillStyle = 'rgba(159,216,230,0.8)';
+        ctx.beginPath(); ctx.moveTo(13, 0); ctx.lineTo(-8, 8); ctx.lineTo(-8, -8); ctx.closePath(); ctx.fill();
+        ctx.restore();
+        const km = (Math.hypot(ISLAND.x - this.px, ISLAND.y - this.py) / 1000).toFixed(1);
+        ctx.save();
+        ctx.textAlign = 'center'; ctx.font = '700 10px "Chakra Petch", sans-serif';
+        ctx.fillStyle = 'rgba(190,232,242,0.85)';
+        ctx.fillText(`THE CAGE · ${km} km`, cx + Math.cos(ang) * (this.w / 2 - pad - 30), cy + Math.sin(ang) * (this.h / 2 - pad - 30));
+        ctx.restore();
+      }
     }
     // objective marker: fortress / general
     const target = this.general
@@ -8957,6 +8988,16 @@ export class Game {
       ctx.strokeStyle = color; ctx.lineWidth = 1;
       ctx.strokeRect(fx - 2.5, fy - 2.5, 5, 5);
       if (f.secured) { ctx.fillStyle = color; ctx.fillRect(fx - 1, fy - 1, 2, 2); }
+    }
+    // THE CAGE — the prison island, on the map in every sector
+    {
+      const px2 = x + ISLAND.x * sx, py2 = y + ISLAND.y * sy;
+      ctx.strokeStyle = '#9fd8e6'; ctx.lineWidth = 1.4;
+      ctx.strokeRect(px2 - 4, py2 - 4, 8, 8);
+      ctx.fillStyle = '#9fd8e6'; ctx.fillRect(px2 - 1.5, py2 - 1.5, 3, 3);
+      ctx.font = '7px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('CAGE', px2, py2 - 8);
+      ctx.textAlign = 'left';
     }
     for (const hp of this.helipads) {
       ctx.fillStyle = '#57c8b8';

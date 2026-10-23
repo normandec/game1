@@ -65,9 +65,14 @@ export function prisonIslandStructures(): { rects: Rect[]; zones: Zone[]; lights
   add(cx0 + cw - 330, cy0 + ch - 260, 210, 150, 'bunker');
 
   // ---- pier out into the lagoon ---------------------------------------
+  // The deck is a walkable zone, not a solid block: the operative has to be able
+  // to walk the pier to the sally port. Only the two rails are solid.
   const pierTop = cy0 + ch + T;
-  add(PRISON_DOOR.x - 46, pierTop, 92, PRISON_DOOR.y - pierTop + 60, 'wall');
-  add(PRISON_DOOR.x - 78, PRISON_DOOR.y + 30, 156, 40, 'bunker');
+  const pierLen = PRISON_DOOR.y - pierTop + 40;
+  zones.push({ x: PRISON_DOOR.x - 48, y: pierTop, w: 96, h: pierLen, kind: 'road' });
+  add(PRISON_DOOR.x - 58, pierTop, 12, pierLen, 'fence');   // west rail
+  add(PRISON_DOOR.x + 46, pierTop, 12, pierLen, 'fence');   // east rail
+  add(PRISON_DOOR.x - 190, pierTop + 20, 120, 90, 'bunker');       // pier-head shed, beside the deck
   // approach causeway from the beach
   zones.push({ x: PRISON_DOOR.x - 60, y: pierTop, w: 120, h: PRISON_DOOR.y - pierTop, kind: 'road' });
 
