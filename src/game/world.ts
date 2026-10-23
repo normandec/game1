@@ -196,7 +196,7 @@ export function generateWorld(sector = 1): WorldData {
   const reservedSites: { x: number; y: number; w: number; h: number }[] = [];
   // THE CAGE approach lane: the causeway has to reach the western coast through clear
   // ground, so this corridor is reserved before any random structure is placed.
-  reservedSites.push({ x: 0, y: 3040, w: 1750, h: 470 });
+  reservedSites.push({ x: 0, y: 1760, w: 2400, h: 560 });
   const pois: PoiDef[] = [];
   const facilities: Facility[] = [];
   const facilityGuards: FacilityGuard[] = [];
@@ -963,6 +963,9 @@ export function generateWorld(sector = 1): WorldData {
     if (yard.doors) shiftPts(yard.doors);
     if (yard.padSpots) shiftPts(yard.padSpots);
   }
+
+  // Mainland service road: ties the island causeway into the legacy ring road.
+  zones.push({ x: 3610, y: 1880, w: 2260, h: 240, kind: 'road' });
 
   // Map border ramparts, now hugging the widened arena (west edge x = 0).
   const B2 = 60;

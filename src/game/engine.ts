@@ -2443,9 +2443,9 @@ export class Game {
     const reward = escaped ? 25000 + stats.freed * 400 + stats.guardsDown * 250 : 1500;
     this.score += reward;
     this.status = 'playing';
-    // Step out of the gate and down the apron: never straight back into the trigger.
-    this.px = PRISON_DOOR.x;
-    this.py = PRISON_DOOR.y + 150;
+    // Step out of the gate onto the causeway road: never straight back into the trigger.
+    this.px = PRISON_DOOR.x + 170;
+    this.py = PRISON_DOOR.y;
     this.pvx = 0; this.pvy = 0;
     this.prisonReentry = 2.5;
     this.hp = Math.max(40, Math.min(this.maxHp, this.hp));
@@ -6308,6 +6308,7 @@ export class Game {
     ctx.translate(-camX, -camY);
 
     this.drawGround(ctx, camX, camY);
+    this.drawLandmass(ctx, camX, camY);
     this.drawZones(ctx, camX, camY);
     this.facilityPainter.drawGround(ctx, this.facilities, { x: camX, y: camY, w: this.w, h: this.h }, this.simulationTime);
     drawRuins(ctx, this.ruins, { x: camX, y: camY, w: this.w, h: this.h });
@@ -6486,17 +6487,17 @@ export class Game {
     ctx.textAlign = 'center';
     ctx.fillStyle = `rgba(190,214,220,${near ? 0.55 : 0.32})`;
     ctx.font = 'bold 40px ui-monospace, monospace';
-    ctx.fillText('THE CAGE', ISLAND.x, ISLAND.y - 40);
+    ctx.fillText('THE CAGE', ISLAND.x, ISLAND.y - 860);
     ctx.font = '12px ui-monospace, monospace';
     ctx.fillStyle = `rgba(150,180,186,${near ? 0.5 : 0.28})`;
-    ctx.fillText('HYDRA CORRECTIONAL FACILITY / NORTH ATLANTIC', ISLAND.x, ISLAND.y - 18);
+    ctx.fillText('HYDRA CORRECTIONAL FACILITY / NORTH ATLANTIC', ISLAND.x, ISLAND.y - 838);
     if (near) {
       ctx.fillStyle = 'rgba(216,180,90,0.5)';
       ctx.font = '11px ui-monospace, monospace';
-      ctx.fillText('SALLY PORT · FOLLOW THE CAUSEWAY', PRISON_DOOR.x, PRISON_DOOR.y + 52);
-      ctx.fillText('STEP INTO THE GATE TO ENTER', PRISON_DOOR.x, PRISON_DOOR.y + 68);
+      ctx.fillText('SALLY PORT · FROM THE CAUSEWAY', PRISON_DOOR.x - 150, PRISON_DOOR.y - 130);
+      ctx.fillText('STEP INTO THE GATE TO ENTER', PRISON_DOOR.x - 150, PRISON_DOOR.y - 114);
       ctx.strokeStyle = 'rgba(216,180,90,0.35)'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(PRISON_DOOR.x, PRISON_DOOR.y + 30); ctx.lineTo(PRISON_DOOR.x, PRISON_DOOR.y + 8); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PRISON_DOOR.x - 60, PRISON_DOOR.y - 96); ctx.lineTo(PRISON_DOOR.x - 30, PRISON_DOOR.y - 40); ctx.stroke();
     }
     ctx.textAlign = 'left';
     ctx.restore();
@@ -6832,6 +6833,106 @@ export class Game {
     ctx.stroke();
   }
 
+  /** Open water. Drawn before any land so the island can never be painted over by sea. */
+  private drawSea(ctx: CanvasRenderingContext2D, sea: { x: number; y: number; w: number; h: number }, camX: number, camY: number) {
+          // The flooded north-west coast: deep water, slow swell, surf on the rocks.
+          const g = ctx.createLinearGradient(sea.x, sea.y, sea.x + sea.w * 0.4, sea.y + sea.h);
+          g.addColorStop(0, 'rgba(8,28,38,0.90)');
+          g.addColorStop(0.55, 'rgba(10,38,50,0.86)');
+          g.addColorStop(1, 'rgba(14,44,52,0.84)');
+          ctx.fillStyle = g; ctx.fillRect(sea.x, sea.y, sea.w, sea.h);
+          const t = this.simulationTime;
+          // The western sea is huge: only tessellate the water that is on screen.
+          const x0 = Math.max(sea.x, camX - 80), x1 = Math.min(sea.x + sea.w, camX + this.w + 80);
+          const y0 = Math.max(sea.y, camY - 80), y1 = Math.min(sea.y + sea.h, camY + this.h + 80);
+          ctx.strokeStyle = 'rgba(126,206,214,0.10)'; ctx.lineWidth = 2;
+          for (let y = Math.ceil((y0 - sea.y - 40) / 74) * 74 + sea.y + 40; y < y1; y += 74) {
+            ctx.beginPath();
+            for (let x = x0; x < x1; x += 46) {
+              const wave = Math.sin((x * 0.011) + (y * 0.017) + t * 1.25) * 7;
+              if (x === x0) ctx.moveTo(x, y + wave); else ctx.lineTo(x, y + wave);
+            }
+            ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(196,240,244,0.05)'; ctx.lineWidth = 1;
+          for (let y = Math.ceil((y0 - sea.y - 14) / 37) * 37 + sea.y + 14; y < y1; y += 37) {
+            ctx.beginPath();
+            for (let x = x0; x < x1; x += 70) {
+              const wave = Math.sin((x * 0.02) - (y * 0.013) - t * 1.9) * 4;
+              if (x === x0) ctx.moveTo(x, y + wave); else ctx.lineTo(x, y + wave);
+            }
+            ctx.stroke();
+          }
+  }
+
+  /** Solid ground for the prison island: land must never read as water. */
+  private drawLandmass(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    const onScreen = (z: { x: number; y: number; w: number; h: number }) =>
+      !(z.x + z.w < camX - 60 || z.x > camX + this.w + 60 || z.y + z.h < camY - 60 || z.y > camY + this.h + 60);
+    for (const z of this.zones) if (onScreen(z) && z.kind === 'lagoon') this.drawSea(ctx, z, camX, camY);
+    for (const z of this.zones) {
+      if (!onScreen(z) || (z.kind !== 'sand' && z.kind !== 'grass')) continue;
+      const beach = z.kind === 'sand';
+      const islandShaped = beach && z.w > 1800 && z.h > 1800;
+      const cx = z.x + z.w / 2, cy = z.y + z.h / 2;
+      const g = islandShaped
+        ? ctx.createRadialGradient(cx, cy, Math.min(z.w, z.h) * 0.1, cx, cy, Math.max(z.w, z.h) * 0.62)
+        : ctx.createLinearGradient(z.x, z.y, z.x, z.y + z.h);
+      if (islandShaped) {
+        g.addColorStop(0, '#4f4634');
+        g.addColorStop(0.55, '#5a4f3b');
+        g.addColorStop(1, '#3b372b');
+      } else if (beach) {
+        g.addColorStop(0, '#4a4335');
+        g.addColorStop(0.45, '#554b39');
+        g.addColorStop(1, '#3f3a2e');
+      } else {
+        g.addColorStop(0, '#2b3229');
+        g.addColorStop(0.5, '#333a2e');
+        g.addColorStop(1, '#262c24');
+      }
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      if (islandShaped) {
+        // a ragged ellipse: an island, not a rectangle dropped into the sea
+        const steps = 72;
+        for (let i = 0; i <= steps; i++) {
+          const a = (i / steps) * TAU;
+          const wobble = 1 + Math.sin(a * 3 + 0.7) * 0.035 + Math.sin(a * 7 + 2.1) * 0.022;
+          const x = cx + Math.cos(a) * (z.w / 2) * wobble;
+          const y = cy + Math.sin(a) * (z.h / 2) * wobble;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+      } else {
+        ctx.rect(z.x, z.y, z.w, z.h);
+      }
+      ctx.fill();
+      ctx.strokeStyle = beach ? 'rgba(126,110,78,0.4)' : 'rgba(96,110,84,0.3)';
+      ctx.lineWidth = 5;
+      ctx.stroke();
+      if (beach) {
+        // surf: a lighter ring just outside the shoreline
+        ctx.strokeStyle = 'rgba(206,236,240,0.13)'; ctx.lineWidth = 9;
+        ctx.beginPath();
+        if (islandShaped) {
+          const steps = 72, surge = 1 + Math.sin(this.simulationTime * 1.4) * 0.006;
+          for (let i = 0; i <= steps; i++) {
+            const a = (i / steps) * TAU;
+            const wobble = 1 + Math.sin(a * 3 + 0.7) * 0.035 + Math.sin(a * 7 + 2.1) * 0.022;
+            const x = cx + Math.cos(a) * (z.w / 2 + 26) * wobble * surge;
+            const y = cy + Math.sin(a) * (z.h / 2 + 26) * wobble * surge;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.closePath();
+        } else {
+          ctx.rect(z.x, z.y, z.w, z.h);
+        }
+        ctx.stroke();
+      }
+    }
+  }
+
   private drawZones(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     for (const z of this.zones) {
       if (z.x + z.w < camX - 60 || z.x > camX + this.w + 60 || z.y + z.h < camY - 60 || z.y > camY + this.h + 60) continue;
@@ -6852,48 +6953,11 @@ export class Game {
           ctx.strokeStyle = 'rgba(255,209,102,0.14)'; ctx.lineWidth = 2;
           ctx.strokeRect(z.x, z.y, z.w, z.h);
           break;
-        case 'sand': ctx.fillStyle = 'rgba(190,160,100,0.05)'; ctx.fillRect(z.x, z.y, z.w, z.h); break;
-        case 'lagoon': {
-          // The flooded north-west coast: deep water, slow swell, surf on the rocks.
-          const g = ctx.createLinearGradient(z.x, z.y, z.x + z.w * 0.4, z.y + z.h);
-          g.addColorStop(0, 'rgba(8,28,38,0.94)');
-          g.addColorStop(0.55, 'rgba(10,38,50,0.92)');
-          g.addColorStop(1, 'rgba(14,44,52,0.90)');
-          ctx.fillStyle = g; ctx.fillRect(z.x, z.y, z.w, z.h);
-          const t = this.simulationTime;
-          // The western sea is huge: only tessellate the water that is on screen.
-          const x0 = Math.max(z.x, camX - 80), x1 = Math.min(z.x + z.w, camX + this.w + 80);
-          const y0 = Math.max(z.y, camY - 80), y1 = Math.min(z.y + z.h, camY + this.h + 80);
-          ctx.strokeStyle = 'rgba(126,206,214,0.10)'; ctx.lineWidth = 2;
-          for (let y = Math.ceil((y0 - z.y - 40) / 74) * 74 + z.y + 40; y < y1; y += 74) {
-            ctx.beginPath();
-            for (let x = x0; x < x1; x += 46) {
-              const wave = Math.sin((x * 0.011) + (y * 0.017) + t * 1.25) * 7;
-              if (x === x0) ctx.moveTo(x, y + wave); else ctx.lineTo(x, y + wave);
-            }
-            ctx.stroke();
-          }
-          ctx.strokeStyle = 'rgba(196,240,244,0.05)'; ctx.lineWidth = 1;
-          for (let y = Math.ceil((y0 - z.y - 14) / 37) * 37 + z.y + 14; y < y1; y += 37) {
-            ctx.beginPath();
-            for (let x = x0; x < x1; x += 70) {
-              const wave = Math.sin((x * 0.02) - (y * 0.013) - t * 1.9) * 4;
-              if (x === x0) ctx.moveTo(x, y + wave); else ctx.lineTo(x, y + wave);
-            }
-            ctx.stroke();
-          }
-          // surf hugging the island
-          const surf = 0.5 + Math.sin(t * 1.6) * 0.5;
-          for (let ring = 0; ring < 3; ring++) {
-            ctx.strokeStyle = `rgba(222,248,250,${0.10 - ring * 0.025 + surf * 0.03})`;
-            ctx.lineWidth = 10 - ring * 3;
-            ctx.beginPath();
-            ctx.ellipse(ISLAND.x, ISLAND.y, ISLAND.r + 26 + ring * 26 + surf * 10, (ISLAND.r + 26 + ring * 26 + surf * 10) * 0.82, 0, 0, TAU);
-            ctx.stroke();
-          }
-          break;
-        }
-        case 'grass': ctx.fillStyle = 'rgba(90,160,110,0.045)'; ctx.fillRect(z.x, z.y, z.w, z.h); break;
+        // Sand and grass are painted by drawLandmass() — a translucent wash here would
+        // stack a dozen overlapping rectangles into a solid block.
+        case 'sand': break;
+        case 'lagoon': break;   // the sea is painted by drawLandmass(), under the land
+        case 'grass': break;
         case 'fuel': ctx.fillStyle = 'rgba(190,110,50,0.06)'; ctx.fillRect(z.x, z.y, z.w, z.h); break;
         case 'runway': {
           ctx.fillStyle = 'rgba(24,32,36,0.85)'; ctx.fillRect(z.x, z.y, z.w, z.h);
@@ -8892,8 +8956,8 @@ export class Game {
         ctx.restore();
         const km = (Math.hypot(ISLAND.x - this.px, ISLAND.y - this.py) / 1000).toFixed(1);
         const toGate = Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py);
-        if (toGate < 2600) {
-          const txt = toGate < 230 ? 'THE CAGE · SALLY PORT — STEP IN' : `THE CAGE · SALLY PORT ${Math.round(toGate / 10)} m · FOLLOW THE CAUSEWAY`;
+        if (toGate > 260) {
+          const txt = toGate < 320 ? 'THE CAGE · SALLY PORT AHEAD — STEP INTO THE GATE' : `THE CAGE · SALLY PORT ${Math.round(toGate / 10)} m · FOLLOW THE CAUSEWAY`;
           ctx.font = '700 11px "Chakra Petch", sans-serif';
           const tw = ctx.measureText(txt).width;
           ctx.fillStyle = 'rgba(6,18,22,0.72)';
