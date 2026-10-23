@@ -519,6 +519,8 @@ export class Game {
   // input
   keys: Record<string, boolean> = {};
   mouseX = 0; mouseY = 0; firing = false; isTouch = false;
+  /** Mouse is captured by the canvas, so the cursor cannot escape to the browser chrome. */
+  pointerLocked = false;
   moveStick: Stick = { id: -1, ox: 0, oy: 0, x: 0, y: 0, active: false };
   aimStick: Stick = { id: -1, ox: 0, oy: 0, x: 0, y: 0, active: false };
 
@@ -551,6 +553,8 @@ export class Game {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('pointerup', this.onWindowUp);
+    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    if (this.pointerLocked && document.exitPointerLock) document.exitPointerLock();
     const c = this.canvas;
     c.removeEventListener('pointerdown', this.onPointerDown);
     c.removeEventListener('pointermove', this.onPointerMove);
@@ -564,6 +568,7 @@ export class Game {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('pointerup', this.onWindowUp);
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
     const c = this.canvas;
     c.addEventListener('pointerdown', this.onPointerDown);
     c.addEventListener('pointermove', this.onPointerMove);
@@ -923,15 +928,47 @@ export class Game {
     } else {
       this.isTouch = false;
       this.mouseX = p.x; this.mouseY = p.y;
-      if (e.button === 0) this.firing = true;
+      if (e.button === 0) {
+        this.firing = true;
+        // Capture the cursor inside the canvas: fast mouse movement can no longer
+        // leave the game area and click browser tabs or other windows.
+        this.requestPointerLock();
+      }
       if (e.button === 2) this.throwGrenade();
     }
   };
+  private requestPointerLock() {
+    if (this.pointerLocked || this.isTouch) return;
+    try {
+      const req = this.canvas.requestPointerLock() as unknown as Promise<void> | undefined;
+      if (req && typeof req.catch === 'function') req.catch(() => { /* embedded viewers may refuse */ });
+    } catch { /* older browsers return nothing; refusal is harmless */ }
+  }
+  private onPointerLockChange = () => {
+    const locked = document.pointerLockElement === this.canvas;
+    const wasLocked = this.pointerLocked;
+    this.pointerLocked = locked;
+    if (locked) return;
+    this.clearInput();
+    // ESC releases the cursor: drop straight into the pause screen instead of
+    // continuing to run while the mouse is back in the browser. Only a real
+    // transition out of the lock counts — a refused request must not pause.
+    if (wasLocked && this.status === 'playing') this.onPauseToggle();
+  };
   private onPointerMove = (e: PointerEvent) => {
-    const p = this.local(e);
     if (e.pointerType === 'touch') {
+      const p = this.local(e);
       for (const s of [this.moveStick, this.aimStick]) if (s.active && s.id === e.pointerId) { s.x = p.x; s.y = p.y; }
-    } else { this.mouseX = p.x; this.mouseY = p.y; }
+      return;
+    }
+    if (this.pointerLocked) {
+      // Relative motion: the cursor is hidden and pinned, aim moves with the mouse.
+      this.mouseX = clamp(this.mouseX + e.movementX, 0, this.w);
+      this.mouseY = clamp(this.mouseY + e.movementY, 0, this.h);
+      return;
+    }
+    const p = this.local(e);
+    this.mouseX = p.x; this.mouseY = p.y;
   };
   private onPointerUp = (e: PointerEvent) => {
     if (e.pointerType === 'touch') {
@@ -1001,6 +1038,10 @@ export class Game {
     else if (this.status === 'over' || this.status === 'victory') {
       const s = dt * 0.45;
       this.updateParticles(s); this.updateFx(s); this.updateCamera(s);
+    }
+    // Never leave the cursor captured behind a menu, upgrade card or end screen.
+    if (this.pointerLocked && this.status !== 'playing' && this.status !== 'paused' && document.exitPointerLock) {
+      document.exitPointerLock();
     }
     if (this.status !== 'interior' && this.status !== 'menu') this.render();
     this.hudTimer -= dt;
