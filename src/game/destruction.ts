@@ -6,6 +6,11 @@ export const distanceToBlock = (x: number, y: number, b: Block) => Math.hypot(
 );
 
 export function structuralHealth(kind: StructKind) {
+  // Island dressing: scrub and moored boats give way at once, the prison walls do not.
+  if (kind === 'pine') return 34;
+  if (kind === 'boat' || kind === 'barrier') return 60;
+  if (kind === 'rock') return 420;
+  if (kind === 'cellblock' || kind === 'bastion' || kind === 'lighthouse') return 340;
   if (kind === 'crate') return 52;
   if (kind === 'sandbag' || kind === 'fence') return 100;
   if (kind === 'keep' || kind === 'tower' || kind === 'vault') return 380;

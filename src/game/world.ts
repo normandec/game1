@@ -43,7 +43,10 @@ export type StructKind =
   | 'curtain' | 'tower' | 'keep' | 'barrack' | 'gate' | 'pillar' | 'server'
   | 'truck' | 'antenna' | 'hangar' | 'fence' | 'vault'
   | 'laboratory' | 'radar' | 'motorpool' | 'power' | 'armory' | 'checkpoint' | 'warehouse' | 'library'
-  | 'plane';
+  | 'plane'
+  // ISLAND PRISON (eastern ground): its own materials, so nothing on the island is drawn
+  // with the labels and textures of a legacy Hydra base.
+  | 'pine' | 'rock' | 'boat' | 'bastion' | 'cellblock' | 'lighthouse' | 'barrier';
 
 export interface Rect {
   x: number; y: number; w: number; h: number;
@@ -59,7 +62,9 @@ export interface Zone {
   x: number; y: number; w: number; h: number;
   kind: 'road' | 'concrete' | 'sand' | 'grass' | 'blood' | 'plaza' | 'helipad' | 'fuel' | 'runway' | 'parade'
   /** Flooded north-west lagoon that carries the prison island. Additive: drawn under everything. */
-  | 'lagoon';
+  | 'lagoon'
+  /** Prison-island lawn: the same ground as grass, only greener so the island reads as land. */
+  | 'lawn';
 }
 
 /** A hangar looks sealed from outside; its roof splits open once you step inside. */
