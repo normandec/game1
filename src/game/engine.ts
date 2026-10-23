@@ -73,6 +73,7 @@ export interface Hud {
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
   vaultFound: boolean; nearPrompt: string;
   coords: string; gatePrompt: string; aegisCharges: number; aegisTime: number;
+  mouseSens: number;
   vehicleHp: number; vehicleMax: number; vehicleFuel: number;
   blackoutHud: boolean;
   facilityLabel: string; facilityStatus: string;
@@ -540,11 +541,12 @@ export class Game {
   mouseX = 0; mouseY = 0; firing = false; isTouch = false;
   /** Mouse is captured by the canvas, so the cursor cannot escape to the browser chrome. */
   pointerLocked = false;
-  /** Locked-mouse aim: raw deltas accumulate into an angle, so the virtual cursor can
-   *  never park against a screen edge (the old clamped version froze after a few
-   *  seconds of play). */
+  /** Locked-mouse aim: the mouse drives a virtual pointer 1:1 (both axes), kept inside
+   *  a ring around the operative. It feels like the normal cursor but can never escape
+   *  to the browser chrome — and, unlike a canvas clamp, it can always be recovered. */
   aimSens = 1;
-  private lockAimAng = 0;
+  private lockOffX = 0;
+  private lockOffY = 0;
   /** Seconds left to show "click to capture" after an unexpected lock loss. */
   private lockGrace = 0;
   private lockFails = 0;
@@ -567,6 +569,10 @@ export class Game {
     this.onVictory = cb.onVictory;
     this.onTransit = cb.onTransit;
     this.onVault = cb.onVault;
+    try {
+      const saved = parseFloat(localStorage.getItem('pse.aimSens') || '');
+      if (Number.isFinite(saved)) this.aimSens = clamp(saved, 0.25, 3);
+    } catch { /* private mode */ }
     this.makeGroundPattern();
     this.resize();
     this.bind();
@@ -583,6 +589,7 @@ export class Game {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('pointerup', this.onWindowUp);
+    window.removeEventListener('wheel', this.onWheel);
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     document.removeEventListener('pointerlockerror', this.onPointerLockError);
     if (this.pointerLocked && document.exitPointerLock) document.exitPointerLock();
@@ -599,6 +606,7 @@ export class Game {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('pointerup', this.onWindowUp);
+    window.addEventListener('wheel', this.onWheel, { passive: false });
     document.addEventListener('pointerlockchange', this.onPointerLockChange);
     document.addEventListener('pointerlockerror', this.onPointerLockError);
     const c = this.canvas;
@@ -998,8 +1006,10 @@ export class Game {
     this.pointerLocked = locked;
     if (locked) {
       this.lockFails = 0; this.lockGrace = 0;
-      // Start the accumulated aim from wherever the weapon already points.
-      this.lockAimAng = this.pang;
+      // Put the virtual pointer in front of the weapon, where the crosshair would be.
+      const start = Math.min(this.w, this.h) * 0.26;
+      this.lockOffX = Math.cos(this.pang) * start;
+      this.lockOffY = Math.sin(this.pang) * start;
       this.syncLockedAim();
       return;
     }
@@ -1021,12 +1031,10 @@ export class Game {
       return;
     }
     if (this.pointerLocked) {
-      // Relative motion accumulates into an aim angle. Clamping an accumulating
-      // screen position (the old code) pinned the aim to an edge after a few
-      // seconds and there was no way back without unwinding the whole distance.
-      this.lockAimAng += e.movementX * 0.0032 * this.aimSens;
-      if (this.lockAimAng > Math.PI) this.lockAimAng -= TAU;
-      else if (this.lockAimAng < -Math.PI) this.lockAimAng += TAU;
+      // 1:1 pointer motion in both axes, exactly like an unlocked cursor. The ring
+      // clamp lives in syncLockedAim, so the pointer can always come back.
+      this.lockOffX += e.movementX * this.aimSens;
+      this.lockOffY += e.movementY * this.aimSens;
       this.syncLockedAim();
       return;
     }
@@ -1224,6 +1232,7 @@ export class Game {
       poisTotal: this.pois.filter((p) => !p.secret).length,
       vaultFound: this.vaultOpen,
       nearPrompt: this.nearPrompt(),
+      mouseSens: this.aimSens,
       coords: `X ${Math.round(this.px)}  Y ${Math.round(this.py)}`,
       gatePrompt: this.gates.some(g => g.hp > 0 && Math.hypot(g.x - this.px, g.y - this.py) < 165) ? 'L / LOCK OR UNLOCK GATE' : '',
       aegisCharges: this.aegisCharges, aegisTime: this.aegisTime,
@@ -1245,15 +1254,37 @@ export class Game {
     });
   }
 
-  /** Place the virtual cursor a fixed distance along the accumulated aim angle. */
+  /** Screen radius the virtual pointer may wander from the operative. */
+  aimRing() { return Math.min(this.w, this.h) * 0.45; }
+
+  /** Keep the virtual pointer inside the ring, then turn it into screen coordinates. */
   private syncLockedAim() {
     if (!this.pointerLocked) return;
-    const r = Math.min(300, Math.min(this.w, this.h) * 0.34);
-    this.mouseX = this.px - this.camX + Math.cos(this.lockAimAng) * r;
-    this.mouseY = this.py - this.camY + Math.sin(this.lockAimAng) * r;
+    const r = this.aimRing();
+    const d = Math.hypot(this.lockOffX, this.lockOffY);
+    if (d > r) {
+      // Soft stop: the pointer rides the ring instead of flying off-screen, and keeps
+      // its direction, so a small move back inward resumes normal 1:1 tracking.
+      this.lockOffX *= r / d;
+      this.lockOffY *= r / d;
+    }
+    this.mouseX = this.px - this.camX + this.lockOffX;
+    this.mouseY = this.py - this.camY + this.lockOffY;
     const speed = Math.hypot(this.pvx, this.pvy);
     this.reticlePulse = lerp(this.reticlePulse, clamp(speed / 360, 0, 1), 0.12);
   }
+
+  /** Mouse sensitivity — mouse wheel while playing, or the HUD button. Persisted locally. */
+  setAimSens(v: number) {
+    this.aimSens = clamp(Math.round(v * 100) / 100, 0.25, 3);
+    try { localStorage.setItem('pse.aimSens', String(this.aimSens)); } catch { /* private mode */ }
+    this.addText(this.px, this.py - 62, `MOUSE ${this.aimSens.toFixed(2)}x`, '#9fe8ff', 14);
+  }
+  private onWheel = (e: WheelEvent) => {
+    if (!this.pointerLocked || this.status !== 'playing') return;
+    e.preventDefault();
+    this.setAimSens(this.aimSens * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+  };
 
   private update(dt: number) {
     this.lockGrace = Math.max(0, this.lockGrace - dt);
