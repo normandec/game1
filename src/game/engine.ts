@@ -8,7 +8,7 @@ import { FacilityPainter } from './facilityArt';
 import { PROLOGUE, PHASE_STORY, PHASE_TACTICS, LIBRARY_VOLUMES, type StoryEntry } from './campaign';
 import { newSecurityState, updateSearchlights, drawSearchlight, type Searchlight } from './security';
 import { prepareStructures, structuralHealth, distanceToBlock, drawRuins, type Ruin } from './destruction';
-import { prisonIslandStructures, PRISON_DOOR, ISLAND, BRIDGE } from './prisonIsland';
+import { prisonIslandStructures, PRISON_DOOR, ISLAND, BRIDGE, type IslandDecor } from './prisonIsland';
 import type { PrisonStats } from './prison';
 import { drawFixedWing, drawMantis, drawAirborne, type AirTransport, type AirborneTrooper } from './airlift';
 import { GOLIATH, MNEMOSYNE, type CampaignSites, type MegaCrate } from './campaignSites';
@@ -434,6 +434,7 @@ export class Game {
   private prisonHinted = false;
   /** Custody-officer posts around the prison: a permanent detail, not a chance spawn. */
   private prisonPolicePosts: { x: number; y: number }[] = [];
+  private prisonDecor: IslandDecor[] = [];
   /** Seconds before the sally port can pull the operative in again (stops instant re-entry). */
   private prisonReentry = 0;
   mines: Mine[] = [];
@@ -704,6 +705,7 @@ export class Game {
     // the map is moved, removed or covered.
     const island = prisonIslandStructures();
     this.prisonPolicePosts = island.policePosts;
+    this.prisonDecor = island.decor;
     world.rects.push(...island.rects);
     world.zones.push(...island.zones);
     world.spotlightSpots.push(...island.lights.map((l) => ({
@@ -1974,6 +1976,7 @@ export class Game {
         case 'fuel': return 0.96;
         case 'sand': return 0.88;
         case 'grass': return 1.0;
+        case 'lawn': return 1.03;
         case 'lagoon': return 0.72;   // shallow water: slow, loud, exposed
         default: return 1;
       }
@@ -2302,8 +2305,9 @@ export class Game {
     if (this.status !== 'playing' || this.prisonReentry > 0) return;
     if (this.piloting || this.flyingPlane || this.drivingVan || this.playerTank) return;
     // The sally port is a gateway: any step inside its mouth takes you through.
-    const inGate = this.px > PRISON_DOOR.x - 150 && this.px < PRISON_DOOR.x + 60
-      && Math.abs(this.py - PRISON_DOOR.y) < 150;
+    // You have to be in the mouth of the gate, not merely walking past the forecourt.
+    const inGate = this.px > PRISON_DOOR.x - 60 && this.px < PRISON_DOOR.x + 90
+      && Math.abs(this.py - PRISON_DOOR.y) < 125;
     if (inGate) this.enterPrison('visit');
   }
 
@@ -6342,6 +6346,7 @@ export class Game {
     this.drawDecals(ctx, camX, camY);
     this.drawHQFloor(ctx, camX, camY);
     this.drawStructures(ctx, camX, camY);
+    this.drawPrisonDecor(ctx, camX, camY);
     drawDetails(ctx, this.details, { x: camX, y: camY, w: this.w, h: this.h }, this.simulationTime);
     this.drawBarrels(ctx, camX, camY);
     this.drawSatcoms(ctx, camX, camY);
@@ -6512,12 +6517,15 @@ export class Game {
     ctx.save();
     const near = Math.hypot(this.px - PRISON_DOOR.x, this.py - PRISON_DOOR.y) < 900;
     ctx.textAlign = 'center';
-    ctx.fillStyle = `rgba(190,214,220,${near ? 0.55 : 0.32})`;
-    ctx.font = 'bold 40px ui-monospace, monospace';
-    ctx.fillText('THE CAGE', ISLAND.x, ISLAND.y - 1560);
+    const titleY = ISLAND.y - 1700;   // over open water, clear of the north shore
+    ctx.fillStyle = `rgba(214,226,222,${near ? 0.62 : 0.38})`;
+    ctx.font = 'bold 46px ui-monospace, monospace';
+    ctx.fillText('I S L A N D   P R I S O N', ISLAND.x, titleY);
+    ctx.strokeStyle = `rgba(216,180,90,${near ? 0.5 : 0.26})`; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(ISLAND.x - 250, titleY + 18); ctx.lineTo(ISLAND.x + 250, titleY + 18); ctx.stroke();
     ctx.font = '12px ui-monospace, monospace';
     ctx.fillStyle = `rgba(150,180,186,${near ? 0.5 : 0.28})`;
-    ctx.fillText('HYDRA CORRECTIONAL FACILITY / THE EASTERN WATER', ISLAND.x, ISLAND.y - 1538);
+    ctx.fillText('THE CAGE · HYDRA CORRECTIONAL FACILITY', ISLAND.x, titleY + 38);
     // The crossing itself, so the way in is obvious from the mainland side.
     ctx.strokeStyle = 'rgba(216,180,90,0.22)'; ctx.lineWidth = 3;
     ctx.beginPath();
@@ -6907,14 +6915,20 @@ export class Game {
       !(z.x + z.w < camX - 60 || z.x > camX + this.w + 60 || z.y + z.h < camY - 60 || z.y > camY + this.h + 60);
     for (const z of this.zones) if (onScreen(z) && z.kind === 'lagoon') this.drawSea(ctx, z, camX, camY);
     for (const z of this.zones) {
-      if (!onScreen(z) || (z.kind !== 'sand' && z.kind !== 'grass')) continue;
+      if (!onScreen(z) || (z.kind !== 'sand' && z.kind !== 'grass' && z.kind !== 'lawn')) continue;
       const beach = z.kind === 'sand';
-      const islandShaped = beach && z.w > 1800 && z.h > 1800;
+      // A big sand or grass field is an island landmass, not a dropped rectangle: both are
+      // drawn with the same ragged outline so the prison island has no straight edges.
+      const islandShaped = z.w > 1500 && z.h > 1500;
       const cx = z.x + z.w / 2, cy = z.y + z.h / 2;
       const g = islandShaped
         ? ctx.createRadialGradient(cx, cy, Math.min(z.w, z.h) * 0.1, cx, cy, Math.max(z.w, z.h) * 0.62)
         : ctx.createLinearGradient(z.x, z.y, z.x, z.y + z.h);
-      if (islandShaped) {
+      if (islandShaped && z.kind === 'lawn') {
+        g.addColorStop(0, '#3f5136');
+        g.addColorStop(0.55, '#47593c');
+        g.addColorStop(1, '#33402d');
+      } else if (islandShaped) {
         g.addColorStop(0, '#4f4634');
         g.addColorStop(0.55, '#5a4f3b');
         g.addColorStop(1, '#3b372b');
@@ -6922,6 +6936,10 @@ export class Game {
         g.addColorStop(0, '#4a4335');
         g.addColorStop(0.45, '#554b39');
         g.addColorStop(1, '#3f3a2e');
+      } else if (!beach && z.kind === 'lawn') {
+        g.addColorStop(0, '#3a4a33');
+        g.addColorStop(0.5, '#41553a');
+        g.addColorStop(1, '#2f3d2b');
       } else {
         g.addColorStop(0, '#2b3229');
         g.addColorStop(0.5, '#333a2e');
@@ -6944,7 +6962,7 @@ export class Game {
         ctx.rect(z.x, z.y, z.w, z.h);
       }
       ctx.fill();
-      ctx.strokeStyle = beach ? 'rgba(126,110,78,0.4)' : 'rgba(96,110,84,0.3)';
+      ctx.strokeStyle = beach ? 'rgba(126,110,78,0.4)' : z.kind === 'lawn' ? 'rgba(120,148,104,0.35)' : 'rgba(96,110,84,0.3)';
       ctx.lineWidth = 5;
       ctx.stroke();
       if (beach) {
@@ -6994,6 +7012,7 @@ export class Game {
         case 'sand': break;
         case 'lagoon': break;   // the sea is painted by drawLandmass(), under the land
         case 'grass': break;
+        case 'lawn': break;   // painted by drawLandmass(), like the island grass
         case 'fuel': ctx.fillStyle = 'rgba(190,110,50,0.06)'; ctx.fillRect(z.x, z.y, z.w, z.h); break;
         case 'runway': {
           ctx.fillStyle = 'rgba(24,32,36,0.85)'; ctx.fillRect(z.x, z.y, z.w, z.h);
@@ -7072,6 +7091,232 @@ export class Game {
     ctx.restore();
   }
 
+  /* ==================================================================== *
+   * ISLAND PRISON ART
+   *
+   * The prison island has its own materials. Nothing here is used by the
+   * legacy theatre, and nothing here reuses the base-building textures that
+   * made the first attempt look like a Hydra outpost rather than a prison.
+   * ==================================================================== */
+
+  private drawPine(ctx: CanvasRenderingContext2D, o: Rect) {
+    const cx = o.x + o.w / 2, cy = o.y + o.h / 2, s = Math.min(o.w, o.h) / 2;
+    const seed = (Math.sin(o.x * 0.031 + o.y * 0.017) + 1) / 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.40)';
+    ctx.beginPath(); ctx.ellipse(cx + s * 0.34, cy + s * 0.46, s * 1.02, s * 0.78, 0, 0, TAU); ctx.fill();
+    const layers: [number, number, string][] = [
+      [0.75, 0.16, '#12251c'], [0.56, -0.02, '#173023'], [0.36, -0.14, '#1d3d2c'], [0.18, -0.2, '#254b36'],
+    ];
+    for (const [r, dy, col] of layers) {
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.ellipse(cx - s * 0.05, cy + s * dy, s * r * (0.9 + seed * 0.2), s * r * (0.82 + seed * 0.16), 0, 0, TAU);
+      ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(96,150,112,0.16)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(cx - s * 0.12, cy - s * 0.26, s * 0.3, s * 0.22, 0, 0, TAU); ctx.stroke();
+  }
+
+  private drawRock(ctx: CanvasRenderingContext2D, o: Rect) {
+    const cx = o.x + o.w / 2, cy = o.y + o.h / 2, s = Math.min(o.w, o.h) / 2;
+    const seed = (Math.sin(o.x * 0.021 + o.y * 0.013) + 1) / 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.42)';
+    ctx.beginPath(); ctx.ellipse(cx + s * 0.2, cy + s * 0.3, s, s * 0.7, 0, 0, TAU); ctx.fill();
+    ctx.beginPath();
+    for (let i = 0; i < 7; i++) {
+      const a = (i / 7) * TAU + seed;
+      const r = s * (0.72 + (i % 3) * 0.12);
+      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r * 0.85;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#3b3a33'; ctx.fill();
+    ctx.strokeStyle = 'rgba(150,148,132,0.20)'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = 'rgba(154,152,138,0.13)';
+    ctx.beginPath(); ctx.ellipse(cx - s * 0.2, cy - s * 0.22, s * 0.4, s * 0.26, -0.5, 0, TAU); ctx.fill();
+  }
+
+  private drawBoat(ctx: CanvasRenderingContext2D, o: Rect) {
+    const rot = Number(o.tint ?? 0) || 0;
+    ctx.save();
+    ctx.translate(o.x + o.w / 2, o.y + o.h / 2);
+    ctx.rotate(rot);
+    const w = o.w, h = o.h;
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath(); ctx.ellipse(4, 6, w * 0.5, h * 0.55, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#cfd8d3';
+    ctx.beginPath(); ctx.moveTo(-w / 2, 0); ctx.quadraticCurveTo(-w / 2 + 8, -h / 2, w / 2 - 10, -h / 2);
+    ctx.quadraticCurveTo(w / 2, 0, w / 2 - 10, h / 2); ctx.quadraticCurveTo(-w / 2 + 8, h / 2, -w / 2, 0);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#243441';
+    ctx.fillRect(-w * 0.16, -h * 0.22, w * 0.3, h * 0.44);
+    ctx.fillStyle = 'rgba(255,214,138,0.55)';
+    ctx.fillRect(-w * 0.1, -h * 0.12, w * 0.12, h * 0.14);
+    ctx.restore();
+  }
+
+  private drawBastion(ctx: CanvasRenderingContext2D, o: Rect, h: number) {
+    const cx = o.x + o.w / 2, cy = o.y + o.h / 2, r = Math.min(o.w, o.h) / 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath(); ctx.ellipse(cx + h * 0.35, cy + h * 0.5, r * 1.02, r * 0.9, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#2f3a33';
+    ctx.beginPath(); ctx.ellipse(cx, cy + h * 0.16, r * 1.06, r * 0.98, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#44514a';
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fill();
+    ctx.strokeStyle = 'rgba(10,16,14,0.65)'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.fillStyle = '#333f38';
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * TAU;
+      ctx.fillRect(cx + Math.cos(a) * r * 0.93 - 4, cy + Math.sin(a) * r * 0.93 - 4, 8, 8);
+    }
+    ctx.fillStyle = 'rgba(255,209,102,0.12)';
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.55, 0, TAU); ctx.fill();
+  }
+
+  private drawCellBlock(ctx: CanvasRenderingContext2D, o: Rect, h: number) {
+    const side = '#151d1b', top = o.tint ?? '#3d4a3e';
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(o.x + h * 0.5, o.y + h * 0.7, o.w, o.h);
+    ctx.fillStyle = side;
+    ctx.beginPath();
+    ctx.moveTo(o.x, o.y + o.h); ctx.lineTo(o.x + o.w, o.y + o.h);
+    ctx.lineTo(o.x + o.w, o.y + o.h + h); ctx.lineTo(o.x, o.y + o.h + h);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = shade(side, -8);
+    ctx.beginPath();
+    ctx.moveTo(o.x + o.w, o.y); ctx.lineTo(o.x + o.w + h * 0.45, o.y + h * 0.45);
+    ctx.lineTo(o.x + o.w + h * 0.45, o.y + o.h + h * 0.45); ctx.lineTo(o.x + o.w, o.y + o.h);
+    ctx.closePath(); ctx.fill();
+    // roof slab
+    ctx.fillStyle = top; ctx.fillRect(o.x, o.y, o.w, o.h);
+    // slate ribs, evenly spaced: a real prison roof, not a blank floor
+    ctx.strokeStyle = 'rgba(12,18,16,0.55)'; ctx.lineWidth = 3;
+    for (let x = o.x + 22; x < o.x + o.w - 10; x += 26) {
+      ctx.beginPath(); ctx.moveTo(x, o.y + 8); ctx.lineTo(x, o.y + o.h - 8); ctx.stroke();
+    }
+    // skylight strips over the cell galleries
+    ctx.fillStyle = 'rgba(120,150,160,0.35)';
+    for (let x = o.x + 44; x < o.x + o.w - 60; x += 132) ctx.fillRect(x, o.y + o.h * 0.42, 74, 8);
+    // rooftop plant
+    for (let x = o.x + 96; x < o.x + o.w - 80; x += 210) {
+      ctx.fillStyle = '#1b2622'; ctx.fillRect(x, o.y + 18, 54, 34);
+      ctx.fillStyle = '#40514a'; ctx.fillRect(x + 4, o.y + 22, 46, 26);
+      ctx.strokeStyle = 'rgba(10,16,14,0.7)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x + 8, o.y + 35); ctx.lineTo(x + 46, o.y + 35); ctx.stroke();
+    }
+    // barred windows on both long faces, so the cell galleries read from any approach
+    for (const fy of [o.y + o.h + 16, o.y - 30]) {
+      ctx.fillStyle = 'rgba(255,209,102,0.5)';
+      for (let x = o.x + 30; x < o.x + o.w - 30; x += 46) {
+        ctx.fillRect(x, fy, 22, 12);
+        ctx.strokeStyle = 'rgba(8,12,10,0.8)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x + 7, fy); ctx.lineTo(x + 7, fy + 12);
+        ctx.moveTo(x + 15, fy); ctx.lineTo(x + 15, fy + 12); ctx.stroke();
+      }
+    }
+    ctx.fillStyle = 'rgba(160,190,180,0.34)';
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillText(o.w > 800 ? 'CELL HOUSE' : 'CELLS', o.x + 26, o.y + o.h - 18);
+  }
+
+  private drawLighthouse(ctx: CanvasRenderingContext2D, o: Rect) {
+    const cx = o.x + o.w / 2, cy = o.y + o.h / 2, r = Math.min(o.w, o.h) / 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath(); ctx.ellipse(cx + 18, cy + 22, r * 1.1, r * 0.9, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#8d9a96';
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#d9e2dd';
+    ctx.beginPath(); ctx.arc(cx, cy - 2, r * 0.74, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#b23a3a';
+    ctx.beginPath(); ctx.arc(cx, cy - 2, r * 0.5, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(255,226,150,0.9)';
+    ctx.beginPath(); ctx.arc(cx, cy - 2, r * 0.24, 0, TAU); ctx.fill();
+    ctx.strokeStyle = 'rgba(230,245,240,0.35)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy - 2, r * 0.86, 0, TAU); ctx.stroke();
+  }
+
+  private drawBarrier(ctx: CanvasRenderingContext2D, o: Rect) {
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(o.x + 4, o.y + 6, o.w, o.h + 8);
+    const vertical = o.h >= o.w;
+    const n = Math.max(4, Math.floor((vertical ? o.h : o.w) / 26));
+    for (let i = 0; i < n; i++) {
+      ctx.fillStyle = i % 2 ? '#c9cfc4' : '#b23a3a';
+      if (vertical) ctx.fillRect(o.x + 2, o.y + (o.h / n) * i, o.w - 4, o.h / n + 1);
+      else ctx.fillRect(o.x + (o.w / n) * i, o.y + 2, o.w / n + 1, o.h - 4);
+    }
+    ctx.strokeStyle = 'rgba(15,22,20,0.8)'; ctx.lineWidth = 2; ctx.strokeRect(o.x, o.y, o.w, o.h);
+  }
+
+  /** Gate arch, lamp posts, harbour pier and the flag — drawn, never collided. */
+  private drawPrisonDecor(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    if (!this.prisonDecor.length) return;
+    for (const d of this.prisonDecor) {
+      if (d.x + d.w < camX - 120 || d.x > camX + this.w + 120 || d.y + d.h < camY - 120 || d.y > camY + this.h + 120) continue;
+      if (d.kind === 'lamp') {
+        const cx = d.x + d.w / 2, cy = d.y + d.h / 2;
+        const g = ctx.createRadialGradient(cx, cy, 2, cx, cy, 120);
+        g.addColorStop(0, 'rgba(255,206,130,0.30)');
+        g.addColorStop(1, 'rgba(255,206,130,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, 120, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#20282a'; ctx.beginPath(); ctx.arc(cx, cy, 7, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#ffd88f'; ctx.beginPath(); ctx.arc(cx, cy, 3.4, 0, TAU); ctx.fill();
+      } else if (d.kind === 'gatearch') {
+        // A gatehouse, not a gap in a wall: deep stone jambs, a lintel, lit lamps and a
+        // painted threshold that says "walk in here".
+        const jamb = 34;
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(d.x + 8, d.y + 10, d.w, d.h);
+        ctx.fillStyle = '#535e54';
+        ctx.fillRect(d.x, d.y, d.w, jamb);                       // north jamb
+        ctx.fillRect(d.x, d.y + d.h - jamb, d.w, jamb);          // south jamb
+        ctx.fillStyle = '#414b44';
+        ctx.fillRect(d.x + 8, d.y + jamb - 10, d.w - 16, 12);
+        ctx.fillRect(d.x + 8, d.y + d.h - jamb - 2, d.w - 16, 12);
+        // painted threshold across the opening
+        const th = ctx.createLinearGradient(d.x - 60, 0, d.x + d.w + 10, 0);
+        th.addColorStop(0, 'rgba(255,206,130,0)');
+        th.addColorStop(0.55, 'rgba(255,206,130,0.16)');
+        th.addColorStop(1, 'rgba(255,206,130,0.30)');
+        ctx.fillStyle = th;
+        ctx.fillRect(d.x - 60, d.y + jamb, d.w + 70, d.h - jamb * 2);
+        ctx.strokeStyle = 'rgba(255,209,102,0.55)'; ctx.lineWidth = 3;
+        ctx.setLineDash([16, 12]);
+        ctx.beginPath();
+        ctx.moveTo(d.x - 54, d.y + jamb + 6); ctx.lineTo(d.x + d.w, d.y + jamb + 6);
+        ctx.moveTo(d.x - 54, d.y + d.h - jamb - 6); ctx.lineTo(d.x + d.w, d.y + d.h - jamb - 6);
+        ctx.stroke(); ctx.setLineDash([]);
+        // lamps and the sign
+        for (const ly of [d.y + jamb / 2, d.y + d.h - jamb / 2]) {
+          const g2 = ctx.createRadialGradient(d.x + 16, ly, 1, d.x + 16, ly, 46);
+          g2.addColorStop(0, 'rgba(255,120,90,0.55)'); g2.addColorStop(1, 'rgba(255,120,90,0)');
+          ctx.fillStyle = g2; ctx.beginPath(); ctx.arc(d.x + 16, ly, 46, 0, TAU); ctx.fill();
+          ctx.fillStyle = '#ff8f7a'; ctx.beginPath(); ctx.arc(d.x + 16, ly, 4, 0, TAU); ctx.fill();
+        }
+        ctx.fillStyle = 'rgba(14,20,18,0.85)';
+        ctx.fillRect(d.x + 30, d.y + d.h / 2 - 11, 96, 22);
+        ctx.strokeStyle = 'rgba(255,209,102,0.5)'; ctx.lineWidth = 1; ctx.strokeRect(d.x + 30, d.y + d.h / 2 - 11, 96, 22);
+        ctx.fillStyle = 'rgba(255,209,102,0.9)';
+        ctx.font = '11px ui-monospace, monospace';
+        ctx.fillText('SALLY PORT', d.x + 36, d.y + d.h / 2 + 4);
+      } else if (d.kind === 'pier') {
+        ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(d.x + 3, d.y + 5, d.w, d.h);
+        ctx.fillStyle = '#5a5140'; ctx.fillRect(d.x, d.y, d.w, d.h);
+        ctx.strokeStyle = 'rgba(20,16,10,0.6)'; ctx.lineWidth = 2;
+        for (let x = d.x; x < d.x + d.w; x += 18) { ctx.beginPath(); ctx.moveTo(x, d.y); ctx.lineTo(x, d.y + d.h); ctx.stroke(); }
+        ctx.fillStyle = '#2c332f';
+        for (let x = d.x + 30; x < d.x + d.w; x += 90) ctx.fillRect(x, d.y + 30, 10, 12);
+      } else if (d.kind === 'flag') {
+        const cx = d.x + d.w / 2, cy = d.y + d.h / 2;
+        ctx.fillStyle = '#8d968f'; ctx.fillRect(cx - 2, cy - 70, 4, 70);
+        const flap = Math.sin(this.simulationTime * 2.2) * 4;
+        ctx.fillStyle = '#8b2f2f';
+        ctx.beginPath(); ctx.moveTo(cx + 2, cy - 68); ctx.lineTo(cx + 46 + flap, cy - 58);
+        ctx.lineTo(cx + 2, cy - 44); ctx.closePath(); ctx.fill();
+      }
+    }
+  }
+
   /** 2.5D extruded structures with per-kind materials. */
   private drawStructures(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     this.grid.query(camX - 120, camY - 160, this.w + 240, this.h + 320, this.qset);
@@ -7083,6 +7328,14 @@ export class Game {
       const o = this.obstacles[i];
       if (o.dead || o.facilityDetail) continue;
       if (o.kind === 'plane') { this.drawParkedPlane(ctx, o); continue; }
+      // ISLAND PRISON materials: drawn here so no base texture or base label leaks onto them.
+      if (o.kind === 'pine') { this.drawPine(ctx, o); continue; }
+      if (o.kind === 'rock') { this.drawRock(ctx, o); continue; }
+      if (o.kind === 'boat') { this.drawBoat(ctx, o); continue; }
+      if (o.kind === 'bastion') { this.drawBastion(ctx, o, o.h3d); continue; }
+      if (o.kind === 'cellblock') { this.drawCellBlock(ctx, o, o.h3d); continue; }
+      if (o.kind === 'lighthouse') { this.drawLighthouse(ctx, o); continue; }
+      if (o.kind === 'barrier') { this.drawBarrier(ctx, o); continue; }
       const H = o.h3d;
       let top: string, side: string, edge: string;
       switch (o.kind) {
