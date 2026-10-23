@@ -540,6 +540,17 @@ export class Game {
   mouseX = 0; mouseY = 0; firing = false; isTouch = false;
   /** Mouse is captured by the canvas, so the cursor cannot escape to the browser chrome. */
   pointerLocked = false;
+  /** Locked-mouse aim: raw deltas accumulate into an angle, so the virtual cursor can
+   *  never park against a screen edge (the old clamped version froze after a few
+   *  seconds of play). */
+  aimSens = 1;
+  private lockAimAng = 0;
+  /** Seconds left to show "click to capture" after an unexpected lock loss. */
+  private lockGrace = 0;
+  private lockFails = 0;
+  private lockBlocked = false;
+  private lastEscapeAt = -1e9;
+  private reticlePulse = 0;
   moveStick: Stick = { id: -1, ox: 0, oy: 0, x: 0, y: 0, active: false };
   aimStick: Stick = { id: -1, ox: 0, oy: 0, x: 0, y: 0, active: false };
 
@@ -573,6 +584,7 @@ export class Game {
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('pointerup', this.onWindowUp);
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    document.removeEventListener('pointerlockerror', this.onPointerLockError);
     if (this.pointerLocked && document.exitPointerLock) document.exitPointerLock();
     const c = this.canvas;
     c.removeEventListener('pointerdown', this.onPointerDown);
@@ -588,6 +600,7 @@ export class Game {
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('pointerup', this.onWindowUp);
     document.addEventListener('pointerlockchange', this.onPointerLockChange);
+    document.addEventListener('pointerlockerror', this.onPointerLockError);
     const c = this.canvas;
     c.addEventListener('pointerdown', this.onPointerDown);
     c.addEventListener('pointermove', this.onPointerMove);
@@ -916,6 +929,7 @@ export class Game {
     if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
     if (this.keys[k]) return;
     this.keys[k] = true;
+    if (k === 'escape') this.lastEscapeAt = performance.now();
     if (k === 'escape' || k === 'p') this.onPauseToggle();
     if (this.status !== 'playing') return;
     if (k === ' ' || k === 'shift') { if (!this.piloting && !this.flyingPlane && !this.drivingVan && !this.playerTank) this.doDash(); }
@@ -937,8 +951,11 @@ export class Game {
   }
   private onPointerDown = (e: PointerEvent) => {
     if (this.status !== 'playing') return;
-    this.canvas.setPointerCapture(e.pointerId);
+    // Pull the trigger first: anything below that can throw must never leave the
+    // weapon dead. (setPointerCapture used to abort the handler on some browsers.)
+    if (e.pointerType !== 'touch' && e.button === 0) this.firing = true;
     sfx.resume();
+    if (!this.pointerLocked) { try { this.canvas.setPointerCapture(e.pointerId); } catch { /* ignore */ } }
     const p = this.local(e);
     if (e.pointerType === 'touch') {
       this.isTouch = true;
@@ -946,33 +963,56 @@ export class Game {
       if (!s.active) { s.id = e.pointerId; s.ox = p.x; s.oy = p.y; s.x = p.x; s.y = p.y; s.active = true; }
     } else {
       this.isTouch = false;
-      this.mouseX = p.x; this.mouseY = p.y;
-      if (e.button === 0) {
-        this.firing = true;
-        // Capture the cursor inside the canvas: fast mouse movement can no longer
-        // leave the game area and click browser tabs or other windows.
-        this.requestPointerLock();
-      }
+      // While the pointer is locked the browser reports a frozen clientX/clientY;
+      // copying it into the virtual cursor yanked the aim to a corner on every click.
+      if (!this.pointerLocked) { this.mouseX = p.x; this.mouseY = p.y; }
+      if (e.button === 0) this.requestPointerLock();
       if (e.button === 2) this.throwGrenade();
     }
   };
   private requestPointerLock() {
-    if (this.pointerLocked || this.isTouch) return;
+    if (this.pointerLocked || this.isTouch || this.lockBlocked || this.status !== 'playing') return;
     try {
       const req = this.canvas.requestPointerLock() as unknown as Promise<void> | undefined;
-      if (req && typeof req.catch === 'function') req.catch(() => { /* embedded viewers may refuse */ });
-    } catch { /* older browsers return nothing; refusal is harmless */ }
+      if (req && typeof req.catch === 'function') req.catch(() => this.onPointerLockError());
+    } catch { this.onPointerLockError(); }
   }
+  /** Chrome refuses a new lock for ~1.25 s after Esc and embedded viewers may refuse
+   *  it outright. Previously the failure was swallowed, so the game kept running with
+   *  a dead mouse. Now we retry once and, if the browser never allows it, fall back to
+   *  the plain cursor — which is exactly how the game played before the lock existed. */
+  private onPointerLockError = () => {
+    if (this.pointerLocked || this.lockBlocked) return;
+    this.lockFails++;
+    if (this.lockFails >= 6) {
+      this.lockBlocked = true;
+      this.lockGrace = 6;
+      this.addText(this.px, this.py - 70, 'MOUSE: FREE CURSOR MODE', '#9fe8ff', 14);
+      return;
+    }
+    window.setTimeout(() => { if (!this.pointerLocked && !this.isTouch && this.status === 'playing') this.requestPointerLock(); }, 1400);
+  };
   private onPointerLockChange = () => {
     const locked = document.pointerLockElement === this.canvas;
     const wasLocked = this.pointerLocked;
     this.pointerLocked = locked;
-    if (locked) return;
+    if (locked) {
+      this.lockFails = 0; this.lockGrace = 0;
+      // Start the accumulated aim from wherever the weapon already points.
+      this.lockAimAng = this.pang;
+      this.syncLockedAim();
+      return;
+    }
     this.clearInput();
-    // ESC releases the cursor: drop straight into the pause screen instead of
-    // continuing to run while the mouse is back in the browser. Only a real
-    // transition out of the lock counts — a refused request must not pause.
-    if (wasLocked && this.status === 'playing') this.onPauseToggle();
+    if (!wasLocked) return;
+    // A deliberate Esc pauses the game. Any other drop (window focus, a notification,
+    // an embedded viewer revoking the lock) must NOT freeze the game: keep playing
+    // with the normal cursor and show how to recapture the mouse.
+    if (performance.now() - this.lastEscapeAt < 700) {
+      if (this.status === 'playing') this.onPauseToggle();
+      return;
+    }
+    if (this.status === 'playing') this.lockGrace = 4;
   };
   private onPointerMove = (e: PointerEvent) => {
     if (e.pointerType === 'touch') {
@@ -981,9 +1021,13 @@ export class Game {
       return;
     }
     if (this.pointerLocked) {
-      // Relative motion: the cursor is hidden and pinned, aim moves with the mouse.
-      this.mouseX = clamp(this.mouseX + e.movementX, 0, this.w);
-      this.mouseY = clamp(this.mouseY + e.movementY, 0, this.h);
+      // Relative motion accumulates into an aim angle. Clamping an accumulating
+      // screen position (the old code) pinned the aim to an edge after a few
+      // seconds and there was no way back without unwinding the whole distance.
+      this.lockAimAng += e.movementX * 0.0032 * this.aimSens;
+      if (this.lockAimAng > Math.PI) this.lockAimAng -= TAU;
+      else if (this.lockAimAng < -Math.PI) this.lockAimAng += TAU;
+      this.syncLockedAim();
       return;
     }
     const p = this.local(e);
@@ -1059,7 +1103,7 @@ export class Game {
       this.updateParticles(s); this.updateFx(s); this.updateCamera(s);
     }
     // Never leave the cursor captured behind a menu, upgrade card or end screen.
-    if (this.pointerLocked && this.status !== 'playing' && this.status !== 'paused' && document.exitPointerLock) {
+    if (this.pointerLocked && this.status !== 'playing' && document.exitPointerLock) {
       document.exitPointerLock();
     }
     if (this.status !== 'interior' && this.status !== 'menu') this.render();
@@ -1201,7 +1245,19 @@ export class Game {
     });
   }
 
+  /** Place the virtual cursor a fixed distance along the accumulated aim angle. */
+  private syncLockedAim() {
+    if (!this.pointerLocked) return;
+    const r = Math.min(300, Math.min(this.w, this.h) * 0.34);
+    this.mouseX = this.px - this.camX + Math.cos(this.lockAimAng) * r;
+    this.mouseY = this.py - this.camY + Math.sin(this.lockAimAng) * r;
+    const speed = Math.hypot(this.pvx, this.pvy);
+    this.reticlePulse = lerp(this.reticlePulse, clamp(speed / 360, 0, 1), 0.12);
+  }
+
   private update(dt: number) {
+    this.lockGrace = Math.max(0, this.lockGrace - dt);
+    this.syncLockedAim();
     this.pathBudget = 1;
     this.infantryBudget = 1;
     this.rebuildEnemyBuckets();
@@ -6067,6 +6123,55 @@ export class Game {
       this.drawMinimap(ctx);
     }
     if (this.isTouch && this.status === 'playing') this.drawSticks(ctx);
+    this.drawReticle(ctx);
+  }
+
+  /** In-game crosshair. The old build relied on the OS cursor, which pointer lock
+   *  hides — so the moment the mouse was captured the player was aiming blind. */
+  private drawReticle(ctx: CanvasRenderingContext2D) {
+    if (this.isTouch || this.status !== 'playing') return;
+    const x = this.mouseX, y = this.mouseY;
+    const color = this.firing ? '255,186,120' : '150,240,255';
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    // Aim ray: makes the firing direction readable across the whole screen.
+    if (this.pointerLocked) {
+      const sx = this.px - this.camX, sy = this.py - this.camY;
+      const gradient = ctx.createLinearGradient(sx, sy, x, y);
+      gradient.addColorStop(0, `rgba(${color},0)`);
+      gradient.addColorStop(0.55, `rgba(${color},0.08)`);
+      gradient.addColorStop(1, `rgba(${color},0.22)`);
+      ctx.strokeStyle = gradient; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(x, y); ctx.stroke();
+    }
+    const r = 9 + this.reticlePulse * 3;
+    ctx.strokeStyle = `rgba(${color},0.95)`; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = `rgba(${color},0.45)`; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(x, y, r + 5, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = `rgba(${color},0.8)`; ctx.lineWidth = 1.4;
+    for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      ctx.beginPath();
+      ctx.moveTo(x + d[0] * (r + 2), y + d[1] * (r + 2));
+      ctx.lineTo(x + d[0] * (r + 10), y + d[1] * (r + 10));
+      ctx.stroke();
+    }
+    ctx.fillStyle = `rgba(${color},0.95)`;
+    ctx.fillRect(x - 1, y - 1, 2, 2);
+    ctx.globalCompositeOperation = 'source-over';
+    if (!this.pointerLocked && this.lockGrace > 0) {
+      ctx.textAlign = 'center';
+      ctx.globalAlpha = Math.min(1, this.lockGrace);
+      ctx.font = 'bold 13px monospace';
+      ctx.fillStyle = '#9fe8ff';
+      ctx.fillText('CLICK TO CAPTURE MOUSE', this.w / 2, this.h * 0.14);
+      ctx.font = '11px monospace';
+      ctx.fillStyle = '#7fb6c4';
+      ctx.fillText('FREE CURSOR MODE RUNNING — ESC PAUSES', this.w / 2, this.h * 0.14 + 18);
+      ctx.globalAlpha = 1;
+      ctx.textAlign = 'left';
+    }
+    ctx.restore();
   }
 
   /** Full-screen inter-sector flight: the captured gunship carries the operative deeper into Hydra territory. */
