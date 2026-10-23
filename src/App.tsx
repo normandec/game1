@@ -9,6 +9,8 @@ import VaultRoom from './components/VaultRoom';
 import OperationsMenu from './components/OperationsMenu';
 import CombatHud from './components/CombatHud';
 import OperationBriefing from './components/OperationBriefing';
+import Prison3D, { type PrisonMode } from './components/Prison3D';
+import type { PrisonStats } from './game/prison';
 
 const emptyHud: Hud = {
   score: 0, wave: 0, hp: 100, maxHp: 100, weapon: 'RIFLE', ammo: -1, grenades: 4,
@@ -52,6 +54,7 @@ export default function App() {
   const [fullscreen, setFullscreen] = useState(false);
   const [tour, setTour] = useState(false);
   const [briefing, setBriefing] = useState(false);
+  const [prisonMode, setPrisonMode] = useState<PrisonMode>('visit');
   const [choices, setChoices] = useState<Perk[]>([]);
   const [build, setBuild] = useState<{ perk: Perk; count: number }[]>([]);
   const [cls, setCls] = useState('assault');
@@ -106,6 +109,19 @@ export default function App() {
     setStatus(sector > 0 ? 'transit' : 'playing');
   }, [setStatus]);
   const handleVault = useCallback((open: boolean) => setStatus(open ? 'interior' : 'playing'), [setStatus]);
+  /** The engine drives the arrest cinematic on its own canvas, then hands over to the 3D prison. */
+  const handleArrestAnim = useCallback((on: boolean) => {
+    setStatus(on ? 'arrest' : 'playing');
+  }, [setStatus]);
+  const handlePrison = useCallback((mode: PrisonMode) => {
+    setPrisonMode(mode);
+    setStatus('prison');
+  }, [setStatus]);
+  const handlePrisonExit = useCallback((stats: PrisonStats, escaped: boolean) => {
+    const g = gameRef.current;
+    g?.leavePrison(stats, escaped);
+    setStatus('playing');
+  }, [setStatus]);
 
   const handleUpgrade = useCallback((c: Perk[]) => {
     setChoices(c);
@@ -123,12 +139,14 @@ export default function App() {
       onVictory: handleVictory,
       onTransit: handleTransit,
       onVault: handleVault,
+      onPrison: handlePrison,
+      onArrestAnimChange: handleArrestAnim,
     });
     gameRef.current = g;
     const ro = new ResizeObserver(() => g.resize());
     ro.observe(canvasRef.current);
     return () => { ro.disconnect(); g.destroy(); gameRef.current = null; };
-  }, [handleOver, togglePause, handleUpgrade, handleVictory, handleTransit, handleVault]);
+  }, [handleOver, togglePause, handleUpgrade, handleVictory, handleTransit, handleVault, handlePrison, handleArrestAnim]);
 
   const startRun = useCallback(() => {
     const g = gameRef.current;
@@ -178,6 +196,8 @@ export default function App() {
       if (e.key.toLowerCase() === 'r' && (statusRef.current === 'over' || statusRef.current === 'victory')) startRun();
     };
     const onHide = () => { if (statusRef.current === 'playing') { gameRef.current?.clearInput(); togglePause(); } };
+    // the 3D prison owns the keyboard while it is on screen
+    void 0;
     window.addEventListener('keydown', onKey);
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('blur', onHide);
@@ -226,10 +246,12 @@ export default function App() {
       <canvas
         ref={canvasRef}
         className="absolute inset-0 block h-full w-full touch-none"
-        style={{ cursor: status === 'playing' && !touch ? 'crosshair' : 'default', visibility: status === 'interior' || status === 'menu' ? 'hidden' : 'visible' }}
+        style={{ cursor: status === 'playing' && !touch ? 'crosshair' : 'default', visibility: status === 'interior' || status === 'menu' || status === 'prison' ? 'hidden' : 'visible' }}
       />
 
       {status === 'menu' && !tour && <VaultRoom backdrop onExit={() => {}} onAction={() => ''} />}
+      {status === 'prison' && <Prison3D mode={prisonMode} onExit={handlePrisonExit} />}
+
       {(status === 'interior' || tour) && <VaultRoom preview={tour}
         onExit={() => tour ? setTour(false) : gameRef.current?.leaveVault()}
         onAction={action => gameRef.current?.vaultAction(action) || 'LINK OFFLINE'} />}

@@ -8,6 +8,8 @@ import { FacilityPainter } from './facilityArt';
 import { PROLOGUE, PHASE_STORY, PHASE_TACTICS, LIBRARY_VOLUMES, type StoryEntry } from './campaign';
 import { newSecurityState, updateSearchlights, drawSearchlight, type Searchlight } from './security';
 import { prepareStructures, structuralHealth, distanceToBlock, drawRuins, type Ruin } from './destruction';
+import { prisonIslandStructures, PRISON_DOOR, COMPOUND, ISLAND, LAGOON } from './prisonIsland';
+import type { PrisonStats } from './prison';
 import { drawFixedWing, drawMantis, drawAirborne, type AirTransport, type AirborneTrooper } from './airlift';
 import { GOLIATH, MNEMOSYNE, type CampaignSites, type MegaCrate } from './campaignSites';
 import { siteLoad, type PowerSite } from './powerGrid';
@@ -18,7 +20,11 @@ export { ARENA_W, ARENA_H };
 /* Types                                                              */
 /* ================================================================== */
 
-export type GameStatus = 'menu' | 'playing' | 'paused' | 'over' | 'upgrade' | 'transit' | 'victory' | 'interior';
+export type GameStatus = 'menu' | 'playing' | 'paused' | 'over' | 'upgrade' | 'transit' | 'victory' | 'interior'
+  /** Cuffed and driven away: the van ride before the prison. */
+  | 'arrest'
+  /** Inside the fully 3D prison, drawn by Prison3D. */
+  | 'prison';
 
 /** Battle formations the enemy command deploys. */
 export type Tactic = 'phalanx' | 'turtle' | 'blitz' | 'bombers' | 'column' | 'pincer' | 'encircle' | 'ambush';
@@ -98,6 +104,8 @@ export const WEAPONS: Record<string, WeaponDef> = {
   dmr: { name: 'MK-14 DMR', short: 'DMR', rate: 0.26, dmg: 46, pellets: 1, spread: 0.012, speed: 1700, ammo: 48, kick: 7, sound: 'rifle', color: '#b8a4ff', len: 20 },
   hmg: { name: 'KPVT HEAVY MG', short: 'HMG', rate: 0.072, dmg: 27, pellets: 1, spread: 0.075, speed: 1480, ammo: 240, kick: 4.4, sound: 'rifle', color: '#ffd166', len: 22 },
   gl: { name: 'M79 THUMPER', short: 'GL', rate: 0.8, dmg: 105, pellets: 1, spread: 0.02, speed: 700, ammo: 14, kick: 9, sound: 'shotgun', color: '#ffca7a', len: 16 },
+  // The sidearm that survives the intake search; the prison's only firearm.
+  pistol: { name: 'M9 SIDEARM', short: 'PISTOL', rate: 0.19, dmg: 26, pellets: 1, spread: 0.02, speed: 1500, ammo: Infinity, kick: 2.4, sound: 'smg', color: '#dfe9ff', len: 12 },
 };
 
 interface EnemyDef {
@@ -129,6 +137,9 @@ const ENEMIES: Record<string, EnemyDef> = {
   juggernaut:{ hp: 520, speed: 55, r: 29, dmg: 28, score: 1100, color: '#e84562', dark: '#4f101c', shield: 0.5, ranged: true, range: 360, fireRate: 1.6, bulletSpeed: 460, bulletDmg: 12, pellets: 7, spread: 0.34 },
   // Flamethrower specialist: slow burning cone, terrifies at close range, tank on the back.
   flamer:    { hp: 145, speed: 94, r: 17, dmg: 13, score: 430, color: '#ff9c4a', dark: '#5e2c07', ranged: true, range: 235, fireRate: 0.3, bulletSpeed: 340, bulletDmg: 5, pellets: 3, spread: 0.26 },
+  // Riot custody officer behind a real ballistic shield: frontal fire barely scratches
+  // him. He never shoots — he closes the distance and arrests the operative.
+  custodian: { hp: 280, speed: 96, r: 19, dmg: 0, score: 520, color: '#3f6fd8', dark: '#122a52', shield: 0.86, ranged: false },
   turret:    { hp: 260, speed: 0, r: 19, dmg: 0, score: 650, color: '#ff3858', dark: '#4f101c', ranged: true, range: 620, fireRate: 0.72, bulletSpeed: 720, bulletDmg: 11, pellets: 1, spread: 0.018 },
   boss:      { hp: 1500, speed: 72, r: 44, dmg: 28, score: 3000, color: '#ff2d55', dark: '#450a18', ranged: true, range: 520, fireRate: 1.05, bulletSpeed: 460, bulletDmg: 12, pellets: 10, spread: 6.28, boss: true },
   // unarmed HQ staff
@@ -352,6 +363,8 @@ export class Game {
   onVictory: (s: number, w: number) => void;
   onTransit: (sector: number) => void;
   onVault: (open: boolean) => void;
+  onPrison: (mode: 'arrest' | 'visit') => void;
+  onArrestAnimChange: (on: boolean) => void;
 
   mods: Mods = defaultMods();
   perkCounts: Record<string, number> = {};
@@ -409,6 +422,14 @@ export class Game {
   tanks: Tank[] = [];
   playerTank: Tank | null = null;
   private tankSeq = 1;
+  /** Armed-response state: the van ride after a custody officer gets his hands on you. */
+  private arrestT = 0;
+  private readonly arrestDuration = 5.4;
+  private arrestStage = 0;
+  private prisonVisits = 0;
+  private arrestCount = 0;
+  /** One-time field report the first time the operative sees the island. */
+  private prisonHinted = false;
   mines: Mine[] = [];
   helis: Heli[] = [];
   barriers: Barrier[] = [];
@@ -561,6 +582,8 @@ export class Game {
     onPauseToggle: () => void; onUpgrade: (c: Perk[]) => void;
     onVictory: (s: number, w: number) => void; onTransit: (sector: number) => void;
     onVault: (open: boolean) => void;
+    onPrison: (mode: 'arrest' | 'visit') => void;
+    onArrestAnimChange: (on: boolean) => void;
   }) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d', { alpha: false })!;
@@ -569,6 +592,8 @@ export class Game {
     this.onVictory = cb.onVictory;
     this.onTransit = cb.onTransit;
     this.onVault = cb.onVault;
+    this.onPrison = cb.onPrison;
+    this.onArrestAnimChange = cb.onArrestAnimChange;
     try {
       const saved = parseFloat(localStorage.getItem('pse.aimSens') || '');
       if (Number.isFinite(saved)) this.aimSens = clamp(saved, 0.25, 3);
@@ -668,6 +693,15 @@ export class Game {
     if (newCampaign) this.sector = 1;
     this.makeGroundPattern();
     const world = generateWorld(this.sector);
+    // PRISON ISLAND: a flooded north-west lagoon carrying the HYDRA correctional
+    // facility. Purely additive — every structure that already stood there keeps its
+    // collision, its loot and its garrison.
+    const island = prisonIslandStructures();
+    world.rects.push(...island.rects);
+    world.zones.push(...island.zones);
+    world.spotlightSpots.push(...island.lights.map((l) => ({
+      x: l.x, y: l.y, speed: l.speed, sweep: l.sweep,
+    })));
     this.obstacles = prepareStructures(world.rects);
     this.ruins = [];
     this.campaignSites = world.campaignSites;
@@ -755,7 +789,7 @@ export class Game {
     this.hangars = world.hangars.map((h) => ({ ...h, open: 0 }));
     this.vans = world.vanSpots.map((v) => ({
       x: v.x, y: v.y, ang: v.ang, speed: 0, lean: 0,
-      hp: 240, maxHp: 240, dead: false, driving: false, boost: 0,
+      hp: 276, maxHp: 276, dead: false, driving: false, boost: 0,
     }));
     this.lasers = world.laserSpots.map((l) => ({
       x: l.x, y: l.y, ang: 0, hp: 420 + this.sector * 60, maxHp: 420 + this.sector * 60,
@@ -770,6 +804,7 @@ export class Game {
     this.planeSpot = world.planeSpot;
     this.allies = []; this.barricades = [];
     this.plane = null; this.drivingVan = null; this.flyingPlane = false;
+    this.prisonHinted = false;
     this.vaultOpen = false; this.vaultChoice = 'none';
     this.siege = { active: false, t: 0, poi: '', waves: 0 };
     this.prompt = '';
@@ -1105,6 +1140,7 @@ export class Game {
       else this.update(dt * this.timeScale);
       this.timeScale = lerp(this.timeScale, 1, dt * 2);
     } else if (this.status === 'transit') this.updateTransit(dt);
+    else if (this.status === 'arrest') this.updateArrest(dt);
     else if (this.status === 'menu') this.idleUpdate(dt);
     else if (this.status === 'over' || this.status === 'victory') {
       const s = dt * 0.45;
@@ -1145,6 +1181,7 @@ export class Game {
     if (this.vaultOpen && this.vaultChoice === 'offer' &&
         Math.hypot(this.planeSpot.x - this.px, this.planeSpot.y - this.py) < 260) return 'F · CLAIM AIR WING';
     if (this.plane && Math.hypot(this.plane.x - this.px, this.plane.y - this.py) < 170) return 'F · BOARD BOMBER';
+    if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 160) return 'F · ENTER THE CAGE';
     if (this.parkedPlaneNear(210)) return 'F · SEIZE BOMBER';
     const l = this.lasers.find((q) => !q.captured && Math.hypot(q.x - this.px, q.y - this.py) < 120);
     if (l) return 'F · CAPTURE BEAM';
@@ -1914,6 +1951,7 @@ export class Game {
         case 'fuel': return 0.96;
         case 'sand': return 0.88;
         case 'grass': return 1.0;
+        case 'lagoon': return 0.72;   // shallow water: slow, loud, exposed
         default: return 1;
       }
     }
@@ -1922,6 +1960,7 @@ export class Game {
 
   private updatePlayer(dt: number) {
     this.updateVault(dt);
+    this.updatePrisonHint();
     if (this.status !== 'playing') return;
     if (this.flyingPlane) { this.updatePlane(dt); return; }
     if (this.drivingVan) { this.updateDrivenVan(dt); return; }
@@ -2042,6 +2081,7 @@ export class Game {
       else this.startBaseOverride(poiCore);
       return;
     }
+    if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 160) { this.enterPrison('visit'); return; }
     if (Math.hypot(this.px - VAULT_ENTRY.x, this.py - VAULT_ENTRY.y) < 130) { this.enterVault(); return; }
     const sites = this.campaignSites;
     const volume = sites?.volumes.find(v => Math.hypot(v.x - this.px, v.y - this.py) < 88);
@@ -2228,11 +2268,184 @@ export class Game {
     }
   }
 
+  /** The Cage is optional content, so the island announces itself once you get close. */
+  private updatePrisonHint() {
+    if (this.prisonHinted) return;
+    if (Math.hypot(ISLAND.x - this.px, ISLAND.y - this.py) > 2600) return;
+    this.prisonHinted = true;
+    this.tellStory({
+      id: 'the-cage',
+      channel: 'HYDRA CORRECTIONAL / THE CAGE',
+      title: 'A prison island sits in the north-west water.',
+      text: 'Concrete walls, eight watchtowers and a single pier: THE CAGE. The sally port at the end of the pier is the only door. Walk into it and the 3D prison opens — shoot the lock on your cell bars, reach the control rooms, or let every inmate out and come back out with a pistol you were never supposed to have.',
+    }, 16);
+  }
+
   /** Reveal the vault when the operative stumbles onto the buried hatch. */
   private updateVault(dt: number) {
     void dt;
     if (this.piloting || this.flyingPlane || this.drivingVan || this.playerTank) return;
     if (Math.hypot(this.px - VAULT_ENTRY.x, this.py - VAULT_ENTRY.y) < 48) this.enterVault();
+  }
+
+  /* ================================================================== */
+  /* THE CAGE — arrest, the van ride, the 3D prison                      */
+  /* ================================================================== */
+
+  /** A custody officer got his hands on the operative. */
+  private beginArrest(e: Enemy) {
+    if (this.status !== 'playing') return;
+    this.status = 'arrest';
+    this.arrestT = this.arrestDuration;
+    this.arrestStage = 0;
+    this.arrestCount++;
+    this.clearInput();
+    this.firing = false;
+    this.onArrestAnimChange(true);
+    this.addText(this.px, this.py - 60, 'CUFFED', '#9fc2ff', 20);
+    this.shocks.push({ x: e.x, y: e.y, r: 6, max: 90, life: 0.4, t: 0.4, color: '160,200,255', width: 6 });
+    sfx.siren();
+  }
+
+  private updateArrest(dt: number) {
+    this.arrestT -= dt;
+    // stages: 0 cuffed, 1 shoved into the van, 2 the drive, 3 intake
+    this.arrestStage = this.arrestT > this.arrestDuration * 0.78 ? 0
+      : this.arrestT > this.arrestDuration * 0.5 ? 1
+      : this.arrestT > this.arrestDuration * 0.16 ? 2 : 3;
+    if (this.arrestT <= 0) {
+      this.status = 'prison';
+      this.onArrestAnimChange(false);
+      this.onPrison('arrest');
+    }
+  }
+
+  /** The back of a Hydra transport van: bars, road, two silent guards. */
+  private renderArrest(ctx: CanvasRenderingContext2D) {
+    const W = this.w, H = this.h;
+    const p = clamp(1 - this.arrestT / this.arrestDuration, 0, 1);
+    const shake = Math.sin(this.arrestT * 31) * 3 + Math.sin(this.arrestT * 57) * 2;
+
+    ctx.save();
+    ctx.fillStyle = '#05080b';
+    ctx.fillRect(0, 0, W, H);
+    ctx.translate(shake, Math.sin(this.arrestT * 23) * 2);
+
+    // ---- rear doors of the van ----
+    const vw = W * 0.66, vh = H * 0.62;
+    const vx = (W - vw) / 2, vy = H * 0.16;
+    ctx.fillStyle = '#11181c'; ctx.fillRect(vx, vy, vw, vh);
+    ctx.strokeStyle = '#26343a'; ctx.lineWidth = 6; ctx.strokeRect(vx, vy, vw, vh);
+    // two door leaves
+    ctx.strokeStyle = '#1c272c'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(vx + vw / 2, vy); ctx.lineTo(vx + vw / 2, vy + vh); ctx.stroke();
+
+    // ---- the road seen through the barred window ----
+    const wy = vy + vh * 0.18, wh = vh * 0.28;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(vx + vw * 0.12, wy, vw * 0.76, wh); ctx.clip();
+    const sky = ctx.createLinearGradient(0, wy, 0, wy + wh);
+    sky.addColorStop(0, '#0b1a26'); sky.addColorStop(0.55, '#1d2f36'); sky.addColorStop(1, '#0a1114');
+    ctx.fillStyle = sky; ctx.fillRect(vx, wy, vw, wh);
+    // chasing headlights of the escort
+    for (let i = 0; i < 2; i++) {
+      const lx = vx + vw * (0.3 + i * 0.42) + Math.sin(this.simulationTime * 1.4 + i) * 12;
+      const g = ctx.createRadialGradient(lx, wy + wh * 0.7, 2, lx, wy + wh * 0.7, 90);
+      g.addColorStop(0, 'rgba(255,240,200,0.5)'); g.addColorStop(1, 'rgba(255,240,200,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(lx, wy + wh * 0.7, 90, 0, TAU); ctx.fill();
+    }
+    // road rushing underneath
+    ctx.strokeStyle = 'rgba(210,225,235,0.35)'; ctx.lineWidth = 3;
+    for (let i = 0; i < 9; i++) {
+      const t = (this.simulationTime * 1.5 + i / 9) % 1;
+      const y = wy + wh + t * wh * 0.9;
+      const w = 40 + t * 160;
+      ctx.beginPath(); ctx.moveTo(vx + vw / 2 - w, y); ctx.lineTo(vx + vw / 2 + w, y); ctx.stroke();
+    }
+    ctx.restore();
+
+    // ---- bars of the window ----
+    ctx.fillStyle = '#59666d';
+    for (let i = 0; i <= 8; i++) ctx.fillRect(vx + vw * 0.12 + (vw * 0.76 / 8) * i - 2, wy, 4, wh);
+    ctx.fillRect(vx + vw * 0.12, wy + wh / 2 - 2, vw * 0.76, 4);
+
+    // ---- two guards on the bench opposite ----
+    for (const side of [-1, 1]) {
+      const gx = W / 2 + side * vw * 0.24;
+      const gy = vy + vh * 0.72;
+      ctx.fillStyle = '#1c2a34';
+      ctx.beginPath(); ctx.ellipse(gx, gy + 40, 44, 30, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#243645';
+      ctx.fillRect(gx - 36, gy - 40, 72, 86);
+      ctx.fillStyle = '#0f171c';
+      ctx.beginPath(); ctx.arc(gx, gy - 62, 26, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#3f6fd8';
+      ctx.fillRect(gx - 36, gy - 8, 72, 8);
+      // helmet visor
+      ctx.fillStyle = Math.sin(this.simulationTime * 2 + side) > 0 ? '#6b8fbf' : '#22384f';
+      ctx.fillRect(gx - 20, gy - 70, 40, 12);
+    }
+
+    // ---- handcuffs on the operative's wrists, bottom of frame ----
+    ctx.strokeStyle = '#9fb0b8'; ctx.lineWidth = 7;
+    ctx.beginPath(); ctx.arc(W / 2 - 46, H * 0.94, 26, 0.2, Math.PI * 1.3); ctx.stroke();
+    ctx.beginPath(); ctx.arc(W / 2 + 46, H * 0.94, 26, -0.3, Math.PI * 0.8); ctx.stroke();
+    ctx.strokeStyle = '#6d7d85'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(W / 2 - 22, H * 0.94); ctx.lineTo(W / 2 + 22, H * 0.94); ctx.stroke();
+
+    // ---- caption ----
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#e7f6f6';
+    ctx.font = '900 40px ui-monospace, monospace';
+    ctx.fillText('ARRESTED', W / 2, H * 0.1);
+    ctx.font = '600 13px ui-monospace, monospace';
+    ctx.fillStyle = '#8fb6c4';
+    const line = this.arrestStage === 0 ? 'A CUSTODY OFFICER HAS YOU · THE FIGHT IS OVER FOR NOW'
+      : this.arrestStage === 1 ? 'SHOVED INTO THE BACK OF A HYDRA TRANSPORT'
+      : this.arrestStage === 2 ? 'NORTH ALONG THE COAST ROAD · THE CAGE IS WAITING'
+      : 'INTAKE · THEY MISSED THE PISTOL IN YOUR WAISTBAND';
+    ctx.fillText(line, W / 2, H * 0.1 + 26);
+
+    // progress
+    ctx.fillStyle = '#0d1a1e'; ctx.fillRect(W * 0.25, H * 0.9, W * 0.5, 5);
+    ctx.fillStyle = '#9fc2ff'; ctx.fillRect(W * 0.25, H * 0.9, W * 0.5 * p, 5);
+    ctx.textAlign = 'left';
+    ctx.restore();
+    void ISLAND; void COMPOUND; void LAGOON;
+  }
+
+  /** Step through the sally port on the island, or wake up here after an arrest. */
+  enterPrison(mode: 'arrest' | 'visit') {
+    if (this.status === 'prison') return;
+    this.prisonVisits++;
+    this.status = 'prison';
+    this.clearInput();
+    this.firing = false;
+    this.onPrison(mode);
+  }
+
+  /** Back on the surface: the operative keeps the smuggled pistol and the score. */
+  leavePrison(stats: PrisonStats, escaped: boolean) {
+    const reward = escaped ? 25000 + stats.freed * 400 + stats.guardsDown * 250 : 1500;
+    this.score += reward;
+    this.status = 'playing';
+    this.px = PRISON_DOOR.x;
+    this.py = PRISON_DOOR.y;
+    this.pvx = 0; this.pvy = 0;
+    this.hp = Math.max(40, Math.min(this.maxHp, this.hp));
+    this.weapon = 'pistol'; this.ammo = Infinity;
+    this.weaponAmmo.set('pistol', Infinity);
+    this.iFrames = 3;
+    this.setBanner(escaped ? 'THE CAGE IS BEHIND YOU' : 'INTAKE COMPLETE', escaped
+      ? `+${reward} · ${stats.freed} INMATES RELEASED · ${stats.guardsDown} GUARDS DOWN`
+      : `+${reward} · YOU WALKED OUT WITH YOUR OWN PISTOL`);
+    this.addText(this.px, this.py - 70, `+${reward}`, '#8be8ff', 20);
+    this.tellStory({
+      id: 'cage-escape', channel: 'S.H.I.E.L.D. / SIGNAL RECOVERED',
+      title: 'The Cage is still standing. That is a problem for Hydra.',
+      text: 'A prison that loses three hundred inmates in one night stops being a prison. Hydra will spend weeks rounding them up, weeks it cannot spend hunting you. The pistol from the intake desk is yours to keep.',
+    }, 12);
+    sfx.wave();
   }
 
   private enterVault() {
@@ -2495,7 +2708,7 @@ export class Game {
     const fwd = this.isTouch ? -joystick.y : (k['w'] || k['arrowup'] ? 1 : 0) - (k['s'] || k['arrowdown'] ? 1 : 0);
     const steer = this.isTouch ? joystick.x : (k['d'] || k['arrowright'] ? 1 : 0) - (k['a'] || k['arrowleft'] ? 1 : 0);
     v.boost = k['shift'] ? Math.min(1, v.boost + dt * 2) : Math.max(0, v.boost - dt * 1.5);
-    const top = 430 + v.boost * 200;
+    const top = 451.5 + v.boost * 210;   // +5 % top speed, enemy transports and captured vans alike
     const target = fwd > 0 ? top : fwd < 0 ? -150 : 0;
     v.speed = lerp(v.speed, target, 1 - Math.pow(fwd !== 0 ? 0.22 : 0.05, dt));
     // steering authority scales with speed, like a real heavy transport
@@ -4253,7 +4466,17 @@ export class Game {
     };
   }
 
+  /** Riot custody officers are rare: a handful per wave, never a formation of them. */
+  private maybeCustodian(type: string) {
+    if (this.phase === 'recon' || this.wave < 2) return type;
+    if (type !== 'guard' && type !== 'grunt' && type !== 'shieldman' && type !== 'warden') return type;
+    const already = this.enemies.filter((e) => e.type === 'custodian' && e.hp > 0).length;
+    if (already >= 2 + Math.floor(this.wave / 3)) return type;
+    return Math.random() < 0.075 ? 'custodian' : type;
+  }
+
   private spawnEnemy(type: string, squadId: number, slot: number, dropX?: number, dropY?: number) {
+    type = this.maybeCustodian(type);
     const squad = this.squads.find((s) => s.id === squadId);
     // squads land together — prefer under their VTOL while it's delivering
     let bx: number, by: number;
@@ -4746,6 +4969,12 @@ export class Game {
         if (dist < 1100) sfx.shoot(def.boss ? 'shotgun' : 'smg');
       }
 
+      // Custody officers do not shoot: they walk you down and cuff you.
+      if (e.type === 'custodian' && !this.piloting && !this.flyingPlane && !this.drivingVan
+          && !this.playerTank && dist < def.r + 17 && this.status === 'playing') {
+        // A dash or the AEGIS shield still beats a pair of handcuffs.
+        if (this.iFrames <= 0 && this.aegisTime <= 0 && this.dashT <= 0) { this.beginArrest(e); return; }
+      }
       // contact damage
       if (!this.piloting && !this.flyingPlane && dist < def.r + 15 && def.dmg > 0) {
         this.damagePlayer(def.dmg * dt * 2.4, e.x, e.y);
@@ -6051,6 +6280,10 @@ export class Game {
       this.renderTransit(ctx);
       return;
     }
+    if (this.status === 'arrest') {
+      this.renderArrest(ctx);
+      return;
+    }
     const camX = this.camX, camY = this.camY;
 
     ctx.save();
@@ -6087,6 +6320,7 @@ export class Game {
     this.drawHangars(ctx, camX, camY);
     this.facilityPainter.drawRoofs(ctx, this.facilities, { x: camX, y: camY, w: this.w, h: this.h }, this.simulationTime);
     this.drawStrategicSites(ctx);
+    this.drawPrisonIsland(ctx);
     this.drawPowerComplex(ctx);
     for (const g of this.gates) {
       if (g.x < camX - 200 || g.x > camX + this.w + 200 || g.y < camY - 150 || g.y > camY + this.h + 150) continue;
@@ -6225,6 +6459,30 @@ export class Game {
       ctx.fillStyle = '#e0ad7a'; ctx.fillRect(a.x - 48, a.y - a.altitude * 0.55 - 104, 96 * Math.max(0, a.hp / a.maxHp), 4);
       ctx.textAlign = 'left';
     }
+  }
+
+  /** The Cage: a landmark label on the island so the prison is findable on foot. */
+  private drawPrisonIsland(ctx: CanvasRenderingContext2D) {
+    const dist = Math.hypot(ISLAND.x - (this.camX + this.w / 2), ISLAND.y - (this.camY + this.h / 2));
+    if (dist > Math.max(this.w, this.h) * 1.3) return;
+    ctx.save();
+    const near = Math.hypot(this.px - PRISON_DOOR.x, this.py - PRISON_DOOR.y) < 900;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = `rgba(190,214,220,${near ? 0.55 : 0.32})`;
+    ctx.font = 'bold 40px ui-monospace, monospace';
+    ctx.fillText('THE CAGE', ISLAND.x, ISLAND.y - 40);
+    ctx.font = '12px ui-monospace, monospace';
+    ctx.fillStyle = `rgba(150,180,186,${near ? 0.5 : 0.28})`;
+    ctx.fillText('HYDRA CORRECTIONAL FACILITY / NORTH ATLANTIC', ISLAND.x, ISLAND.y - 18);
+    if (near) {
+      ctx.fillStyle = 'rgba(216,180,90,0.5)';
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.fillText('SALLY PORT · FOLLOW THE PIER', PRISON_DOOR.x, PRISON_DOOR.y + 44);
+      ctx.strokeStyle = 'rgba(216,180,90,0.35)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(PRISON_DOOR.x, PRISON_DOOR.y + 30); ctx.lineTo(PRISON_DOOR.x, PRISON_DOOR.y + 8); ctx.stroke();
+    }
+    ctx.textAlign = 'left';
+    ctx.restore();
   }
 
   private drawStrategicSites(ctx: CanvasRenderingContext2D) {
@@ -6578,6 +6836,43 @@ export class Game {
           ctx.strokeRect(z.x, z.y, z.w, z.h);
           break;
         case 'sand': ctx.fillStyle = 'rgba(190,160,100,0.05)'; ctx.fillRect(z.x, z.y, z.w, z.h); break;
+        case 'lagoon': {
+          // The flooded north-west coast: deep water, slow swell, surf on the rocks.
+          const g = ctx.createLinearGradient(z.x, z.y, z.x + z.w * 0.4, z.y + z.h);
+          g.addColorStop(0, 'rgba(8,28,38,0.94)');
+          g.addColorStop(0.55, 'rgba(10,38,50,0.92)');
+          g.addColorStop(1, 'rgba(14,44,52,0.90)');
+          ctx.fillStyle = g; ctx.fillRect(z.x, z.y, z.w, z.h);
+          const t = this.simulationTime;
+          ctx.strokeStyle = 'rgba(126,206,214,0.10)'; ctx.lineWidth = 2;
+          for (let y = z.y + 40; y < z.y + z.h; y += 74) {
+            ctx.beginPath();
+            for (let x = z.x; x < z.x + z.w; x += 46) {
+              const wave = Math.sin((x * 0.011) + (y * 0.017) + t * 1.25) * 7;
+              if (x === z.x) ctx.moveTo(x, y + wave); else ctx.lineTo(x, y + wave);
+            }
+            ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(196,240,244,0.05)'; ctx.lineWidth = 1;
+          for (let y = z.y + 14; y < z.y + z.h; y += 37) {
+            ctx.beginPath();
+            for (let x = z.x; x < z.x + z.w; x += 70) {
+              const wave = Math.sin((x * 0.02) - (y * 0.013) - t * 1.9) * 4;
+              if (x === z.x) ctx.moveTo(x, y + wave); else ctx.lineTo(x, y + wave);
+            }
+            ctx.stroke();
+          }
+          // surf hugging the island
+          const surf = 0.5 + Math.sin(t * 1.6) * 0.5;
+          for (let ring = 0; ring < 3; ring++) {
+            ctx.strokeStyle = `rgba(222,248,250,${0.10 - ring * 0.025 + surf * 0.03})`;
+            ctx.lineWidth = 10 - ring * 3;
+            ctx.beginPath();
+            ctx.ellipse(ISLAND.x, ISLAND.y, ISLAND.r + 26 + ring * 26 + surf * 10, (ISLAND.r + 26 + ring * 26 + surf * 10) * 0.82, 0, 0, TAU);
+            ctx.stroke();
+          }
+          break;
+        }
         case 'grass': ctx.fillStyle = 'rgba(90,160,110,0.045)'; ctx.fillRect(z.x, z.y, z.w, z.h); break;
         case 'fuel': ctx.fillStyle = 'rgba(190,110,50,0.06)'; ctx.fillRect(z.x, z.y, z.w, z.h); break;
         case 'runway': {
@@ -8127,6 +8422,19 @@ export class Game {
           ctx.fillStyle = '#dfeb9e'; ctx.fillRect(0, -7, 5, 3);
         }
 
+        // Custody officer: dark blue uniform, white "POLICE" band, visored helmet.
+        if (e.type === 'custodian') {
+          ctx.fillStyle = '#16243a'; ctx.fillRect(-def.r * 0.9, -def.r * 0.7, def.r * 1.8, def.r * 1.4);
+          ctx.fillStyle = '#dfe9ff'; ctx.fillRect(-def.r * 0.9, -3, def.r * 1.8, 5);
+          ctx.fillStyle = '#0e1a2b';
+          ctx.beginPath(); ctx.ellipse(def.r * 0.1, 0, def.r * 0.55, def.r * 0.72, 0, 0, TAU); ctx.fill();
+          ctx.fillStyle = '#7fb0ff';
+          ctx.beginPath(); ctx.ellipse(def.r * 0.34, 0, def.r * 0.34, def.r * 0.5, 0, 0, TAU); ctx.fill();
+          // baton in the free hand
+          ctx.strokeStyle = '#2b2b2b'; ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.moveTo(-def.r * 0.7, def.r * 0.5); ctx.lineTo(-def.r * 1.2, def.r * 1.1); ctx.stroke();
+        }
+
         // riot shield for shieldmen — a real visual wall
         if (def.shield) {
           ctx.fillStyle = e.flash > 0 ? '#fff' : '#9fc2ff';
@@ -8411,15 +8719,14 @@ export class Game {
     for (const b of this.bullets) glow(b.x, b.y, b.rocket ? 150 : 62, b.friendly ? '140,230,255' : '255,120,90', b.rocket ? 0.4 : 0.16);
     // pickups
     for (const p of this.pickups) glow(p.x, p.y, 100, p.kind === 'health' ? '90,255,150' : p.kind === 'grenade' ? '140,210,255' : '255,210,130', 0.16);
-    // gunship spotlights + engine glow
+    // Aircraft carry no light while they are airborne: gunships, the operative's
+    // gunship, the bomber, VTOLs and the transports are dark in flight.
     for (const h of this.helis) {
-      glow(h.x, h.y, 420, h.medevac ? '140,255,180' : '255,170,110', 0.4);
-      // downward searchlight cone tip
-      glow(h.x + Math.cos(h.ang) * 120, h.y + Math.sin(h.ang) * 120, 260, '255,240,200', 0.22);
+      if ((h.altitude ?? 65) >= 8) continue;
+      glow(h.x, h.y, 220, h.medevac ? '140,255,180' : '255,170,110', 0.16);
     }
-    if (this.playerHeli) {
-      glow(this.playerHeli.x, this.playerHeli.y, this.piloting ? 480 : 220, '120,235,255', this.piloting ? 0.48 : 0.18);
-      if (this.piloting) glow(this.playerHeli.x + Math.cos(this.playerHeli.ang) * 100, this.playerHeli.y + Math.sin(this.playerHeli.ang) * 100, 260, '255,235,180', 0.26);
+    if (this.playerHeli && !this.piloting) {
+      glow(this.playerHeli.x, this.playerHeli.y, 200, '120,235,255', 0.14);
     }
     // energy barriers
     for (const b of this.barriers) glow(b.x, b.y, 220, '120,210,255', 0.3);
@@ -8436,7 +8743,7 @@ export class Game {
     for (const v of this.vans) if (!v.dead && v.driving) glow(v.x + Math.cos(v.ang) * 110, v.y + Math.sin(v.ang) * 110, 340, '255,235,170', 0.3);
     for (const a of this.allies) glow(a.x, a.y, 120, '120,255,200', 0.14);
     for (const h of this.hangars) if (h.open > 0.15) glow(h.x + h.w / 2, h.y + h.h / 2, 340 * h.open, '140,232,255', 0.28 * h.open);
-    if (this.plane) glow(this.plane.x, this.plane.y, this.flyingPlane ? 640 : 320, '150,240,255', this.flyingPlane ? 0.5 : 0.22);
+    if (this.plane && !this.flyingPlane) glow(this.plane.x, this.plane.y, 300, '150,240,255', 0.2);
     if (this.vaultOpen) glow(this.vaultSpot.x + 300, this.vaultSpot.y, 620, '140,255,220', 0.3);
     // truck headlights
     for (const t of this.trucks) {
@@ -8444,12 +8751,7 @@ export class Game {
       glow(t.x + Math.cos(t.ang) * 110, t.y + Math.sin(t.ang) * 110, 340, '255,235,170', 0.3);
       glow(t.x, t.y, 220, '255,200,120', 0.15);
     }
-    // VTOL engine light + rotor wash
-    for (const a of this.airTransports) glow(a.x, a.y - a.altitude * 0.55, 210, '177,206,222', 0.13);
-    for (const v of this.vtols) {
-      glow(v.x, v.y, v.state === 'hover' ? 500 : 300, '160,220,240', v.state === 'hover' ? 0.5 : 0.3);
-      if (v.state === 'hover') glow(v.x, v.y + 30, 380, '255,180,100', 0.25);
-    }
+    // VTOLs and air transports are dark in flight as well: no engine halo, no hover glow.
     // blinking beacons on watchtowers
     const tBlink = performance.now();
     if (!dark) for (const bp of this.beaconSpots) {
@@ -8555,6 +8857,26 @@ export class Game {
       ctx.restore(); ctx.save(); ctx.textAlign = 'center'; ctx.font = '10px monospace'; ctx.fillStyle = '#b7ebdb';
       ctx.fillText('VAULT / 980 : 7040', clamp(x, 100, this.w - 100), y + 24);
       ctx.restore();
+    }
+    // THE CAGE: an optional landmark, so it always keeps a bearing marker on screen.
+    {
+      const sx = ISLAND.x - camX, sy = ISLAND.y - camY;
+      if (sx < 80 || sy < 80 || sx > this.w - 80 || sy > this.h - 80) {
+        const ang = Math.atan2(ISLAND.y - this.py, ISLAND.x - this.px);
+        const ex = cx + Math.cos(ang) * (this.w / 2 - pad);
+        const ey = cy + Math.sin(ang) * (this.h / 2 - pad);
+        ctx.save();
+        ctx.translate(ex, ey); ctx.rotate(ang);
+        ctx.fillStyle = 'rgba(159,216,230,0.8)';
+        ctx.beginPath(); ctx.moveTo(13, 0); ctx.lineTo(-8, 8); ctx.lineTo(-8, -8); ctx.closePath(); ctx.fill();
+        ctx.restore();
+        const km = (Math.hypot(ISLAND.x - this.px, ISLAND.y - this.py) / 1000).toFixed(1);
+        ctx.save();
+        ctx.textAlign = 'center'; ctx.font = '700 10px "Chakra Petch", sans-serif';
+        ctx.fillStyle = 'rgba(190,232,242,0.85)';
+        ctx.fillText(`THE CAGE · ${km} km`, cx + Math.cos(ang) * (this.w / 2 - pad - 30), cy + Math.sin(ang) * (this.h / 2 - pad - 30));
+        ctx.restore();
+      }
     }
     // objective marker: fortress / general
     const target = this.general
@@ -8666,6 +8988,16 @@ export class Game {
       ctx.strokeStyle = color; ctx.lineWidth = 1;
       ctx.strokeRect(fx - 2.5, fy - 2.5, 5, 5);
       if (f.secured) { ctx.fillStyle = color; ctx.fillRect(fx - 1, fy - 1, 2, 2); }
+    }
+    // THE CAGE — the prison island, on the map in every sector
+    {
+      const px2 = x + ISLAND.x * sx, py2 = y + ISLAND.y * sy;
+      ctx.strokeStyle = '#9fd8e6'; ctx.lineWidth = 1.4;
+      ctx.strokeRect(px2 - 4, py2 - 4, 8, 8);
+      ctx.fillStyle = '#9fd8e6'; ctx.fillRect(px2 - 1.5, py2 - 1.5, 3, 3);
+      ctx.font = '7px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('CAGE', px2, py2 - 8);
+      ctx.textAlign = 'left';
     }
     for (const hp of this.helipads) {
       ctx.fillStyle = '#57c8b8';
