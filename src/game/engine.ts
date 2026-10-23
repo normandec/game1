@@ -1073,6 +1073,7 @@ export class Game {
     if (this.vaultOpen && this.vaultChoice === 'offer' &&
         Math.hypot(this.planeSpot.x - this.px, this.planeSpot.y - this.py) < 260) return 'F · CLAIM AIR WING';
     if (this.plane && Math.hypot(this.plane.x - this.px, this.plane.y - this.py) < 170) return 'F · BOARD BOMBER';
+    if (this.parkedPlaneNear(210)) return 'F · SEIZE BOMBER';
     const l = this.lasers.find((q) => !q.captured && Math.hypot(q.x - this.px, q.y - this.py) < 120);
     if (l) return 'F · CAPTURE BEAM';
     for (const poi of this.pois) {
@@ -1726,6 +1727,42 @@ export class Game {
     }
   }
 
+  /** Hydra hangars park real bombers: the nearest one you could seize with F. */
+  private parkedPlaneNear(range = 210): Rect | null {
+    let best: Rect | null = null, bd = range;
+    for (const o of this.obstacles) {
+      if (o.kind !== 'plane' || o.dead) continue;
+      const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+      const d = Math.hypot(cx - this.px, cy - this.py);
+      if (d < bd) { bd = d; best = o; }
+    }
+    return best;
+  }
+
+  /**
+   * Seize a bomber parked inside a Hydra hangar. It uses exactly the same
+   * NIGHTJAR systems as the vault aircraft (flight, cannons, carpet bombing),
+   * so nothing new has to be learned to fly it.
+   */
+  private seizeParkedPlane(o: Rect) {
+    const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+    if (this.plane) {
+      this.addText(cx, cy - 80, 'BOMBER ALREADY IN SERVICE', '#ffcf7a', 13);
+      return;
+    }
+    o.dead = true;
+    this.navigationDirty = true;
+    this.plane = {
+      x: cx, y: cy, vx: 0, vy: 0, ang: -Math.PI / 2, bank: 0,
+      hp: 1200, maxHp: 1200, bombCd: 0, gunCd: 0, fuel: 100, active: false,
+    };
+    this.score += 2500;
+    this.addText(cx, cy - 80, 'HYDRA BOMBER SEIZED +2500', '#8be8ff', 18);
+    this.setBanner('HYDRA BOMBER SEIZED', 'IT FLIES UNDER S.H.I.E.L.D. COLORS NOW');
+    sfx.wave();
+    this.enterPlane();
+  }
+
   /** Master interact: aircraft, vans, beam batteries, barricades, the black vault. */
   interactHeli() {
     if (this.status !== 'playing') return;
@@ -1774,6 +1811,9 @@ export class Game {
     if (this.plane && !this.flyingPlane && Math.hypot(this.plane.x - this.px, this.plane.y - this.py) < 170) {
       this.enterPlane(); return;
     }
+    // 2b) a bomber parked inside a Hydra hangar — seize it
+    const parkedPlane = this.parkedPlaneNear(210);
+    if (parkedPlane) { this.seizeParkedPlane(parkedPlane); return; }
     // 3) capture a beam battery
     const laser = this.lasers.find((l) => !l.captured && Math.hypot(l.x - this.px, l.y - this.py) < 120);
     if (laser) {
@@ -3127,17 +3167,14 @@ export class Game {
   private updateHelis(dt: number) {
     for (let i = this.helis.length - 1; i >= 0; i--) {
       const h = this.helis[i];
-      if (h.home === undefined) {
+      // Attacking gunships fly in from wherever they were launched. They only
+      // claim a parking bay on the way home, so a sortie never teleports an
+      // aircraft onto a pad (and never hides the aircraft parked there).
+      if (h.home === undefined && h.state === 'egress') {
         const slot = this.parkedHelis.findIndex((p, index) => !p.taken && ![...this.hangarClaims.values()].includes(index));
-        h.home = slot;
         if (slot >= 0) {
-          this.hangarClaims.set(h, slot); h.x = this.parkedHelis[slot].x; h.y = this.parkedHelis[slot].y;
-          h.state = 'startup'; h.t = 0; h.rotor = 0; h.altitude = 0; h.sortieT = 0;
-        } else {
-          // No free bay: hold over the airfield instead of vanishing mid-sortie.
-          const pad = this.helipads.find(pd => Math.hypot(pd.x - h.x, pd.y - h.y) > 400) || this.helipads[0];
-          if (pad) { h.tx = pad.x; h.ty = pad.y; }
-          h.altitude = 65;
+          h.home = slot;
+          this.hangarClaims.set(h, slot);
         }
       }
       h.sortieT = (h.sortieT || 0) + dt;
@@ -5147,7 +5184,7 @@ export class Game {
     this.pickups.push({ kind, weapon, x, y, t: 0, life: 20 });
   }
 
-  private explode(x: number, y: number, radius: number, dmg: number, sound: boolean) {
+  private explode(x: number, y: number, radius: number, dmg: number, sound: boolean, opts?: { ownBomb?: boolean }) {
     if (sound) sfx.explode();
     this.hitstop = Math.max(this.hitstop, 0.06);
     this.addLight(x, y, radius * 2.4, '255,180,90', 0.45);
@@ -5245,7 +5282,9 @@ export class Game {
       if (Math.hypot(br.x - x, br.y - y) < radius + 12) this.igniteBarrel(br);
     }
     const pd = Math.hypot(this.px - x, this.py - y);
-    if (pd < radius) {
+    // Your own carpet bombs never hurt the bomber dropping them: the run would
+    // otherwise chew through the plane's hull on every pass.
+    if (pd < radius && !(opts?.ownBomb && this.flyingPlane)) {
       const f = 1 - pd / radius;
       const a = Math.atan2(this.py - y, this.px - x);
       this.pvx += Math.cos(a) * 380 * f; this.pvy += Math.sin(a) * 380 * f;
@@ -5259,7 +5298,7 @@ export class Game {
       if (g.bomb) {
         g.t -= dt; g.z = Math.max(0, g.z - dt * 135);
         g.x += g.vx * dt; g.y += g.vy * dt;
-        if (g.t <= 0) { this.nades.splice(i, 1); this.explode(g.x, g.y, 210, g.dmg, true); }
+        if (g.t <= 0) { this.nades.splice(i, 1); this.explode(g.x, g.y, 210, g.dmg, true, { ownBomb: true }); }
         continue;
       }
       g.t -= dt; g.vz -= 300 * dt;
