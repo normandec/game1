@@ -5938,6 +5938,48 @@ export class Game {
         ctx.beginPath(); ctx.arc(x + Math.sin(now + i) * 12, y, r, 0, TAU); ctx.fill();
       }
     }
+    // Sectors 2 and 4 keep their own weather (dust / toxic haze) and now get
+    // falling snow on top of it as well.
+    if (theme.weather !== 'snow' && (this.sector === 2 || this.sector === 4)) {
+      this.drawSnowfall(ctx, 82, 1);
+    }
+    ctx.restore();
+  }
+
+  /** Layered snowfall, drawn additively over whatever weather a sector already has. */
+  private drawSnowfall(ctx: CanvasRenderingContext2D, count: number, strength = 1) {
+    const now = performance.now() * 0.001;
+    ctx.save();
+    const wind = Math.sin(now * 0.18) * 26 + Math.sin(now * 0.07) * 44;
+    const layers = [
+      { scale: 0.45, speed: 30, sway: 14, alpha: 0.24 },
+      { scale: 0.75, speed: 56, sway: 22, alpha: 0.38 },
+      { scale: 1, speed: 88, sway: 34, alpha: 0.52 },
+    ];
+    for (let l = 0; l < layers.length; l++) {
+      const layer = layers[l];
+      const n = Math.max(4, Math.round(count * (l === 0 ? 0.46 : l === 1 ? 0.32 : 0.22)));
+      ctx.fillStyle = `rgba(228,247,255,${Math.min(0.85, layer.alpha * strength)})`;
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const speed = layer.speed * (0.8 + ((i * 37) % 41) / 100);
+        const x = ((i * 233 + now * (wind * layer.scale + 26 * layer.scale)) % (this.w + 80)) - 40;
+        const y = ((i * 149 + now * speed) % (this.h + 80)) - 40;
+        const px = x + Math.sin(now * 1.4 + i * 0.7) * layer.sway;
+        const py = y + Math.sin(now * 0.9 + i) * 6;
+        const r = layer.scale * (1.1 + ((i * 29) % 17) / 12);
+        ctx.moveTo(px + r, py);
+        ctx.arc(px, py, r, 0, TAU);
+      }
+      ctx.fill();
+    }
+    // Soft cold glare so the flakes read as snow rather than white dust.
+    const cold = ctx.createLinearGradient(0, 0, 0, this.h);
+    cold.addColorStop(0, `rgba(190,225,240,${0.05 * strength})`);
+    cold.addColorStop(0.55, 'rgba(190,225,240,0)');
+    cold.addColorStop(1, `rgba(210,235,245,${0.035 * strength})`);
+    ctx.fillStyle = cold;
+    ctx.fillRect(0, 0, this.w, this.h);
     ctx.restore();
   }
 
