@@ -3,13 +3,14 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
-  PrisonSim, CELL_D, CELL_W, CELL_H, CORRIDOR_HALF, WING_ROWS, wingZ, type PrisonStats,
+  PrisonSim, CELL_D, CELL_W, CELL_H, CORRIDOR_HALF, WING_ROWS, wingZ, strideLength, type PrisonStats,
 } from '../game/prison';
 import { PrisonAudio } from '../game/prisonAudio';
 
 export type PrisonMode = 'arrest' | 'visit';
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const clampAbs = (v: number, m: number) => (v < -m ? -m : v > m ? m : v);
 interface Props {
   mode: PrisonMode;
   onExit: (stats: PrisonStats, escaped: boolean) => void;
@@ -64,12 +65,12 @@ export default function Prison3D({ mode, onExit }: Props) {
     renderer.setClearColor(0x05080a, 1);
     // Filmic response, a touch of bloom-feel through exposure. Bright enough to read.
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.12;
+    renderer.toneMappingExposure = 1.2;
     hostEl.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
     // Tight, damp air: the gallery fades out well before its far end.
-    scene.fog = new THREE.FogExp2(0x0a1014, 0.019);
+    scene.fog = new THREE.FogExp2(0x0b1216, 0.0165);
     const camera = new THREE.PerspectiveCamera(72, W / H, 0.06, 320);
     // 1.66 m eye height, slightly wide: the corridor has to feel narrow and long.
 
@@ -80,8 +81,13 @@ export default function Prison3D({ mode, onExit }: Props) {
     const envRT = pmrem.fromScene(new RoomEnvironment(), 0.06);
     scene.environment = envRT.texture;
 
-    scene.add(new THREE.AmbientLight(0x7d95a8, 0.4));
-    scene.add(new THREE.HemisphereLight(0x54748c, 0x0b1013, 0.55));
+    // Light bounces off a pale wet floor, so the hemisphere's ground term is a real
+    // bounce tone (not near-black): ceilings and upward faces stay readable.
+    scene.add(new THREE.AmbientLight(0x8ba3b8, 0.34));
+    scene.add(new THREE.HemisphereLight(0x7c98ae, 0x36454d, 0.82));
+    const bounce = new THREE.HemisphereLight(0xa9b6bc, 0x2a3439, 0.35);
+    bounce.position.set(0, -1, 0);
+    scene.add(bounce);
     const moon = new THREE.DirectionalLight(0x9dc0dc, 0.28);
     moon.position.set(-60, 120, -40);
     moon.castShadow = false;
@@ -244,7 +250,13 @@ export default function Prison3D({ mode, onExit }: Props) {
       const g = c.getContext('2d')!;
       g.fillStyle = '#0b1012'; g.fillRect(0, 0, 256, 96);
       g.strokeStyle = 'rgba(180,200,200,0.35)'; g.lineWidth = 4; g.strokeRect(2, 2, 252, 92);
-      g.fillStyle = color; g.font = 'bold 54px monospace'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = color; g.textAlign = 'center'; g.textBaseline = 'middle';
+      // shrink long names until they fit the plate
+      let size = 54;
+      for (; size > 22; size -= 2) {
+        g.font = `bold ${size}px monospace`;
+        if (g.measureText(text).width <= 232) break;
+      }
       g.fillText(text, 128, 52);
       return tex(c, true, 1);
     }
@@ -270,11 +282,8 @@ export default function Prison3D({ mode, onExit }: Props) {
     const matCeiling = new THREE.MeshStandardMaterial({ color: 0x232a2f, map: wallMap, roughness: 0.96 });
     const matDado = new THREE.MeshStandardMaterial({ color: 0x1f272c, roughness: 0.7, metalness: 0.15 });
     const matGate = new THREE.MeshStandardMaterial({ color: 0x3a3f42, roughness: 0.55, metalness: 0.6 });
-    const matBed = new THREE.MeshStandardMaterial({ color: 0x2e3a44, roughness: 0.92 });
     const matMetal = new THREE.MeshStandardMaterial({ color: 0x59646c, roughness: 0.48, metalness: 0.72 });
     const matPipe = new THREE.MeshStandardMaterial({ color: 0x2b3339, roughness: 0.45, metalness: 0.7 });
-    const matWood = new THREE.MeshStandardMaterial({ color: 0x4a3b2d, roughness: 0.88 });
-    const matBench = new THREE.MeshStandardMaterial({ color: 0x2a3237, roughness: 0.82, metalness: 0.1 });
     const matLamp = new THREE.MeshBasicMaterial({ color: 0xe4f2ff });
     const matGuard = new THREE.MeshStandardMaterial({ color: 0x2b3a4a, roughness: 0.7, metalness: 0.2 });
     const matGuardHead = new THREE.MeshStandardMaterial({ color: 0xc9a58b, roughness: 0.8 });
@@ -362,46 +371,572 @@ export default function Prison3D({ mode, onExit }: Props) {
     const gateMesh = gateGeos.length ? new THREE.Mesh(mergeGeometries(gateGeos)!, matGate) : null;
     if (gateMesh) scene.add(gateMesh);
 
-    const groups: Record<string, THREE.BufferGeometry[]> = {
-      bed: [], metal: [], wood: [], screen: [], siren: [], cloth: [], stone: [], bench: [], camera: [],
-      mattress: [], celllamp: [], steel: [], red: [], board: [],
+    /* ---------------- doorways: an opening with depth, not a slot in a slab ----------------
+     * Each room's 6.4 m gap gets jambs, a heavy lintel, a steel threshold, the sliding
+     * leaf parked against the wall and a lit name plate. The frame is 0.3 m deeper than
+     * the wall, so it casts a real shadow and the wall reads as a metre of concrete.
+     */
+    const DOOR_H = 3.2;
+    const GAP = 6.4;
+    const portalGeos: THREE.BufferGeometry[] = [];
+    const portalTrim: THREE.BufferGeometry[] = [];
+    const portalLeaves: THREE.BufferGeometry[] = [];
+    const portalLamps: THREE.BufferGeometry[] = [];
+    const roomSigns: { name: string; x: number; y: number; z: number; yaw: number }[] = [];
+    for (const r of sim.rooms) {
+      const hw = r.w / 2, hd = r.d / 2;
+      const ox = r.door === 'e' ? 1 : r.door === 'w' ? -1 : 0;
+      const oz = r.door === 'n' ? -1 : r.door === 's' ? 1 : 0;
+      const cx = r.x + ox * hw, cz = r.z + oz * hd;
+      const alongX = ox === 0;          // does the opening span x?
+      const t = 1.5;                    // frame depth, wider than the 1.1 m wall
+      const half = GAP / 2;
+      const jamb = (sgn: number) => {
+        const jx = alongX ? cx + sgn * (half + 0.18) : cx;
+        const jz = alongX ? cz : cz + sgn * (half + 0.18);
+        return box(alongX ? 0.36 : t, DOOR_H + 0.12, alongX ? t : 0.36, jx, (DOOR_H + 0.12) / 2, jz);
+      };
+      portalGeos.push(jamb(-1), jamb(1));
+      // lintel and its shadow line
+      portalGeos.push(alongX
+        ? box(GAP + 0.72, 0.52, t, cx, DOOR_H + 0.32, cz)
+        : box(t, 0.52, GAP + 0.72, cx, DOOR_H + 0.32, cz));
+      portalTrim.push(alongX
+        ? box(GAP + 0.4, 0.045, t * 0.92, cx, 0.03, cz)
+        : box(t * 0.92, 0.045, GAP + 0.4, cx, 0.03, cz));
+      // the leaf, slid back against the inside wall
+      const inward = { x: -ox, z: -oz };
+      const lx = alongX ? cx + half + 1.75 : cx + inward.x * (t / 2 + 0.1);
+      const lz = alongX ? cz + inward.z * (t / 2 + 0.1) : cz + half + 1.75;
+      portalLeaves.push(alongX
+        ? box(3.1, DOOR_H - 0.06, 0.12, lx, (DOOR_H - 0.06) / 2, lz)
+        : box(0.12, DOOR_H - 0.06, 3.1, lx, (DOOR_H - 0.06) / 2, lz));
+      // pull bars on the leaf
+      for (const y of [1.0, 1.9]) {
+        portalTrim.push(alongX
+          ? box(1.5, 0.06, 0.06, lx, y, lz + inward.z * 0.09)
+          : box(0.06, 0.06, 1.5, lx + inward.x * 0.09, y, lz));
+      }
+      // lamp over the opening, plus the conduit that feeds it
+      const lpx = cx + ox * (t / 2 - 0.2), lpz = cz + oz * (t / 2 - 0.2);
+      portalLamps.push(box(alongX ? 0.62 : 0.3, 0.12, alongX ? 0.3 : 0.62, lpx, DOOR_H + 0.66, lpz));
+      portalTrim.push(alongX
+        ? box(0.12, 0.12, Math.abs(ox) * 0.8 + 0.5, lpx + ox * 0.3, DOOR_H + 0.78, lpz)
+        : box(Math.abs(oz) * 0.8 + 0.5, 0.12, 0.12, lpx, DOOR_H + 0.78, lpz + oz * 0.3));
+      roomSigns.push({ name: r.name, x: cx + ox * (t / 2 + 0.02), y: DOOR_H + 0.34, z: cz + oz * (t / 2 + 0.02), yaw: Math.atan2(ox, oz) });
+    }
+    if (portalGeos.length) scene.add(new THREE.Mesh(mergeGeometries(portalGeos)!, matConcrete));
+    if (portalLeaves.length) scene.add(new THREE.Mesh(mergeGeometries(portalLeaves)!, matMetal));
+    if (portalTrim.length) scene.add(new THREE.Mesh(mergeGeometries(portalTrim)!, matFrame));
+    if (portalLamps.length) scene.add(new THREE.Mesh(mergeGeometries(portalLamps)!, matLamp));
+    for (const s of roomSigns) {
+      const plate = new THREE.Mesh(
+        new THREE.PlaneGeometry(2.9, 0.78),
+        new THREE.MeshBasicMaterial({ map: signTexture(s.name, '#a7e8ff'), transparent: true }),
+      );
+      plate.position.set(s.x, s.y, s.z);
+      plate.rotation.y = s.yaw;
+      scene.add(plate);
+    }
+
+    /* ---------------- floor: poured slabs, saw-cut joints, drains ---------------- */
+    const jointGeos: THREE.BufferGeometry[] = [];
+    for (let x = -108; x <= 108.01; x += 6) jointGeos.push(box(0.075, 0.02, 217, x, 0.013, 0));
+    for (let z = -108; z <= 108.01; z += 6) jointGeos.push(box(217, 0.02, 0.075, 0, 0.013, z));
+    const matJoint = new THREE.MeshBasicMaterial({ color: 0x0a1013 });
+    scene.add(new THREE.Mesh(mergeGeometries(jointGeos)!, matJoint));
+
+    const drainGeos: THREE.BufferGeometry[] = [];
+    const grateAt = (x: number, z: number) => {
+      drainGeos.push(box(0.72, 0.04, 0.72, x, 0.03, z));
+      for (let k = -3; k <= 3; k++) drainGeos.push(box(0.62, 0.05, 0.055, x, 0.045, z + k * 0.095));
     };
+    for (let w = 0; w < 4; w++) {
+      const z0 = wingZ(w);
+      for (let x = -60; x <= 60.01; x += 34) grateAt(x, z0 + (w % 2 ? 1 : -1) * 1.2);
+    }
+    for (const r of sim.rooms) grateAt(r.x + r.w * 0.22, r.z + r.d * 0.24);
+    grateAt(0, 0); grateAt(0, -60); grateAt(0, 60); grateAt(76, 0); grateAt(-76, 0);
+    scene.add(new THREE.Mesh(mergeGeometries(drainGeos)!, matPipe));
+
+    /* ---------------- ceiling: a coffer grid over the whole cell house ---------------- */
+    const cofferGeos: THREE.BufferGeometry[] = [];
+    for (let x = -108; x <= 108.01; x += 6) cofferGeos.push(box(0.36, 0.32, 218, x, CEIL - 0.16, 0));
+    for (let z = -108; z <= 108.01; z += 6) cofferGeos.push(box(218, 0.32, 0.36, 0, CEIL - 0.16, z));
+    const matCoffer = new THREE.MeshStandardMaterial({ color: 0x39444b, roughness: 0.94, metalness: 0.05 });
+    scene.add(new THREE.Mesh(mergeGeometries(cofferGeos)!, matCoffer));
+
+    /* ---------------- puddles: the floor is wet where the roof leaks ---------------- */
+    const puddleMaps = (() => {
+      const { c, g } = cv(256);
+      g.clearRect(0, 0, 256, 256);
+      const rnd = (() => { let n = 1777; return () => (n = (n * 16807) % 2147483647) / 2147483647; })();
+      for (let i = 0; i < 13; i++) {
+        const px = 60 + rnd() * 136, py = 60 + rnd() * 136, rr = 34 + rnd() * 58;
+        const grd = g.createRadialGradient(px, py, 0, px, py, rr);
+        grd.addColorStop(0, 'rgba(255,255,255,0.85)');
+        grd.addColorStop(0.65, 'rgba(255,255,255,0.42)');
+        grd.addColorStop(1, 'rgba(255,255,255,0)');
+        g.fillStyle = grd;
+        g.beginPath(); g.arc(px, py, rr, 0, Math.PI * 2); g.fill();
+      }
+      // dissolve the edges so the wet patch has no visible border
+      g.globalCompositeOperation = 'destination-in';
+      const mask = g.createRadialGradient(128, 128, 30, 128, 128, 126);
+      mask.addColorStop(0, 'rgba(255,255,255,1)');
+      mask.addColorStop(0.7, 'rgba(255,255,255,0.9)');
+      mask.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = mask;
+      g.fillRect(0, 0, 256, 256);
+      g.globalCompositeOperation = 'source-over';
+      return tex(c, false);
+    })();
+    const puddleMat = new THREE.MeshStandardMaterial({
+      color: 0x0c1418, roughness: 0.055, metalness: 0.62, envMapIntensity: 1.6,
+      transparent: true, opacity: 0.94, alphaMap: puddleMaps, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
+    });
+    const puddleSpots: { x: number; z: number; s: number; r: number }[] = [];
+    const prnd = (() => { let n = 9091; return () => (n = (n * 48271) % 2147483647) / 2147483647; })();
+    const puddleAt = (x: number, z: number, s: number) => {
+      puddleSpots.push({ x, z, s, r: prnd() * Math.PI * 2 });
+    };
+    for (let w = 0; w < 4; w++) {
+      const z0 = wingZ(w);
+      for (let x = -galleryLen / 2 + 4; x < galleryLen / 2; x += 4.5) {
+        if (prnd() > 0.55) puddleAt(x + prnd() * 2, z0 + (prnd() - 0.5) * 2.6, 1.1 + prnd() * 2.4);
+      }
+    }
+    for (let i = 0; i < 46; i++) {
+      // the hall between the wings: big standing pools along the walls
+      puddleAt((prnd() - 0.5) * 216, (prnd() - 0.5) * 216, 1.6 + prnd() * 3.4);
+    }
+    for (const r of sim.rooms) {
+      for (let i = 0; i < 6; i++) {
+        puddleAt(r.x + (prnd() - 0.5) * (r.w - 2), r.z + (prnd() - 0.5) * (r.d - 2), 0.9 + prnd() * 1.8);
+      }
+    }
+    const puddleGeo = new THREE.PlaneGeometry(1, 1);
+    const puddles = new THREE.InstancedMesh(puddleGeo, puddleMat, puddleSpots.length);
+    const pQ = new THREE.Quaternion();
+    const pM = new THREE.Matrix4();
+    const pE = new THREE.Euler();
+    puddleSpots.forEach((p, i) => {
+      pQ.setFromEuler(pE.set(-Math.PI / 2, 0, p.r));
+      pM.compose(
+        new THREE.Vector3(p.x, 0.018 + (i % 7) * 0.0012, p.z),
+        pQ,
+        new THREE.Vector3(p.s * 2.4, p.s * 2.4, 1),
+      );
+      puddles.setMatrixAt(i, pM);
+    });
+    puddles.renderOrder = 2;
+    scene.add(puddles);
+
+    /* ---------------- furniture: assembled, not extruded ----------------
+     * Every prop used to be one box scaled to its footprint, which is why a bunk and a
+     * locker looked the same. Each kind is now a small assembly — legs, rails, doors,
+     * hinges, handles, seat, cistern, burners — merged into a handful of material
+     * buckets, so the detail costs draw calls only once for the whole prison.
+     */
+    type Part = {
+      /** primitive */
+      t: 'box' | 'cyl';
+      /** size, as a fraction of the prop's w / h / d */
+      s: [number, number, number];
+      /** centre offset: x and z are fractions of w / d from the centre, y of h from the base */
+      o: [number, number, number];
+      /** material bucket */
+      m: keyof typeof propBucket;
+    };
+    const built: THREE.BufferGeometry[][] = [];
+    const propBuckets = {
+      steel: [] as THREE.BufferGeometry[],     // painted steel furniture
+      darkSteel: [] as THREE.BufferGeometry[], // near-black fittings
+      wood: [] as THREE.BufferGeometry[],      // tables, crates, boards
+      cloth: [] as THREE.BufferGeometry[],     // mattresses, laundry, stretchers
+      ceramic: [] as THREE.BufferGeometry[],   // porcelain, basins
+      red: [] as THREE.BufferGeometry[],       // extinguishers
+      screen: [] as THREE.BufferGeometry[],    // monitors, lit panels
+      lamp: [] as THREE.BufferGeometry[],      // emissive fittings
+      siren: [] as THREE.BufferGeometry[],
+      stone: [] as THREE.BufferGeometry[],
+      concrete: [] as THREE.BufferGeometry[],
+      mattress: [] as THREE.BufferGeometry[],
+    };
+    const propBucket = propBuckets;
+
+    const LEGS: Part[] = [
+      { t: 'box', s: [0.055, 0.9, 0.06], o: [-0.45, 0.45, -0.42], m: 'darkSteel' },
+      { t: 'box', s: [0.055, 0.9, 0.06], o: [0.45, 0.45, -0.42], m: 'darkSteel' },
+      { t: 'box', s: [0.055, 0.9, 0.06], o: [-0.45, 0.45, 0.42], m: 'darkSteel' },
+      { t: 'box', s: [0.055, 0.9, 0.06], o: [0.45, 0.45, 0.42], m: 'darkSteel' },
+    ];
+
+    /** The assembly for one kind. Sizes/offsets are fractions, so every prop varies. */
+    const partsFor = (kind: string): Part[] => {
+      switch (kind) {
+        case 'bed':
+          return [
+            { t: 'box', s: [0.04, 0.94, 0.06], o: [-0.47, 0.47, 0], m: 'darkSteel' },      // frame ends
+            { t: 'box', s: [0.04, 0.94, 0.06], o: [0.47, 0.47, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.98, 0.08, 0.05], o: [0, 0.9, -0.44], m: 'darkSteel' },        // side rails
+            { t: 'box', s: [0.98, 0.08, 0.05], o: [0, 0.9, 0.44], m: 'darkSteel' },
+            { t: 'box', s: [0.94, 0.06, 0.05], o: [0, 0.84, -0.2], m: 'darkSteel' },        // slats
+            { t: 'box', s: [0.94, 0.06, 0.05], o: [0, 0.84, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.94, 0.06, 0.05], o: [0, 0.84, 0.2], m: 'darkSteel' },
+            { t: 'box', s: [0.05, 1.5, 0.95], o: [-0.47, 0.75, 0], m: 'darkSteel' },        // headboard
+            { t: 'box', s: [0.98, 0.16, 0.98], o: [0, 0.96, 0], m: 'mattress' },            // pad
+            { t: 'box', s: [0.05, 0.95, 0.05], o: [0.47, 0.47, -0.44], m: 'darkSteel' },    // corner posts
+            { t: 'box', s: [0.05, 0.95, 0.05], o: [0.47, 0.47, 0.44], m: 'darkSteel' },
+            { t: 'box', s: [0.05, 0.95, 0.05], o: [-0.47, 0.47, 0.44], m: 'darkSteel' },
+            { t: 'box', s: [0.05, 0.95, 0.05], o: [-0.47, 0.47, -0.44], m: 'darkSteel' },
+          ];
+        case 'locker':
+          return [
+            { t: 'box', s: [0.9, 0.92, 0.88], o: [0, 0.52, -0.04], m: 'steel' },            // carcass
+            { t: 'box', s: [0.42, 0.86, 0.05], o: [-0.22, 0.52, 0.46], m: 'steel' },        // doors
+            { t: 'box', s: [0.42, 0.86, 0.05], o: [0.22, 0.52, 0.46], m: 'steel' },
+            { t: 'box', s: [0.03, 0.16, 0.03], o: [-0.06, 0.5, 0.5], m: 'darkSteel' },      // handles
+            { t: 'box', s: [0.03, 0.16, 0.03], o: [0.06, 0.5, 0.5], m: 'darkSteel' },
+            { t: 'box', s: [0.55, 0.02, 0.02], o: [0, 0.9, 0.47], m: 'darkSteel' },         // vents
+            { t: 'box', s: [0.55, 0.02, 0.02], o: [0, 0.12, 0.47], m: 'darkSteel' },
+            { t: 'box', s: [0.1, 0.04, 0.1], o: [-0.38, 0.02, 0.38], m: 'darkSteel' },      // feet
+            { t: 'box', s: [0.1, 0.04, 0.1], o: [0.38, 0.02, 0.38], m: 'darkSteel' },
+          ];
+        case 'toilet':
+          return [
+            { t: 'box', s: [0.72, 0.34, 0.8], o: [0, 0.38, 0.06], m: 'ceramic' },           // bowl
+            { t: 'cyl', s: [0.8, 0.06, 0.92], o: [0, 0.62, 0.06], m: 'ceramic' },           // seat
+            { t: 'cyl', s: [0.66, 0.02, 0.78], o: [0, 0.655, 0.06], m: 'darkSteel' },       // opening
+            { t: 'box', s: [0.86, 0.62, 0.34], o: [0, 0.72, -0.34], m: 'ceramic' },         // cistern
+            { t: 'box', s: [0.86, 0.06, 0.36], o: [0, 1.02, -0.34], m: 'ceramic' },         // lid
+            { t: 'cyl', s: [0.16, 0.06, 0.16], o: [0.28, 1.04, -0.34], m: 'darkSteel' },    // flush
+            { t: 'cyl', s: [0.16, 0.5, 0.16], o: [0, 0.24, -0.22], m: 'ceramic' },          // soil pipe
+          ];
+        case 'sink':
+          return [
+            { t: 'box', s: [0.9, 0.16, 0.9], o: [0, 0.9, 0], m: 'ceramic' },                // basin
+            { t: 'box', s: [0.7, 0.1, 0.7], o: [0, 0.83, 0], m: 'ceramic' },
+            { t: 'cyl', s: [0.1, 0.22, 0.1], o: [0, 0.99, -0.3], m: 'darkSteel' },          // tap
+            { t: 'cyl', s: [0.06, 0.12, 0.06], o: [0, 1.04, -0.22], m: 'darkSteel' },
+            { t: 'cyl', s: [0.1, 0.7, 0.1], o: [0, 0.4, 0], m: 'ceramic' },                 // pedestal
+            { t: 'cyl', s: [0.06, 0.5, 0.06], o: [0, 0.55, -0.3], m: 'darkSteel' },         // pipe
+          ];
+        case 'table':
+        case 'desk':
+        case 'workbench':
+          return [
+            { t: 'box', s: [1, 0.09, 1], o: [0, 0.94, 0], m: kind === 'workbench' ? 'wood' : 'wood' },  // top
+            { t: 'box', s: [0.96, 0.12, 0.9], o: [0, 0.84, 0], m: 'darkSteel' },            // apron
+            ...LEGS,
+          ];
+        case 'bench':
+          return [
+            { t: 'box', s: [1, 0.16, 0.86], o: [0, 0.9, 0], m: 'wood' },                    // seat
+            { t: 'box', s: [0.06, 0.86, 0.8], o: [-0.44, 0.44, 0], m: 'darkSteel' },        // legs
+            { t: 'box', s: [0.06, 0.86, 0.8], o: [0.44, 0.44, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.9, 0.06, 0.06], o: [0, 0.22, 0], m: 'darkSteel' },            // stretcher
+          ];
+        case 'chair':
+          return [
+            { t: 'box', s: [0.86, 0.12, 0.86], o: [0, 0.5, 0], m: 'steel' },                // seat
+            { t: 'box', s: [0.86, 0.52, 0.1], o: [0, 0.76, -0.42], m: 'steel' },            // back
+            { t: 'box', s: [0.06, 0.5, 0.06], o: [-0.38, 0.25, -0.38], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 0.5, 0.06], o: [0.38, 0.25, -0.38], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 0.5, 0.06], o: [-0.38, 0.25, 0.38], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 0.5, 0.06], o: [0.38, 0.25, 0.38], m: 'darkSteel' },
+          ];
+        case 'crate':
+          return [
+            { t: 'box', s: [0.94, 0.86, 0.94], o: [0, 0.5, 0], m: 'wood' },                 // body
+            { t: 'box', s: [1, 0.09, 1], o: [0, 0.94, 0], m: 'wood' },                      // lid
+            { t: 'box', s: [1, 0.09, 0.06], o: [0, 0.06, -0.47], m: 'darkSteel' },          // corner bands
+            { t: 'box', s: [1, 0.09, 0.06], o: [0, 0.06, 0.47], m: 'darkSteel' },
+            { t: 'box', s: [1, 0.09, 0.06], o: [0, 0.94, -0.47], m: 'darkSteel' },
+            { t: 'box', s: [1, 0.09, 0.06], o: [0, 0.94, 0.47], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 0.05, 0.94], o: [-0.47, 0.5, 0], m: 'darkSteel' },        // side strap
+            { t: 'box', s: [0.06, 0.05, 0.94], o: [0.47, 0.5, 0], m: 'darkSteel' },
+          ];
+        case 'shelf':
+          return [
+            { t: 'box', s: [0.06, 1, 1], o: [-0.46, 0.5, 0], m: 'steel' },                  // sides
+            { t: 'box', s: [0.06, 1, 1], o: [0.46, 0.5, 0], m: 'steel' },
+            { t: 'box', s: [0.94, 0.05, 0.98], o: [0, 0.28, 0], m: 'steel' },               // shelves
+            { t: 'box', s: [0.94, 0.05, 0.98], o: [0, 0.56, 0], m: 'steel' },
+            { t: 'box', s: [0.94, 0.05, 0.98], o: [0, 0.84, 0], m: 'steel' },
+            { t: 'box', s: [0.94, 0.05, 0.98], o: [0, 1, 0], m: 'steel' },
+            { t: 'box', s: [0.9, 0.3, 0.5], o: [0, 0.4, 0.1], m: 'wood' },                  // a crate on the shelf
+          ];
+        case 'bin':
+          return [
+            { t: 'cyl', s: [0.86, 0.86, 0.86], o: [0, 0.46, 0], m: 'darkSteel' },
+            { t: 'cyl', s: [0.98, 0.08, 0.98], o: [0, 0.93, 0], m: 'steel' },
+            { t: 'cyl', s: [0.8, 0.04, 0.8], o: [0, 0.96, 0], m: 'darkSteel' },
+          ];
+        case 'stove':
+          return [
+            { t: 'box', s: [1, 0.9, 1], o: [0, 0.46, 0], m: 'steel' },                      // body
+            { t: 'cyl', s: [0.28, 0.06, 0.28], o: [-0.24, 0.93, -0.24], m: 'darkSteel' },   // burners
+            { t: 'cyl', s: [0.28, 0.06, 0.28], o: [0.24, 0.93, -0.24], m: 'darkSteel' },
+            { t: 'cyl', s: [0.28, 0.06, 0.28], o: [-0.24, 0.93, 0.24], m: 'darkSteel' },
+            { t: 'cyl', s: [0.28, 0.06, 0.28], o: [0.24, 0.93, 0.24], m: 'darkSteel' },
+            { t: 'box', s: [0.8, 0.46, 0.04], o: [0, 0.44, 0.5], m: 'darkSteel' },          // oven door
+            { t: 'cyl', s: [0.5, 0.04, 0.04], o: [0, 0.56, 0.53], m: 'steel' },             // handle
+            { t: 'box', s: [1, 0.1, 0.2], o: [0, 1.02, -0.4], m: 'darkSteel' },             // backguard
+          ];
+        case 'cooker':
+          return [
+            { t: 'cyl', s: [0.9, 0.72, 0.9], o: [0, 0.36, 0], m: 'steel' },                 // pot
+            { t: 'cyl', s: [0.94, 0.06, 0.94], o: [0, 0.74, 0], m: 'darkSteel' },           // lid
+            { t: 'box', s: [0.5, 0.05, 0.08], o: [0.4, 0.8, 0], m: 'darkSteel' },           // handle
+          ];
+        case 'fridge':
+          return [
+            { t: 'box', s: [0.96, 0.96, 0.94], o: [0, 0.5, 0], m: 'steel' },
+            { t: 'box', s: [0.9, 0.02, 0.02], o: [0, 0.62, 0.48], m: 'darkSteel' },         // door split
+            { t: 'cyl', s: [0.04, 0.3, 0.04], o: [0.36, 0.5, 0.5], m: 'darkSteel' },        // handle
+            { t: 'box', s: [0.8, 0.06, 0.02], o: [0, 0.08, 0.47], m: 'darkSteel' },         // vent
+          ];
+        case 'console':
+          return [
+            { t: 'box', s: [1, 0.75, 0.9], o: [0, 0.38, 0], m: 'darkSteel' },               // cabinet
+            { t: 'box', s: [1, 0.12, 1], o: [0, 0.9, 0], m: 'steel' },                      // desk top
+            { t: 'box', s: [0.9, 0.34, 0.1], o: [0, 1.12, -0.2], m: 'darkSteel' },          // panel
+            { t: 'box', s: [0.6, 0.22, 0.04], o: [0, 1.14, -0.12], m: 'screen' },           // screen
+            { t: 'box', s: [0.5, 0.05, 0.06], o: [0, 0.98, 0.18], m: 'steel' },             // keyboard
+            { t: 'cyl', s: [0.05, 0.05, 0.05], o: [0.34, 0.97, 0.2], m: 'siren' },          // status lamp
+          ];
+        case 'laundry':
+          return [
+            { t: 'box', s: [1, 0.96, 1], o: [0, 0.5, 0], m: 'steel' },                      // cabinet
+            { t: 'cyl', s: [0.62, 0.06, 0.62], o: [0, 0.55, 0.5], m: 'darkSteel' },         // door ring
+            { t: 'cyl', s: [0.5, 0.04, 0.5], o: [0, 0.55, 0.52], m: 'screen' },             // glass
+            { t: 'box', s: [0.8, 0.1, 0.04], o: [0, 0.94, 0.5], m: 'darkSteel' },           // control strip
+            { t: 'cyl', s: [0.08, 0.05, 0.08], o: [0.28, 0.94, 0.53], m: 'steel' },
+          ];
+        case 'stretcher':
+          return [
+            { t: 'box', s: [1, 0.1, 0.8], o: [0, 0.7, 0], m: 'mattress' },                  // pad
+            { t: 'box', s: [1, 0.06, 0.86], o: [0, 0.62, 0], m: 'steel' },                  // frame
+            { t: 'box', s: [0.06, 0.6, 0.06], o: [-0.46, 0.32, -0.38], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 0.6, 0.06], o: [0.46, 0.32, -0.38], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 0.6, 0.06], o: [-0.46, 0.32, 0.38], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 0.6, 0.06], o: [0.46, 0.32, 0.38], m: 'darkSteel' },
+            { t: 'box', s: [0.9, 0.05, 0.05], o: [0, 0.06, 0], m: 'darkSteel' },            // undercarriage
+          ];
+        case 'weaponrack':
+          return [
+            { t: 'box', s: [1, 1, 0.12], o: [0, 0.5, -0.4], m: 'darkSteel' },               // back panel
+            { t: 'box', s: [0.08, 1, 0.9], o: [-0.46, 0.5, 0], m: 'steel' },                // uprights
+            { t: 'box', s: [0.08, 1, 0.9], o: [0.46, 0.5, 0], m: 'steel' },
+            { t: 'box', s: [0.98, 0.04, 0.9], o: [0, 0.18, 0], m: 'steel' },                // racks
+            { t: 'box', s: [0.98, 0.04, 0.9], o: [0, 0.55, 0], m: 'steel' },
+            { t: 'box', s: [0.98, 0.04, 0.9], o: [0, 0.86, 0], m: 'steel' },
+            { t: 'box', s: [0.1, 0.22, 0.1], o: [-0.3, 0.62, 0.1], m: 'darkSteel' },        // hooks
+            { t: 'box', s: [0.1, 0.22, 0.1], o: [0.3, 0.62, 0.1], m: 'darkSteel' },
+          ];
+        case 'board':
+          return [
+            { t: 'box', s: [0.96, 0.92, 0.5], o: [0, 0.5, 0], m: 'wood' },                  // cork board
+            { t: 'box', s: [1, 0.06, 0.6], o: [0, 0.96, 0], m: 'darkSteel' },               // frame
+            { t: 'box', s: [1, 0.06, 0.6], o: [0, 0.04, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 1, 0.6], o: [-0.48, 0.5, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 1, 0.6], o: [0.48, 0.5, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.16, 0.22, 0.03], o: [-0.2, 0.66, 0.3], m: 'ceramic' },        // pinned paper
+            { t: 'box', s: [0.14, 0.18, 0.03], o: [0.18, 0.4, 0.3], m: 'ceramic' },
+          ];
+        case 'extinguisher':
+          return [
+            { t: 'cyl', s: [0.7, 0.8, 0.7], o: [0, 0.42, 0], m: 'red' },                    // bottle
+            { t: 'cyl', s: [0.2, 0.14, 0.2], o: [0, 0.88, 0], m: 'darkSteel' },             // valve
+            { t: 'cyl', s: [0.07, 0.2, 0.07], o: [0.22, 0.92, 0], m: 'darkSteel' },         // hose
+            { t: 'box', s: [0.3, 0.06, 0.3], o: [0, 0.02, 0], m: 'darkSteel' },
+          ];
+        case 'cabinet':
+          return [
+            { t: 'box', s: [0.94, 0.94, 0.9], o: [0, 0.5, 0], m: 'steel' },
+            { t: 'box', s: [0.44, 0.86, 0.04], o: [-0.23, 0.5, 0.46], m: 'steel' },
+            { t: 'box', s: [0.44, 0.86, 0.04], o: [0.23, 0.5, 0.46], m: 'steel' },
+            { t: 'cyl', s: [0.03, 0.14, 0.03], o: [-0.06, 0.5, 0.49], m: 'darkSteel' },
+            { t: 'cyl', s: [0.03, 0.14, 0.03], o: [0.06, 0.5, 0.49], m: 'darkSteel' },
+          ];
+        case 'rack':
+          return [
+            { t: 'box', s: [0.9, 0.05, 0.9], o: [0, 0.2, 0], m: 'steel' },
+            { t: 'box', s: [0.9, 0.05, 0.9], o: [0, 0.55, 0], m: 'steel' },
+            { t: 'box', s: [0.06, 1, 0.06], o: [-0.42, 0.5, -0.42], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 1, 0.06], o: [0.42, 0.5, -0.42], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 1, 0.06], o: [-0.42, 0.5, 0.42], m: 'darkSteel' },
+            { t: 'box', s: [0.06, 1, 0.06], o: [0.42, 0.5, 0.42], m: 'darkSteel' },
+          ];
+        case 'tank':
+          return [
+            { t: 'cyl', s: [0.94, 0.94, 0.94], o: [0, 0.47, 0], m: 'stone' },
+            { t: 'cyl', s: [1, 0.1, 1], o: [0, 0.95, 0], m: 'darkSteel' },
+            { t: 'cyl', s: [0.16, 0.5, 0.16], o: [0.3, 0.4, 0], m: 'darkSteel' },
+          ];
+        case 'pot':
+          return [
+            { t: 'cyl', s: [0.9, 0.86, 0.9], o: [0, 0.45, 0], m: 'stone' },
+            { t: 'cyl', s: [0.98, 0.08, 0.98], o: [0, 0.9, 0], m: 'stone' },
+          ];
+        case 'column':
+          // a poured pier: plinth, formwork seams, capital — reads as concrete, not a box
+          return [
+            { t: 'box', s: [1.26, 0.03, 1.26], o: [0, 0.015, 0], m: 'concrete' },
+            { t: 'box', s: [1.0, 0.46, 1.0], o: [0, 0.24, 0], m: 'concrete' },
+            { t: 'box', s: [1.09, 0.015, 1.09], o: [0, 0.468, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.96, 0.45, 0.96], o: [0, 0.715, 0], m: 'concrete' },
+            { t: 'box', s: [1.05, 0.015, 1.05], o: [0, 0.945, 0], m: 'darkSteel' },
+            { t: 'box', s: [1.22, 0.04, 1.22], o: [0, 0.96, 0], m: 'concrete' },
+          ];
+        case 'lamp':
+          return [
+            { t: 'box', s: [0.84, 0.1, 0.62], o: [0, 0.06, 0], m: 'darkSteel' },            // housing
+            { t: 'box', s: [0.74, 0.04, 0.16], o: [0, -0.01, 0], m: 'lamp' },               // tube
+          ];
+        case 'celllamp':
+          return [
+            { t: 'box', s: [0.5, 0.5, 0.5], o: [0, 0.5, 0], m: 'darkSteel' },               // cage
+            { t: 'box', s: [0.34, 0.36, 0.34], o: [0, 0.48, 0], m: 'lamp' },                // bulb
+            { t: 'box', s: [0.14, 0.5, 0.14], o: [0, 0.94, 0], m: 'darkSteel' },            // stem
+          ];
+        case 'monitor':
+          return [
+            { t: 'box', s: [0.94, 0.86, 0.5], o: [0, 0.5, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.84, 0.72, 0.1], o: [0, 0.5, 0.28], m: 'screen' },
+          ];
+        case 'vent':
+          return [
+            { t: 'box', s: [0.96, 0.9, 0.96], o: [0, 0.5, 0], m: 'steel' },
+            { t: 'box', s: [1, 0.06, 1], o: [0, 0.92, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.7, 0.1, 0.02], o: [0, 0.5, 0.49], m: 'darkSteel' },
+          ];
+        case 'siren':
+          return [
+            { t: 'box', s: [0.7, 0.35, 0.7], o: [0, 0.2, 0], m: 'darkSteel' },
+            { t: 'cyl', s: [0.62, 0.6, 0.62], o: [0, 0.7, 0], m: 'siren' },
+            { t: 'box', s: [0.9, 0.08, 0.9], o: [0, 0.04, 0], m: 'steel' },
+          ];
+        case 'pipe':
+          return [{ t: 'cyl', s: [1, 1, 1], o: [0, 0.5, 0], m: 'darkSteel' }];
+        case 'column':
+          // a poured concrete pier: plinth, shaft, formwork seams, capital
+          return [
+            { t: 'box', s: [1.26, 0.03, 1.26], o: [0, 0.015, 0], m: 'concrete' },
+            { t: 'box', s: [1.0, 0.46, 1.0], o: [0, 0.24, 0], m: 'concrete' },
+            { t: 'box', s: [1.1, 0.02, 1.1], o: [0, 0.47, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.96, 0.45, 0.96], o: [0, 0.715, 0], m: 'concrete' },
+            { t: 'box', s: [1.06, 0.02, 1.06], o: [0, 0.95, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.96, 0.03, 0.96], o: [0, 0.965, 0], m: 'concrete' },
+          ];
+        default:
+          return [{ t: 'box', s: [1, 1, 1], o: [0, 0.5, 0], m: 'steel' }];
+      }
+    };
+
+    // Build every prop from its assembly, merged per material.
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    const unitCyl = new THREE.CylinderGeometry(0.5, 0.5, 1, 10, 1);
+    const partScale = new THREE.Matrix4();
     for (const p of sim.props) {
-      const key =
-        p.kind === 'bed' ? 'bed'
-        : p.kind === 'mattress' ? 'mattress'
-        : p.kind === 'celllamp' ? 'celllamp'
-        : p.kind === 'monitor' ? 'screen'
-        : p.kind === 'siren' ? 'siren'
-        : p.kind === 'bench' ? 'bench'
-        : p.kind === 'camera' ? 'camera'
-        : (p.kind === 'stove' || p.kind === 'cooker' || p.kind === 'sink' || p.kind === 'toilet' || p.kind === 'fridge' || p.kind === 'locker' || p.kind === 'bin') ? 'steel'
-        : p.kind === 'board' ? 'board'
-        : p.kind === 'extinguisher' ? 'red'
-        : (p.kind === 'table' || p.kind === 'desk' || p.kind === 'crate' || p.kind === 'workbench' || p.kind === 'shelf') ? 'wood'
-        : (p.kind === 'stretcher' || p.kind === 'laundry' || p.kind === 'chair') ? 'cloth'
-        : p.kind === 'pot' || p.kind === 'tank' ? 'stone'
-        : 'metal';
-      if (key === 'camera') continue;                        // built with their own fixtures
-      groups[key].push(box(p.w, p.h, p.d, p.x, p.y + p.h / 2, p.z));
+      if (p.kind === 'camera' || p.kind === 'lamp' || p.kind === 'mattress') continue;
+      const parts = partsFor(p.kind);
+      // deterministic variety: many props lean or face a different way
+      const yaw = p.kind === 'chair' || p.kind === 'bin' || p.kind === 'crate' || p.kind === 'shelf'
+        ? Math.sin(p.x * 12.9 + p.z * 7.3) * 0.16
+        : 0;
+      const qy = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw, 0));
+      for (const part of parts) {
+        const sx = Math.abs(part.s[0] * p.w), sy = Math.abs(part.s[1] * p.h), sz = Math.abs(part.s[2] * p.d);
+        const geo = (part.t === 'cyl' ? unitCyl : unitBox).clone();
+        geo.applyMatrix4(partScale.makeScale(sx, sy, sz));
+        const off = new THREE.Vector3(part.o[0] * p.w, p.y + part.o[1] * p.h, part.o[2] * p.d).applyQuaternion(qy);
+        geo.applyMatrix4(new THREE.Matrix4().makeRotationY(yaw));
+        geo.applyMatrix4(new THREE.Matrix4().makeTranslation(p.x + off.x, off.y, p.z + off.z));
+        propBuckets[part.m].push(geo);
+      }
     }
-    const propMats: Record<string, THREE.Material> = {
-      bed: matBed, metal: matMetal, wood: matWood, bench: matBench,
-      mattress: new THREE.MeshStandardMaterial({ color: 0xa8a89a, roughness: 0.97 }),
-      // the cell lamp: a warm bulb behind a wire guard, the only light after lock-up
-      celllamp: new THREE.MeshBasicMaterial({ color: 0xffd9a0 }),
-      steel: new THREE.MeshStandardMaterial({ color: 0x7d868c, roughness: 0.42, metalness: 0.7 }),
-      red: new THREE.MeshStandardMaterial({ color: 0x9c1f1a, roughness: 0.55, metalness: 0.3 }),
-      board: new THREE.MeshStandardMaterial({ color: 0x6a5740, roughness: 0.92 }),
+    const bucketMats: Record<string, THREE.Material> = {
+      steel: new THREE.MeshStandardMaterial({ color: 0x7b858b, roughness: 0.46, metalness: 0.68 }),
+      darkSteel: new THREE.MeshStandardMaterial({ color: 0x2a3136, roughness: 0.55, metalness: 0.55 }),
+      wood: new THREE.MeshStandardMaterial({ color: 0x6b5238, roughness: 0.88, metalness: 0.02 }),
+      cloth: new THREE.MeshStandardMaterial({ color: 0x46545e, roughness: 0.97 }),
+      ceramic: new THREE.MeshStandardMaterial({ color: 0xb9bfc0, roughness: 0.34, metalness: 0.05 }),
+      red: new THREE.MeshStandardMaterial({ color: 0x9c1f1a, roughness: 0.5, metalness: 0.35 }),
       screen: new THREE.MeshBasicMaterial({ color: 0x3fd9b0 }),
+      lamp: new THREE.MeshBasicMaterial({ color: 0xffe7c4 }),
       siren: new THREE.MeshBasicMaterial({ color: 0xd8323a }),
-      cloth: new THREE.MeshStandardMaterial({ color: 0x46545e, roughness: 0.95 }),
-      stone: new THREE.MeshStandardMaterial({ color: 0x5a6368, roughness: 0.8, metalness: 0.25 }),
+      stone: new THREE.MeshStandardMaterial({ color: 0x5a6368, roughness: 0.85, metalness: 0.1 }),
+      concrete: matConcrete,
+      mattress: new THREE.MeshStandardMaterial({ color: 0xa8a89a, roughness: 0.97 }),
     };
-    for (const key of Object.keys(groups)) {
-      if (!groups[key].length) continue;
-      scene.add(new THREE.Mesh(mergeGeometries(groups[key])!, propMats[key]));
+    for (const key of Object.keys(propBuckets) as (keyof typeof propBuckets)[]) {
+      const list = propBuckets[key];
+      if (!list.length) continue;
+      const merged = mergeGeometries(list);
+      if (!merged) continue;
+      const mesh = new THREE.Mesh(merged, bucketMats[key]);
+      scene.add(mesh);
+      for (const g of list) g.dispose();
     }
+    unitBox.dispose();
+    unitCyl.dispose();
+    void built;
+
+    /* ---------------- contact shadows ----------------
+     * Nothing casts a real shadow (twenty shadow maps would cost more than the whole
+     * scene), so each floor-standing prop gets a soft occlusion decal: it plants the
+     * bunks, lockers and crates on the concrete instead of letting them float.
+     */
+    const aoTex = (() => {
+      const { c, g } = cv(128);
+      const grd = g.createRadialGradient(64, 64, 4, 64, 64, 62);
+      grd.addColorStop(0, 'rgba(0,0,0,0.72)');
+      grd.addColorStop(0.55, 'rgba(0,0,0,0.4)');
+      grd.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = grd; g.fillRect(0, 0, 128, 128);
+      return tex(c, false);
+    })();
+    const aoMat = new THREE.MeshBasicMaterial({
+      map: aoTex, transparent: true, opacity: 0.85, depthWrite: false,
+      blending: THREE.NormalBlending, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    });
+    const floorProps = sim.props.filter((p) => p.y < 0.06 && p.kind !== 'lamp' && p.kind !== 'camera');
+    const aoGeo = new THREE.PlaneGeometry(1, 1);
+    const aoQuads = new THREE.InstancedMesh(aoGeo, aoMat, floorProps.length);
+    const aoQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+    const aoM = new THREE.Matrix4();
+    floorProps.forEach((p, i) => {
+      const sx = p.w * 1.22 + 0.3, sz = p.d * 1.22 + 0.3;
+      aoM.compose(new THREE.Vector3(p.x, 0.0195, p.z), aoQ, new THREE.Vector3(sx, sz, 1));
+      aoQuads.setMatrixAt(i, aoM);
+    });
+    aoQuads.renderOrder = 1;
+    scene.add(aoQuads);
+
+    /* ---------------- dust in the light ---------------- */
+    const MOTES = 900;
+    const motePos = new Float32Array(MOTES * 3);
+    const moteSeed = new Float32Array(MOTES * 3);
+    for (let i = 0; i < MOTES; i++) {
+      motePos[i * 3] = (Math.random() - 0.5) * 34;
+      motePos[i * 3 + 1] = Math.random() * 3.6 + 0.2;
+      motePos[i * 3 + 2] = (Math.random() - 0.5) * 34;
+      moteSeed[i * 3] = Math.random() * Math.PI * 2;
+      moteSeed[i * 3 + 1] = 0.02 + Math.random() * 0.06;
+      moteSeed[i * 3 + 2] = Math.random() * Math.PI * 2;
+    }
+    const moteGeo = new THREE.BufferGeometry();
+    moteGeo.setAttribute('position', new THREE.BufferAttribute(motePos, 3));
+    const moteMat = new THREE.PointsMaterial({
+      color: 0xd8e6ee, size: 0.026, sizeAttenuation: true, transparent: true,
+      opacity: 0.34, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const motePts = new THREE.Points(moteGeo, moteMat);
+    motePts.frustumCulled = false;
+    scene.add(motePts);
 
     /* ---------------- cell fronts: frames, bars, locks ---------------- */
     const m4 = new THREE.Matrix4();
@@ -982,8 +1517,10 @@ export default function Prison3D({ mode, onExit }: Props) {
     };
 
     /**
-     * The gait. Walk and run are the same cycle at different amplitudes; a man standing
-     * still shifts his weight and breathes. Used for officers and inmates alike.
+     * The gait. This is a real walk cycle, not swinging limbs: one foot is planted on
+     * the floor while the body travels over it, the other swings through with a lifted
+     * knee, and the stride length comes from the same number the simulation uses. That
+     * is what stops the boots skating across the concrete.
      */
     const animate = (
       parts: ReturnType<typeof mkParts>,
@@ -991,32 +1528,74 @@ export default function Prison3D({ mode, onExit }: Props) {
       limbPhase: number, gait: number, time: number, down: boolean,
     ) => {
       const run = clamp01((gait - 2.2) / 2.0);              // 0 walk → 1 sprint
-      const amp = down ? 0 : clamp01(gait / 3.6) * (0.42 + run * 0.5);
-      const idle = gait < 0.25 && !down;
+      const moving = gait > 0.2 && !down;
+      const stride = strideLength(gait || 1);               // metres per full cycle
+      const STANCE = 0.62;                                  // share of the cycle with a foot down
+      const LEG = 0.72;                                     // hip to ankle
+      const hipY = 0.72, shoulderY = 1.44;
+      const lift = moving ? 0.05 + run * 0.1 : 0;
       const phase = limbPhase;
-      const sw = Math.sin(phase) * amp;
-      const bob = down || idle ? 0 : Math.abs(Math.sin(phase)) * (0.012 + run * 0.035);
-      const breathe = idle ? Math.sin(time * 1.5 + i * 0.7) * 0.008 : 0;
-      const lean = down ? 0 : -(0.02 + run * 0.17 + (amp > 0 ? 0.03 : 0));
+
+      const bob = moving ? Math.abs(Math.sin(phase)) * (0.01 + run * 0.03) : 0;
+      const breathe = !moving && !down ? Math.sin(time * 1.4 + i * 0.7) * 0.007 : 0;
+      const sway = moving ? Math.cos(phase) * 0.014 : Math.sin(time * 0.9 + i) * 0.006;
+      const lean = down ? 0 : -(0.015 + run * 0.16 + (moving ? 0.02 : 0));
       const baseY = y - bob + breathe;
 
-      pose(parts.torso, i, x, z, baseY, ang, tilt, 0, 1.16, 0, 0, lean);
-      pose(parts.hips, i, x, z, baseY, ang, tilt, 0, 0.82, 0, 0, lean);
-      pose(parts.neck, i, x, z, baseY, ang, tilt, 0, 1.5, 0, 0, lean);
-      pose(parts.head, i, x, z, baseY, ang, tilt, 0, 1.63, 0.01, 0, lean);
-      pose(parts.hair, i, x, z, baseY, ang, tilt, 0, 1.665, 0.005, 0, lean);
+      // torso, hips and head ride on the hips and lean into the run
+      pose(parts.torso, i, x, z, baseY, ang, tilt, sway * 0.5, 1.16, 0, 0, lean);
+      pose(parts.hips, i, x, z, baseY, ang, tilt, sway, 0.82, 0, 0, lean);
+      pose(parts.neck, i, x, z, baseY, ang, tilt, sway * 0.4, 1.5, 0, 0, lean);
+      pose(parts.head, i, x, z, baseY, ang, tilt, sway * 0.2, 1.63, 0.01, 0, lean * 0.4);
+      pose(parts.hair, i, x, z, baseY, ang, tilt, sway * 0.2, 1.665, 0.005, 0, lean * 0.4);
 
-      const hipY = 0.72, shoulderY = 1.44;
-      const legSwing = 0.62 * sw;
-      const armSwing = 0.55 * sw;
-      limb(parts.legL, i, x, z, baseY, ang, tilt, -0.12, hipY, 0, 0.34, legSwing, lean);
-      limb(parts.legR, i, x, z, baseY, ang, tilt, 0.12, hipY, 0, 0.34, -legSwing, lean);
-      limb(parts.bootL, i, x, z, baseY, ang, tilt, -0.12, hipY, 0, 0.68, legSwing, lean, 0.06);
-      limb(parts.bootR, i, x, z, baseY, ang, tilt, 0.12, hipY, 0, 0.68, -legSwing, lean, 0.06);
-      limb(parts.armL, i, x, z, baseY, ang, tilt, -0.29, shoulderY, 0, 0.29, -armSwing, lean);
-      limb(parts.armR, i, x, z, baseY, ang, tilt, 0.29, shoulderY, 0, 0.29, armSwing, lean);
-      limb(parts.handL, i, x, z, baseY, ang, tilt, -0.29, shoulderY, 0, 0.6, -armSwing, lean);
-      limb(parts.handR, i, x, z, baseY, ang, tilt, 0.29, shoulderY, 0, 0.6, armSwing, lean);
+      /**
+       * Where a foot is, relative to the hip: `fwd` in metres, `up` off the floor and
+       * `a` the hip angle that reaches it. During stance the foot is pinned to the
+       * ground and the hip slides forward over it.
+       */
+      const footOf = (side: 1 | -1) => {
+        if (!moving) return { fwd: side > 0 ? 0.04 : -0.04, up: 0, a: 0 };
+        let p = phase / (Math.PI * 2) + (side > 0 ? 0.5 : 0);
+        p -= Math.floor(p);
+        if (p < STANCE) {
+          const t = p / STANCE;
+          const fwd = stride * STANCE * (0.5 - t);
+          return { fwd, up: 0, a: Math.asin(clampAbs(fwd / LEG, 0.92)) };
+        }
+        const t = (p - STANCE) / (1 - STANCE);
+        const ease = t * t * (3 - 2 * t);
+        const fwd = stride * STANCE * (-0.5 + ease);
+        const up = Math.sin(Math.PI * t) * lift;
+        return { fwd, up, a: Math.asin(clampAbs(fwd / LEG, 0.92)) };
+      };
+
+      const placeLeg = (side: 1 | -1, legM: THREE.InstancedMesh | null, bootM: THREE.InstancedMesh | null) => {
+        const f = footOf(side);
+        const sx = side * 0.115;
+        // the upper leg hangs from the hip towards the ankle
+        const upperY = hipY - (LEG * 0.46) * Math.cos(f.a) + (f.up * 0.3);
+        if (legM) pose(legM, i, x, z, baseY, ang, tilt, sx, upperY, f.fwd * 0.46, -f.a, lean);
+        // the boot sits at the ankle, flexed a little as it leaves the floor
+        if (bootM) {
+          pose(bootM, i, x, z, baseY, ang, tilt, sx, hipY - LEG * Math.cos(f.a) + f.up + 0.07,
+            f.fwd * 0.94, -f.a * 0.75, lean);
+        }
+      };
+
+      placeLeg(-1, parts.legL, parts.bootL);
+      placeLeg(1, parts.legR, parts.bootR);
+
+      // arms swing against the legs, and fold up as the pace quickens
+      const legFwdL = footOf(-1).fwd, legFwdR = footOf(1).fwd;
+      const armAmp = moving ? 0.85 + run * 0.5 : 0;
+      const armL = -(legFwdL / Math.max(stride * STANCE, 0.01)) * armAmp * 0.55;
+      const armR = -(legFwdR / Math.max(stride * STANCE, 0.01)) * armAmp * 0.55;
+      const holdUp = run * 0.5;                        // elbows come up at a run
+      limb(parts.armL, i, x, z, baseY, ang, tilt, -0.29, shoulderY - holdUp * 0.06, 0, 0.29, armL + holdUp * 0.2, lean);
+      limb(parts.armR, i, x, z, baseY, ang, tilt, 0.29, shoulderY - holdUp * 0.06, 0, 0.29, armR + holdUp * 0.2, lean);
+      limb(parts.handL, i, x, z, baseY, ang, tilt, -0.29, shoulderY - holdUp * 0.06, 0, 0.6, armL + holdUp * 0.2, lean);
+      limb(parts.handR, i, x, z, baseY, ang, tilt, 0.29, shoulderY - holdUp * 0.06, 0, 0.6, armR + holdUp * 0.2, lean);
     };
 
     const poseGuard = (i: number, g: (typeof sim.guards)[number]) => {
@@ -1348,6 +1927,24 @@ export default function Prison3D({ mode, onExit }: Props) {
         if (tracers[i].life <= 0) { scene.remove(tracers[i].line); tracers[i].line.geometry.dispose(); tracers.splice(i, 1); }
       }
 
+      // dust drifts and wraps inside a box that follows the player
+      const mp = moteGeo.getAttribute('position') as THREE.BufferAttribute;
+      const arr = mp.array as Float32Array;
+      const t = sim.time;
+      for (let i = 0; i < MOTES; i++) {
+        const j = i * 3;
+        arr[j] += Math.sin(t * moteSeed[j + 1] + moteSeed[j]) * 0.0018;
+        arr[j + 1] += Math.cos(t * 0.35 + moteSeed[j + 2]) * 0.0011 - 0.0016;
+        arr[j + 2] += Math.cos(t * moteSeed[j + 1] * 1.3 + moteSeed[j + 2]) * 0.0018;
+        // wrap relative to the camera so the field is always around the player
+        const dx = arr[j] - camera.position.x;
+        const dz = arr[j + 2] - camera.position.z;
+        if (dx > 17) arr[j] -= 34; else if (dx < -17) arr[j] += 34;
+        if (dz > 17) arr[j + 2] -= 34; else if (dz < -17) arr[j + 2] += 34;
+        if (arr[j + 1] < 0.15) arr[j + 1] = 3.7;
+      }
+      mp.needsUpdate = true;
+
       renderer.render(scene, camera);
 
       hudT -= dt;
@@ -1416,17 +2013,6 @@ export default function Prison3D({ mode, onExit }: Props) {
       <div className="pointer-events-none absolute inset-0 select-none font-mono text-[#d6e6e6]">
         {/* vignette */}
         <div className="absolute inset-0" style={{ boxShadow: 'inset 0 0 200px 70px rgba(0,0,0,0.72)' }} />
-        {/* siren wash: the whole frame reddens with the alarm */}
-        {screen.alarm > 0.15 && (
-          <div
-            className="absolute inset-0"
-            style={{
-              background: 'radial-gradient(circle at 50% 50%, rgba(255,40,40,0) 35%, rgba(255,30,30,0.30) 100%)',
-              opacity: 0.35 + screen.alarm * 0.5,
-            }}
-          />
-        )}
-
         {/* wake-up cinematic */}
         {intro > 0 && (
           <div className="absolute inset-0 grid place-items-center bg-black transition-opacity" style={{ opacity: Math.min(1, intro) }}>
