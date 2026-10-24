@@ -39,6 +39,8 @@ export interface PrisonGuard {
   vx: number; vz: number; vy: number; tilt: number; spin: number; limb: number;
   /** true for the two control-room detachments: they hold the room, not the corridor */
   elite: boolean; room: string;
+  /** cached line-of-sight: recomputed every ~0.2 s instead of every frame */
+  losT?: number; losSeen?: boolean;
 }
 
 export interface PrisonInmate {
@@ -126,6 +128,8 @@ export class PrisonSim {
   alive = true;
   /** 0 while nobody suspects anything, 1 once the alarm is screaming */
   alarm = 0; alarmOn = false;
+  /** Seconds of immunity right after waking up: nobody shoots a man on his bunk. */
+  spawnGrace = 0;
   lightsOut = false;
   time = 0; started = false;
   /** 'cell' → locked in, 'active' → out, 'escaped' → back in the world */
@@ -556,6 +560,7 @@ export class PrisonSim {
     this.alive = true; this.started = true; this.time = 0;
     this.message = 'YOU WAKE UP IN CELL 8-22 · THE LOCK ON YOUR BARS IS BEATEN, NOT BROKEN';
     this.messageT = 6;
+    this.spawnGrace = 5;
   }
 
   /* ------------------------------------------------------------------ */
@@ -805,6 +810,7 @@ export class PrisonSim {
 
   update(dt: number, input: { fwd: number; strafe: number; sprint: boolean }) {
     this.time += dt;
+    this.spawnGrace = Math.max(0, this.spawnGrace - dt);
     this.messageT = Math.max(0, this.messageT - dt);
     this.cool = Math.max(0, this.cool - dt);
     this.flash = Math.max(0, this.flash - dt);
@@ -837,9 +843,20 @@ export class PrisonSim {
       g.flash = Math.max(0, g.flash - dt);
       g.cool = Math.max(0, g.cool - dt);
       const dToP = Math.hypot(this.px - g.x, this.pz - g.z);
-      const sees = dToP < (g.tower ? 95 : 46) && this.lineOfSight(g.x, g.z, this.px, this.pz);
-      if (sees && this.alarmOn) { g.state = 'alert'; g.alertT = Math.max(g.alertT, 6); }
-      if (sees && dToP < (g.elite ? 58 : 34)) { g.state = 'engage'; g.alertT = Math.max(g.alertT, g.elite ? 16 : 10); }
+      // Sight is expensive and does not change within a fifth of a second: cache it per
+      // guard, staggered so the cost is spread over frames instead of spiking.
+      if (g.losT === undefined || g.losT <= 0) {
+        g.losT = 0.18 + (g.id % 5) * 0.017;
+        g.losSeen = dToP < (g.tower ? 95 : 46) && this.lineOfSight(g.x, g.z, this.px, this.pz);
+      } else {
+        g.losT -= dt;
+      }
+      const sees = !!g.losSeen && dToP < (g.tower ? 95 : 46);
+      // Nobody fires into a locked cell: the operative is not a threat behind his own bars.
+      const caged = this.inHomeCell && !this.cells[this.homeCell].opened;
+      if (sees && !caged && this.alarmOn) { g.state = 'alert'; g.alertT = Math.max(g.alertT, 6); }
+      if (sees && !caged && dToP < (g.elite ? 58 : 34)) { g.state = 'engage'; g.alertT = Math.max(g.alertT, g.elite ? 16 : 10); }
+      if (caged) g.state = 'patrol';
 
       // a freed inmate next to a guard is a fight, and guards shoot them too
       let foe: PrisonInmate | null = null; let fd = 30;
@@ -961,6 +978,9 @@ export class PrisonSim {
 
   damagePlayer(dmg: number) {
     if (this.phase === 'escaped') return;
+    // Five seconds of grace after waking up, and none at all while still behind the bars.
+    if (this.spawnGrace > 0) return;
+    if (this.inHomeCell && !this.cells[this.homeCell].opened) return;
     const toArmor = Math.min(this.armor, dmg * 0.6);
     this.armor -= toArmor;
     this.hp -= dmg - toArmor;
@@ -977,14 +997,46 @@ export class PrisonSim {
     this.messageT = 5;
   }
 
-  lineOfSight(x0: number, z0: number, x1: number, z1: number) {
-    const d = Math.hypot(x1 - x0, z1 - z0);
-    const steps = Math.ceil(d / 1.4);
-    for (let i = 1; i < steps; i++) {
-      const t = i / steps;
-      if (this.staticBlocked(x0 + (x1 - x0) * t, z0 + (z1 - z0) * t, 0.01)) return false;
+  /**
+   * Exact segment/box test. The old version sampled every 1.4 m, which stepped clean over
+   * the 0.22 m cell bars — guards could "see" straight through a locked cell and shoot
+   * the operative on his bunk. A slab test cannot miss, however thin the wall.
+   */
+  private segmentHitsWall(x0: number, z0: number, x1: number, z1: number) {
+    const dx = x1 - x0, dz = z1 - z0;
+    for (const w of this.walls) {
+      if (w.kind === 'bar' && w.cell !== undefined && this.cells[w.cell].opened) continue;
+      if (w.kind === 'gate' && this.gateLeaf.some((g) => g.x === w.x && g.z === w.z && g.open)) continue;
+      if (w.y0 > 1.9) continue;                       // lintels and galleries do not block an eye
+      const minX = w.x - w.w / 2, maxX = w.x + w.w / 2;
+      const minZ = w.z - w.d / 2, maxZ = w.z + w.d / 2;
+      let near = 0, far = 1;
+      let miss = false;
+      for (const axis of [0, 1] as const) {
+        const o = axis === 0 ? x0 : z0;
+        const d = axis === 0 ? dx : dz;
+        const lo = axis === 0 ? minX : minZ;
+        const hi = axis === 0 ? maxX : maxZ;
+        if (Math.abs(d) < 1e-6) { if (o < lo || o > hi) { miss = true; break; } continue; }
+        let t0 = (lo - o) / d, t1 = (hi - o) / d;
+        if (t0 > t1) { const tmp = t0; t0 = t1; t1 = tmp; }
+        near = Math.max(near, t0); far = Math.min(far, t1);
+        if (near > far) { miss = true; break; }
+      }
+      if (!miss && far > 0.02 && near < 0.98) return true;
     }
-    return true;
+    return false;
+  }
+
+  /** Guards re-test sight every few frames: 67 guards x 1 900 walls would be wasteful. */
+  lineOfSight(x0: number, z0: number, x1: number, z1: number) {
+    return !this.segmentHitsWall(x0, z0, x1, z1);
+  }
+
+  /** True while the operative is still inside his own cell. */
+  get inHomeCell() {
+    const c = this.cells[this.homeCell];
+    return Math.abs(this.px - c.x) < CELL_W / 2 && Math.abs(this.pz - c.z) < CELL_D / 2;
   }
 
   look(dx: number, dy: number) {

@@ -8,7 +8,7 @@ import { FacilityPainter } from './facilityArt';
 import { PROLOGUE, PHASE_STORY, PHASE_TACTICS, LIBRARY_VOLUMES, type StoryEntry } from './campaign';
 import { newSecurityState, updateSearchlights, drawSearchlight, type Searchlight } from './security';
 import { prepareStructures, structuralHealth, distanceToBlock, drawRuins, type Ruin } from './destruction';
-import { prisonIslandStructures, PRISON_DOOR, ISLAND, BRIDGE, type IslandDecor } from './prisonIsland';
+import { prisonIslandStructures, PRISON_DOOR, ISLAND, BRIDGE, SEA, COAST, BRIDGEHEAD, LAND, type IslandDecor } from './prisonIsland';
 import type { PrisonStats } from './prison';
 import { drawFixedWing, drawMantis, drawAirborne, type AirTransport, type AirborneTrooper } from './airlift';
 import { GOLIATH, MNEMOSYNE, type CampaignSites, type MegaCrate } from './campaignSites';
@@ -408,6 +408,8 @@ export class Game {
   private patrolTeams: {
     id: string; points: Point[]; x: number; y: number; angle: number; node: number; wait: number;
     columns?: number; spacing?: number; speed?: number; site?: string; kind?: string;
+    /** seconds of "they are still chasing me" before a column goes back to its beat */
+    huntT?: number;
   }[] = [];
   /** Live output of every generator yard, keyed by site id. */
   private sitePower = new Map<string, { load: number; dead: boolean; t: number }>();
@@ -479,6 +481,8 @@ export class Game {
   private infantryRoutes = new RoutePlanner(ARENA_W, ARENA_H, 22);
   private infantryBudget = 1;
   private enemyCells = new Map<number, Enemy[]>();
+  /** Cached marching routes for the police columns (a column walks roads, not walls). */
+  private teamNav = new WeakMap<object, { path: Point[]; node: number; goal: Point; expires: number }>();
   /** Per-frame proximity buckets so triggers never scan the whole garrison. */
   private enemyBuckets = new Map<number, Enemy[]>();
   private lineSet = new Set<number>();
@@ -929,9 +933,22 @@ export class Game {
     this.prisonPolicePosts.forEach((post, index) => {
       const stand = this.infantryRoutesReadyPoint(post.x, post.y);
       const e = this.makeEnemy('custodian', stand.x, stand.y, -4000000 - index, index);
-      e.spawnT = 0; e.garrison = true; e.alert = true; e.policePost = true;
+      e.spawnT = 0; e.garrison = true; e.policePost = true;
       e.homeX = stand.x; e.homeY = stand.y;
       e.ang = index % 2 ? Math.PI / 2 : -Math.PI / 2;
+      // A sentry who never moves looks like scenery: each post gets a short beat of its
+      // own, walked until the operative comes within reach.
+      const r = 150 + (index % 3) * 60, a0 = index * 1.9;
+      const ring = Array.from({ length: 3 }, (_, k) => {
+        const a = a0 + (k / 3) * Math.PI * 2;
+        return { x: stand.x + Math.cos(a) * r, y: stand.y + Math.sin(a) * r };
+      }).filter((q) => this.onDryGround(q.x, q.y));
+      // Bridge and causeway posts can only walk their lane, not a full circle over the sea.
+      const lane = [
+        { x: stand.x - 150, y: stand.y }, { x: stand.x + 150, y: stand.y },
+      ].filter((q) => this.onDryGround(q.x, q.y));
+      e.patrol = (ring.length >= 2 ? ring : lane).map((q) => this.infantryRoutesReadyPoint(q.x, q.y));
+      e.patrolNode = 0;
       this.collide(e, e.def.r);
       this.enemies.push(e);
     });
@@ -953,7 +970,7 @@ export class Game {
       const pts = route.map((q) => this.infantryRoutesReadyPoint(q.x, q.y));
       const id = `police-${i}`;
       this.patrolTeams.push({
-        id, x: pts[0].x, y: pts[0].y, angle: 0, node: 1, wait: i * 0.8 + 1,
+        id, x: pts[0].x, y: pts[0].y, angle: 0, node: 1, wait: 0.3 + i * 0.25,
         points: pts, kind: 'road', columns: 2, spacing: 32, speed: 64,
       });
       for (let slot = 0; slot < 2; slot++) {
@@ -1831,18 +1848,45 @@ export class Game {
 
   private updatePatrolTeams(dt: number) {
     for (const p of this.patrolTeams) {
-      if (Math.hypot(p.x - this.px, p.y - this.py) > 2000) continue;
+      // Every beat marches, whether or not the operative is near: a street full of
+      // frozen police officers was the whole complaint.
       const members = this.enemies.filter(e => e.patrolTeam === p.id);
       if (!members.length) continue;
-      if (members.some(e => e.alert)) { for (const e of members) e.alert = true; continue; }
+      if (members.some(e => e.alert)) {
+        for (const e of members) e.alert = true;
+        // An alert holds the column only while someone can actually see the operative.
+        const watching = members.some(e =>
+          Math.hypot(e.x - this.px, e.y - this.py) < 520 && this.hasLine(e.x, e.y, this.px, this.py));
+        p.huntT = watching ? 6 : Math.max(0, (p.huntT ?? 0) - dt);
+        if (!watching && (p.huntT ?? 0) <= 0) {
+          for (const e of members) { e.alert = false; e.homeX = e.x; e.homeY = e.y; }
+          p.wait = 0.5;
+        } else {
+          continue;
+        }
+      }
       p.wait = Math.max(0, p.wait - dt);
       if (p.wait > 0) continue;
-      const goal = p.points[p.node], dx = goal.x - p.x, dy = goal.y - p.y, d = Math.hypot(dx, dy) || 1;
+      const goal = p.points[p.node];
+      // March along the street plan: a column that walks straight at its beat point ends
+      // up grinding against the first building in the way.
+      const wp = this.teamWaypoint(p, goal);
+      const dx = wp.x - p.x, dy = wp.y - p.y, d = Math.hypot(dx, dy) || 1;
       p.angle = lerpAngle(p.angle, Math.atan2(dy, dx), 1 - Math.exp(-2.5 * dt));
       // Road and apron columns march faster than foot patrols inside a compound.
       const march = p.speed ?? (p.kind === 'road' ? 74 : p.kind === 'apron' ? 62 : 58);
-      const step = Math.min(d, march * dt); p.x += dx / d * step; p.y += dy / d * step;
-      if (d < 6) { p.node = (p.node + 1) % p.points.length; p.wait = p.kind === 'road' ? 1.5 : 5; }
+      const step = Math.min(d, march * dt);
+      const nx = p.x + (dx / d) * step, ny = p.y + (dy / d) * step;
+      if (!this.pointBlocked(nx, ny)) { p.x = nx; p.y = ny; }
+      else if (!this.pointBlocked(nx, p.y)) p.x = nx;          // slide along the wall
+      else if (!this.pointBlocked(p.x, ny)) p.y = ny;
+      else {
+        // Cornered: take the next leg of the beat instead of grinding in place.
+        p.node = (p.node + 1) % p.points.length; p.wait = 0.35;
+      }
+      if (Math.hypot(goal.x - p.x, goal.y - p.y) < 30) {
+        p.node = (p.node + 1) % p.points.length; p.wait = p.kind === 'road' ? 0.6 : 1.6;
+      }
     }
   }
 
@@ -3391,9 +3435,65 @@ export class Game {
         goal, revision: this.infantryRoutes.revision };
       this.postNavigation.set(e, state);
     }
-    if (!state?.path.length) return e;
+    // No route at all (a beat point inside a compound, a doorway the planner rejects):
+    // walk straight at it instead of standing still for the rest of the mission.
+    if (!state?.path.length) return Math.hypot(goal.x - e.x, goal.y - e.y) < 460 ? goal : e;
     while (state.node < state.path.length - 1 && Math.hypot(state.path[state.node].x - e.x, state.path[state.node].y - e.y) < 23) state.node++;
     return state.path[state.node];
+  }
+
+  /** Where the column should steer next, following roads around the city blocks. */
+  private teamWaypoint(team: { x: number; y: number }, goal: Point): Point {
+    let st = this.teamNav.get(team);
+    const stale = !st || st.expires < this.simulationTime || st.goal.x !== goal.x || st.goal.y !== goal.y;
+    if (stale) {
+      if (this.infantryBudget <= 0) return st?.path[st.node] ?? goal;
+      this.infantryBudget--;
+      st = { path: this.infantryRoutes.route(team, goal), node: 0, goal, expires: this.simulationTime + 2 };
+      this.teamNav.set(team, st);
+    }
+    if (!st) return goal;
+    while (st.node < st.path.length - 1 && Math.hypot(st.path[st.node].x - team.x, st.path[st.node].y - team.y) < 30) st.node++;
+    return st.path[st.node] ?? goal;
+  }
+
+  /**
+   * A posted officer breaks formation for one reason only: a man at the sally port.
+   * Anywhere else he keeps walking his beat — otherwise the whole detail piles onto the
+   * operative, and crowd separation shoves the outer men into the sea.
+   */
+  private postEngaged(e: Enemy, dist: number) {
+    return this.px > PRISON_DOOR.x - 60 && dist < 420 && this.hasLine(e.x, e.y, this.px, this.py);
+  }
+
+  /** Walkable ground: keeps beat nodes off the open sea and off the beach waterline. */
+  private onDryGround(x: number, y: number) {
+    if (x < SEA.x) return true;
+    if (x > COAST.x && x < COAST.x + COAST.w && y > COAST.y && y < COAST.y + COAST.h) return true;
+    if (x > BRIDGEHEAD.x && x < BRIDGEHEAD.x + BRIDGEHEAD.w && y > BRIDGEHEAD.y && y < BRIDGEHEAD.y + BRIDGEHEAD.h) return true;
+    // keep a parapet's width clear so a beat never clips the railing
+    if (x > BRIDGE.x - 8 && x < BRIDGE.x + BRIDGE.w + 8 && y > BRIDGE.y + 44 && y < BRIDGE.y + BRIDGE.h - 44) return true;
+    const cx = LAND.x + LAND.w / 2, cy = LAND.y + LAND.h / 2;
+    const ex = (x - cx) / (LAND.w / 2), ey = (y - cy) / (LAND.h / 2);
+    return ex * ex + ey * ey <= 0.93;
+  }
+
+  /**
+   * A posted officer walking his beat. Cheap enough to run for every island/bridge post
+   * every frame, so a distant garrison never has to be skipped just to keep the frame rate.
+   */
+  private walkPost(e: Enemy, dt: number): boolean {
+    const path = e.patrol;
+    if (!path || !path.length) return false;
+    const node = path[(e.patrolNode || 0) % path.length];
+    const dx = node.x - e.x, dy = node.y - e.y, d = Math.hypot(dx, dy) || 1;
+    if (d < 14) { e.patrolNode = ((e.patrolNode || 0) + 1) % path.length; return true; }
+    const sp = Math.max(26, e.def.speed * 0.42);
+    const nx = e.x + (dx / d) * sp * dt, ny = e.y + (dy / d) * sp * dt;
+    if (this.pointBlocked(nx, ny) || !this.onDryGround(nx, ny)) { e.patrolNode = ((e.patrolNode || 0) + 1) % path.length; return true; }
+    e.x = nx; e.y = ny;
+    e.ang = lerpAngle(e.ang, Math.atan2(dy, dx), 1 - Math.exp(-5 * dt));
+    return true;
   }
 
   /** Helicopter flight has momentum, drag, banking and independent weapons. */
@@ -4940,7 +5040,27 @@ export class Game {
       const def = e.def;
       const dx = this.px - e.x, dy = this.py - e.y;
       const dist = Math.hypot(dx, dy) || 1;
-      if (e.garrison && dist > 1650 && !e.alert) continue;
+      if (e.garrison && dist > 1650 && !e.alert) {
+        // A beat still marches when the operative is on the other side of the map. Without
+        // this, every street patrol outside 1 650 m was skipped and stood there like a prop.
+        if (e.patrolTeam) {
+          const team = this.patrolTeams.find((p) => p.id === e.patrolTeam);
+          if (team && Math.hypot(e.x - team.x, e.y - team.y) < 420) {
+            const slot = e.patrolSlot || 0;
+            const cols = Math.max(1, team.columns || 2), gap = team.spacing || 41;
+            const rank = Math.floor(slot / cols), file = slot % cols;
+            const forward = -rank * gap, side = (file - (cols - 1) / 2) * (gap * 0.82);
+            const tx = team.x + Math.cos(team.angle) * forward - Math.sin(team.angle) * side;
+            const ty = team.y + Math.sin(team.angle) * forward + Math.cos(team.angle) * side;
+            const k = Math.min(1, dt * 2.2);
+            e.x = lerp(e.x, tx, k); e.y = lerp(e.y, ty, k);
+            e.ang = team.angle;
+            continue;
+          }
+        }
+        if ((e.policePost || !e.alert) && this.walkPost(e, dt)) continue;
+        continue;
+      }
       if (e.facilityId && dist > 2300) {
         e.alert = false; e.vx = 0; e.vy = 0;
         continue;
@@ -5043,6 +5163,13 @@ export class Game {
             const waypoint = this.postWaypoint(e, { x: gx, y: gy }); gx = waypoint.x; gy = waypoint.y;
           }
         } else if (e.type === 'turret') { gx = e.homeX; gy = e.homeY; sp = 0; }
+        else if (e.type === 'custodian' && e.patrol?.length && (e.policePost ? !this.postEngaged(e, dist) : !e.alert)) {
+          // walking the beat: a slow circuit around the post, weapon low
+          const node = e.patrol[e.patrolNode || 0];
+          gx = node.x; gy = node.y; sp = Math.max(26, e.def.speed * 0.42);
+          e.ang = lerpAngle(e.ang, Math.atan2(gy - e.y, gx - e.x), 1 - Math.exp(-5 * dt));
+          if (Math.hypot(gx - e.x, gy - e.y) < 18) e.patrolNode = ((e.patrolNode || 0) + 1) % e.patrol.length;
+        }
         else if (dist < 700 && dHome < 900) { gx = ppx; gy = ppy; }
         else { gx = e.homeX; gy = e.homeY; }
 
@@ -5144,6 +5271,10 @@ export class Game {
         const tX = -n.ny, tY = n.nx;
         const dot = e.vx * tX + e.vy * tY;
         e.vx = tX * dot + n.nx * 20; e.vy = tY * dot + n.ny * 20;
+      }
+      // A posted officer never ends up standing in the sea, whatever shoved him.
+      if (e.policePost && !this.onDryGround(e.x, e.y)) {
+        e.x = e.homeX; e.y = e.homeY; e.vx = 0; e.vy = 0;
       }
 
       /* ---- MEDIC: keeps the unit alive ---- */
