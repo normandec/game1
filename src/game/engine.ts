@@ -75,6 +75,8 @@ export interface Hud {
   trucksActive: number; helisActive: number; woundedCount: number;
   barriersActive: number; phase: string;
   piloting: boolean; heliHp: number; heliMaxHp: number; heliFuel: number; hangarDist: number;
+  /** Gunship ordnance: selected station, rounds left per station and whether an air target is held. */
+  heliStation: number; heliAmmo: [number, number, number]; heliLock: boolean;
   sector: number; basesCleared: number; sectorName: string; destination: string; transitPct: number;
   driving: boolean; tank: boolean; flyingPlane: boolean; allies: number; barricades: number;
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
@@ -164,7 +166,11 @@ function lerpAngle(a: number, b: number, t: number) {
 /* ================================================================== */
 
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; size: number; color: string; grav: number; glow: boolean; }
-interface Bullet { x: number; y: number; px: number; py: number; vx: number; vy: number; dmg: number; life: number; friendly: boolean; rocket?: boolean; color: string; r: number; pierce?: number; hits?: Enemy[]; explosive?: number; }
+interface Bullet { x: number; y: number; px: number; py: number; vx: number; vy: number; dmg: number; life: number; friendly: boolean; rocket?: boolean; color: string; r: number; pierce?: number; hits?: Enemy[]; explosive?: number;
+  /** Which class of target this round is allowed to touch. Unset means anything. */
+  arm?: 'ground' | 'air';
+  /** Air-to-air missiles steer towards the nearest airborne contact. */
+  homing?: boolean; }
 interface Enemy {
   type: string; def: EnemyDef; x: number; y: number; vx: number; vy: number; hp: number; maxHp: number;
   flash: number; cool: number; ang: number; wobble: number; stun: number; spawnT: number;
@@ -261,6 +267,32 @@ interface Barricade { x: number; y: number; hp: number; maxHp: number; ang: numb
 interface PlayerHeli {
   x: number; y: number; vx: number; vy: number; ang: number; rotor: number; bank: number;
   hp: number; maxHp: number; fuel: number; fireCd: number; rocketCd: number; landed: boolean;
+  /** Selected ordnance: 0 chain gun, 1 Hellfire (ground), 2 Sidewinder (air). */
+  station: number;
+  /** Rounds left per station; -1 is a self-feeding belt with no magazine. */
+  ammo: [number, number, number];
+}
+
+/**
+ * The captured gunship's three separate weapons. Target class is the whole point:
+ * the chain gun answers anything, Hellfire cannot touch aircraft, and the Sidewinder
+ * cannot touch the ground — so the pilot has to pick the right station for the job.
+ */
+const HELI_ORDNANCE = [
+  { name: 'M197 CHAIN GUN', short: 'CHAIN GUN', target: 'any' as const, dmg: 19, rate: 0.08,
+    speed: 1500, life: 0.9, color: '#b8f4ff', burst: 2, rocket: false, max: -1, regen: 0, note: 'GROUND + AIR' },
+  { name: 'AGM-114 HELLFIRE', short: 'HELLFIRE', target: 'ground' as const, dmg: 88, rate: 0.62,
+    speed: 850, life: 1.8, color: '#ffd9a0', burst: 2, rocket: true, max: 8, regen: 8, note: 'GROUND ONLY' },
+  { name: 'AIM-9 SIDEWINDER', short: 'SIDEWINDER', target: 'air' as const, dmg: 130, rate: 0.95,
+    speed: 1150, life: 3.4, color: '#9fe4ff', burst: 2, rocket: true, max: 6, regen: 12, note: 'AIR ONLY' },
+] as const;
+
+/** A fresh captured gunship, fully armed. */
+function makeHeli(x: number, y: number, ang: number, extra: Partial<PlayerHeli> = {}): PlayerHeli {
+  return {
+    x, y, vx: 0, vy: 0, ang, rotor: 0, bank: 0, hp: 900, maxHp: 900, fuel: 100,
+    fireCd: 0, rocketCd: 0, landed: true, station: 0, ammo: [-1, 8, 6], ...extra,
+  };
 }
 /** S.H.I.E.L.D.-style deployable energy barrier. */
 interface Barrier {
@@ -853,10 +885,7 @@ export class Game {
     this.baseOverride = { active: false, poiId: '', progress: 0, timer: 0 };
     // Parade garrison standing at attention on the airfield apron.
     this.paradeSpots = world.paradeSpots;
-    this.playerHeli = {
-      x: this.hangarSpot.x, y: this.hangarSpot.y + 108, vx: 0, vy: 0, ang: Math.PI / 2,
-      rotor: 0, bank: 0, hp: 900, maxHp: 900, fuel: 100, fireCd: 0, rocketCd: 0, landed: true,
-    };
+    this.playerHeli = makeHeli(this.hangarSpot.x, this.hangarSpot.y + 108, Math.PI / 2);
     this.phase = 'recon'; this.phaseT = 0; this.phaseName = 'RECON';
     this.waveActive = false; this.intermission = 0.6;
     this.mods = defaultMods(); this.perkCounts = {}; this.upgradeChoices = [];
@@ -1078,6 +1107,10 @@ export class Game {
       else if (!this.drivingVan && !this.playerTank) this.throwGrenade();
     }
     if (k === 'f') this.interactHeli();
+    if (this.piloting && this.playerHeli) {
+      if (k === '1' || k === '2' || k === '3') this.selectHeliStation(this.playerHeli, Number(k) - 1);
+      else if (k === 'x') this.selectHeliStation(this.playerHeli, ((this.playerHeli.station || 0) + 1) % HELI_ORDNANCE.length);
+    }
     if (k === 'l') this.toggleGate();
     if (k === 'c') this.activateAegis();
     if (k === 'v') this.toggleVaultRoute();
@@ -1352,6 +1385,9 @@ export class Game {
       heliHp: this.playerHeli?.hp || 0,
       heliMaxHp: this.playerHeli?.maxHp || 0,
       heliFuel: this.playerHeli?.fuel || 0,
+      heliStation: this.playerHeli?.station ?? 0,
+      heliAmmo: (this.playerHeli?.ammo || [-1, 0, 0]).map((n) => (n < 0 ? -1 : Math.floor(n))) as [number, number, number],
+      heliLock: !!this.playerHeli && !!this.heliAirTarget(this.playerHeli, 2600),
       hangarDist: this.playerHeli ? Math.hypot(this.playerHeli.x - this.px, this.playerHeli.y - this.py) : 0,
       sector: this.sector,
       basesCleared: Math.max(0, this.sector - 1),
@@ -2281,7 +2317,7 @@ export class Game {
     const parked = this.parkedHelis.find((p, index) => !p.taken && !this.helis.some(h => h.home === index) && Math.hypot(p.x - this.px, p.y - this.py) < 120);
     if (parked) {
       parked.taken = true;
-      if (!this.playerHeli) this.playerHeli = { x: parked.x, y: parked.y, vx: 0, vy: 0, ang: parked.ang, bank: 0, rotor: 0, hp: 900, maxHp: 900, fuel: 100, landed: true, fireCd: 0, rocketCd: 0 };
+      if (!this.playerHeli) this.playerHeli = makeHeli(parked.x, parked.y, parked.ang);
       this.playerHeli.x = parked.x; this.playerHeli.y = parked.y;
       this.playerHeli.hp = this.playerHeli.maxHp; this.playerHeli.fuel = 100;
       this.score += 2500;
@@ -2836,7 +2872,7 @@ export class Game {
     if (this.vaultChoice === 'taken') return 'Your aircraft and escort have already been assigned to the surface apron.';
     this.claimVaultAircraft(action);
     if (action === 'plane' && this.plane) { this.plane.x = VAULT_ENTRY.x + 230; this.plane.y = VAULT_ENTRY.y - 200; }
-    if (action === 'heli') this.playerHeli = { x: VAULT_ENTRY.x + 160, y: VAULT_ENTRY.y - 170, vx: 0, vy: 0, ang: -Math.PI / 2, hp: 900, maxHp: 900, rotor: 0, bank: 0, fuel: 100, fireCd: 0, rocketCd: 0, landed: true };
+    if (action === 'heli') this.playerHeli = makeHeli(VAULT_ENTRY.x + 160, VAULT_ENTRY.y - 170, -Math.PI / 2);
     for (let i = 0; i < this.allies.length; i++) { this.allies[i].x = VAULT_ENTRY.x - 90 + i * 35; this.allies[i].y = VAULT_ENTRY.y - 230; }
     return `${action === 'plane' ? 'NIGHTJAR strategic bomber' : 'KESTREL gunship'} authorized. Six escorts are waiting outside. Exit through the airlock.`;
   }
@@ -2948,7 +2984,8 @@ export class Game {
     h.landed = false;
     h.vx = 0; h.vy = 0;
     this.px = h.x; this.py = h.y;
-    this.setBanner('CAPTURED GUNSHIP', 'WASD FLY · LMB TWIN CANNONS · G ROCKET POD · F LAND');
+    this.setBanner('CAPTURED GUNSHIP', '1 CHAIN GUN · 2 HELLFIRE (GROUND) · 3 SIDEWINDER (AIR) · LMB FIRE · F LAND');
+    this.addText(h.x, h.y - 84, 'THREE STATIONS ARMED — 1 / 2 / 3', '#a9ecff', 14);
     sfx.rotor();
   }
 
@@ -3892,31 +3929,102 @@ export class Game {
     h.fuel = Math.max(0, h.fuel - dt * (m.len > 0.1 ? 1.05 : 0.3));
     h.fireCd = Math.max(0, h.fireCd - dt);
     h.rocketCd = Math.max(0, h.rocketCd - dt);
-    if (firing && h.fireCd <= 0) {
-      h.fireCd = 0.08;
-      for (const side of [-1, 1]) {
-        const a = h.ang + rand(-0.025, 0.025);
-        const ox = Math.cos(h.ang + Math.PI / 2) * side * 22;
-        const oy = Math.sin(h.ang + Math.PI / 2) * side * 22;
-        this.bullets.push({ x: h.x + ox, y: h.y + oy, px: h.x, py: h.y, vx: Math.cos(a) * 1500, vy: Math.sin(a) * 1500, dmg: 19, life: 0.9, friendly: true, color: '#b8f4ff', r: 3, hits: [] });
-        this.addParticle(h.x + ox + Math.cos(a) * 22, h.y + oy + Math.sin(a) * 22, Math.cos(a) * rand(180, 360), Math.sin(a) * rand(180, 360), 0.12, 3, '#fff2c4', true);
-      }
-      this.addLight(h.x, h.y, 170, '180,240,255', 0.1);
-      sfx.shoot('smg');
+    // magazines refill slowly in the air, so a long sortie never ends empty
+    for (let i = 0; i < HELI_ORDNANCE.length; i++) {
+      const w = HELI_ORDNANCE[i];
+      if (w.max > 0) h.ammo[i] = Math.min(w.max, h.ammo[i] + dt / w.regen);
     }
+    if (firing) this.fireHeliStation(h);
     this.px = h.x; this.py = h.y; this.pvx = h.vx; this.pvy = h.vy; this.pang = h.ang;
     if (Math.random() < 0.55) this.addParticle(h.x - Math.cos(h.ang) * 60, h.y - Math.sin(h.ang) * 60, rand(-18, 18), rand(15, 48), 0.35, rand(2, 4), '#8ba0a8', true);
     if (h.fuel <= 0 && Math.hypot(h.vx, h.vy) < 50) this.addText(h.x, h.y - 76, 'FUEL LOW — LAND', '#ffb060', 13);
   }
 
-  private fireHeliRocket(h: PlayerHeli) {
-    if (h.rocketCd > 0) return;
-    h.rocketCd = 1.1;
-    for (const side of [-1, 1]) {
-      const a = h.ang + side * 0.035;
-      this.bullets.push({ x: h.x + Math.cos(h.ang + Math.PI / 2) * side * 30, y: h.y + Math.sin(h.ang + Math.PI / 2) * side * 30, px: h.x, py: h.y, vx: Math.cos(a) * 850, vy: Math.sin(a) * 850, dmg: 88, life: 1.8, friendly: true, rocket: true, color: '#9fe4ff', r: 6, hits: [] });
+  /** Quick-draw ground rockets: G always throws a Hellfire pair, whatever is selected. */
+  private fireHeliRocket(h: PlayerHeli) { this.fireHeliStation(h, 1); }
+
+  /** Pick the station. 1 chain gun, 2 Hellfire, 3 Sidewinder. */
+  selectHeliStation(h: PlayerHeli, index: number) {
+    const i = clamp(index, 0, HELI_ORDNANCE.length - 1) | 0;
+    if (h.station === i) return;
+    h.station = i;
+    const w = HELI_ORDNANCE[i];
+    this.addText(h.x, h.y - 74, `${w.name} · ${w.note}`, '#a9ecff', 13);
+    sfx.click();
+  }
+
+  /**
+   * Nearest airborne contact — transports, troops still on parachute or rope, and
+   * enemy gunships. Anything that flies counts, which is what the Sidewinder sees.
+   */
+  heliAirTarget(from: { x: number; y: number }, range = 2600): { x: number; y: number } | null {
+    let best: { x: number; y: number } | null = null;
+    let bd = range;
+    for (const a of this.airTransports) {
+      const p = { x: a.x, y: a.y - a.altitude * 0.55 };
+      const d = Math.hypot(p.x - from.x, p.y - from.y);
+      if (d < bd) { bd = d; best = p; }
     }
-    this.addLight(h.x, h.y, 300, '255,190,110', 0.15);
+    for (const p of this.airTroops) {
+      const drop = p.duration > 0 ? clamp(p.progress / p.duration, 0, 1) : 1;
+      const q = { x: p.x, y: p.y - p.altitude * (1 - drop) };
+      const d = Math.hypot(q.x - from.x, q.y - from.y);
+      if (d < bd) { bd = d; best = q; }
+    }
+    for (const h of this.helis) {
+      if (h.hp <= 0) continue;
+      const d = Math.hypot(h.x - from.x, h.y - from.y);
+      if (d < bd) { bd = d; best = { x: h.x, y: h.y }; }
+    }
+    return best;
+  }
+
+  /** Fire whatever station is selected. Each weapon only exists for one target class. */
+  private fireHeliStation(h: PlayerHeli, force?: number) {
+    const idx = clamp(force ?? h.station ?? 0, 0, HELI_ORDNANCE.length - 1) | 0;
+    const w = HELI_ORDNANCE[idx];
+    if (idx === 0 ? h.fireCd > 0 : h.rocketCd > 0) return;
+    const rounds = Math.max(0, Math.floor(h.ammo[idx]));
+    if (w.max > 0 && rounds <= 0) {
+      h.rocketCd = 0.8;
+      this.addText(h.x, h.y - 74, `${w.short} EMPTY — REARMING`, '#ff9d7a', 12);
+      return;
+    }
+    if (w.target === 'air' && !this.heliAirTarget(h, 2600)) {
+      h.rocketCd = 0.6;
+      this.addText(h.x, h.y - 74, 'NO AIR CONTACT — SIDEWINDER HELD', '#9fe4ff', 12);
+      return;
+    }
+    const shots = w.max > 0 ? Math.min(w.burst, rounds) : w.burst;
+    if (w.max > 0) h.ammo[idx] = rounds - shots;
+    if (idx === 0) {
+      h.fireCd = w.rate;
+      for (const side of [-1, 1]) {
+        const a = h.ang + rand(-0.025, 0.025);
+        const ox = Math.cos(h.ang + Math.PI / 2) * side * 22;
+        const oy = Math.sin(h.ang + Math.PI / 2) * side * 22;
+        this.bullets.push({ x: h.x + ox, y: h.y + oy, px: h.x, py: h.y, vx: Math.cos(a) * w.speed, vy: Math.sin(a) * w.speed, dmg: w.dmg, life: w.life, friendly: true, color: w.color, r: 3, hits: [], arm: w.target === 'any' ? undefined : w.target });
+        this.addParticle(h.x + ox + Math.cos(a) * 22, h.y + oy + Math.sin(a) * 22, Math.cos(a) * rand(180, 360), Math.sin(a) * rand(180, 360), 0.12, 3, '#fff2c4', true);
+      }
+      this.addLight(h.x, h.y, 170, '180,240,255', 0.1);
+      sfx.shoot('smg');
+      return;
+    }
+    h.rocketCd = w.rate;
+    for (let i = 0; i < shots; i++) {
+      const side = shots === 1 ? 0 : i === 0 ? -1 : 1;
+      const a = h.ang + side * 0.035;
+      this.bullets.push({
+        x: h.x + Math.cos(h.ang + Math.PI / 2) * side * 30,
+        y: h.y + Math.sin(h.ang + Math.PI / 2) * side * 30,
+        px: h.x, py: h.y,
+        vx: Math.cos(a) * w.speed, vy: Math.sin(a) * w.speed,
+        dmg: w.dmg, life: w.life, friendly: true, rocket: true, color: w.color, r: 6, hits: [],
+        arm: w.target === 'any' ? undefined : w.target,
+        homing: w.target === 'air',
+      });
+    }
+    this.addLight(h.x, h.y, 300, idx === 2 ? '150,225,255' : '255,190,110', 0.15);
     sfx.shoot('rocket');
   }
 
@@ -5913,6 +6021,22 @@ export class Game {
     const bl = this.bullets;
     for (let i = bl.length - 1; i >= 0; i--) {
       const b = bl[i];
+      const airArm = b.arm === 'air';
+      const groundArm = b.arm === 'ground';
+      // a Sidewinder flies above the battlefield: it steers for the nearest aircraft
+      if (b.homing) {
+        const target = this.heliAirTarget(b, 2600);
+        if (target) {
+          const want = Math.atan2(target.y - b.y, target.x - b.x);
+          const cur = Math.atan2(b.vy, b.vx);
+          let diff = want - cur;
+          while (diff > Math.PI) diff -= TAU;
+          while (diff < -Math.PI) diff += TAU;
+          const spd = Math.hypot(b.vx, b.vy);
+          const na = cur + clamp(diff, -4.6 * dt, 4.6 * dt);
+          b.vx = Math.cos(na) * spd; b.vy = Math.sin(na) * spd;
+        }
+      }
       b.px = b.x; b.py = b.y;
       b.x += b.vx * dt; b.y += b.vy * dt;
       b.life -= dt;
@@ -5925,7 +6049,7 @@ export class Game {
       const pad = 64 + b.r;
       const bx0 = Math.min(b.px, b.x) - pad, bx1 = Math.max(b.px, b.x) + pad;
       const by0 = Math.min(b.py, b.y) - pad, by1 = Math.max(b.py, b.y) + pad;
-      if (!dead) {
+      if (!dead && !airArm) {
         const start = { x: b.px, y: b.py }, end = { x: b.x, y: b.y };
         const candidates = this.bulletSet;
         this.grid.query(Math.min(b.px, b.x) - 3, Math.min(b.py, b.y) - 3, Math.abs(b.x - b.px) + 6, Math.abs(b.y - b.py) + 6, candidates);
@@ -5956,7 +6080,7 @@ export class Game {
 
       if (!dead && b.friendly) {
         const sitesRef = this.campaignSites;
-        if (sitesRef) for (const cell of sitesRef.powerCells) {
+        if (sitesRef && !airArm) for (const cell of sitesRef.powerCells) {
           if (cell.dead || cell.x < bx0 || cell.x > bx1 || cell.y < by0 || cell.y > by1) continue;
           if (!segmentCircle({ x: b.px, y: b.py }, b, cell, 48 + b.r)) continue;
           dead = true; cell.hp -= b.dmg;
@@ -5971,7 +6095,7 @@ export class Game {
           }
           break;
         }
-        for (const a of this.airTransports) {
+        if (!groundArm) for (const a of this.airTransports) {
           if (a.x < bx0 || a.x > bx1 || a.y < by0 - 200 || a.y > by1) continue;
           const center = { x: a.x, y: a.y - a.altitude * 0.55 };
           if (!segmentCircle({ x: b.px, y: b.py }, b, center, a.kind === 'atlas' ? 90 : 73)) continue;
@@ -5979,7 +6103,7 @@ export class Game {
           if (a.hp <= 0) this.destroyAirlift(a);
           break;
         }
-        if (!dead) for (let j = this.airTroops.length - 1; j >= 0; j--) {
+        if (!dead && !groundArm) for (let j = this.airTroops.length - 1; j >= 0; j--) {
           const p = this.airTroops[j];
           if (p.x < bx0 || p.x > bx1 || p.y < by0 - 200 || p.y > by1) continue;
           const center = { x: p.x, y: p.y - p.altitude * (1 - p.progress / p.duration) };
@@ -5989,7 +6113,7 @@ export class Game {
           break;
         }
         // gunships
-        if (!dead) for (const h of this.helis) {
+        if (!dead && !groundArm) for (const h of this.helis) {
           if (h.x < bx0 || h.x > bx1 || h.y < by0 || h.y > by1) continue;
           if (segmentCircle({ x: b.px, y: b.py }, b, h, 44 + b.r)) {
             dead = true;
@@ -5999,148 +6123,151 @@ export class Game {
             break;
           }
         }
-        // enemy energy barriers block your fire too — break them
-        if (!dead) for (const bar of this.barriers) {
-          if (bar.x < bx0 || bar.x > bx1 || bar.y < by0 || bar.y > by1) continue;
-          const rx = b.x - bar.x, ry = b.y - bar.y;
-          const lx = rx * Math.cos(-bar.ang) - ry * Math.sin(-bar.ang);
-          const ly = rx * Math.sin(-bar.ang) + ry * Math.cos(-bar.ang);
-          if (Math.abs(lx) < bar.w / 2 && Math.abs(ly) < 12) {
-            dead = true;
-            bar.hp -= b.dmg;
-            this.sparks(b.x, b.y, '#9fd8ff', 8);
-            break;
-          }
-        }
-        // armed mines — shoot them to clear the path
-        if (!dead) for (const m of this.mines) {
-          if (!m.armed || m.x < bx0 || m.x > bx1 || m.y < by0 || m.y > by1) continue;
-          if (Math.hypot(b.x - m.x, b.y - m.y) < 12 + b.r) {
-            dead = true;
-            this.mines.splice(this.mines.indexOf(m), 1);
-            this.explode(m.x, m.y, 130, 55, true);
-            break;
-          }
-        }
-        // parked / driven vans take fire too
-        if (!dead) for (const v of this.vans) {
-          if (v.dead || v.driving || v.reserved || v.x < bx0 || v.x > bx1 || v.y < by0 || v.y > by1) continue;
-          if (Math.abs(b.x - v.x) < 48 && Math.abs(b.y - v.y) < 48) {
-            dead = true; v.hp -= b.dmg; this.sparks(b.x, b.y, '#ffd166', 6);
-            if (v.hp <= 0) {
-              v.dead = true;
-              this.explode(v.x, v.y, 150, 60, true);
-              this.score += 350;
-              this.addText(v.x, v.y - 40, '+350 TRANSPORT', '#ffd166', 15);
+        // ground targets: skipped entirely by an air-to-air missile
+        if (!airArm) {
+          // enemy energy barriers block your fire too — break them
+          if (!dead) for (const bar of this.barriers) {
+            if (bar.x < bx0 || bar.x > bx1 || bar.y < by0 || bar.y > by1) continue;
+            const rx = b.x - bar.x, ry = b.y - bar.y;
+            const lx = rx * Math.cos(-bar.ang) - ry * Math.sin(-bar.ang);
+            const ly = rx * Math.sin(-bar.ang) + ry * Math.cos(-bar.ang);
+            if (Math.abs(lx) < bar.w / 2 && Math.abs(ly) < 12) {
+              dead = true;
+              bar.hp -= b.dmg;
+              this.sparks(b.x, b.y, '#9fd8ff', 8);
+              break;
             }
-            break;
           }
-        }
-        // beam batteries can be destroyed instead of captured
-        if (!dead) for (const l of this.lasers) {
-          if (l.captured || l.x < bx0 || l.x > bx1 || l.y < by0 || l.y > by1) continue;
-          if (Math.hypot(b.x - l.x, b.y - l.y) < 56) {
-            dead = true; l.hp -= b.dmg; this.sparks(b.x, b.y, '#ff8fa3', 8);
-            if (l.hp <= 0) {
-              this.lasers.splice(this.lasers.indexOf(l), 1);
-              this.explode(l.x, l.y, 300, 90, true);
-              this.score += 4500;
-              this.addText(l.x, l.y - 70, 'BEAM BATTERY DESTROYED +4500', '#ff8fa3', 20);
+          // armed mines — shoot them to clear the path
+          if (!dead) for (const m of this.mines) {
+            if (!m.armed || m.x < bx0 || m.x > bx1 || m.y < by0 || m.y > by1) continue;
+            if (Math.hypot(b.x - m.x, b.y - m.y) < 12 + b.r) {
+              dead = true;
+              this.mines.splice(this.mines.indexOf(m), 1);
+              this.explode(m.x, m.y, 130, 55, true);
+              break;
             }
-            break;
           }
-        }
-        // armored convoy trucks — shoot them before they unload!
-        if (!dead) for (const t of this.trucks) {
-          if (t.dead || t.x < bx0 || t.x > bx1 || t.y < by0 || t.y > by1) continue;
-          const a = { x: (b.px - t.x) * Math.cos(t.ang) + (b.py - t.y) * Math.sin(t.ang), y: -(b.px - t.x) * Math.sin(t.ang) + (b.py - t.y) * Math.cos(t.ang) };
-          const end = { x: (b.x - t.x) * Math.cos(t.ang) + (b.y - t.y) * Math.sin(t.ang), y: -(b.x - t.x) * Math.sin(t.ang) + (b.y - t.y) * Math.cos(t.ang) };
-          if (segmentBox(a, end, { x: -78, y: -33, w: 156, h: 66 }, b.r) !== null) {
-            dead = true;
-            t.hp -= b.dmg;
-            this.sparks(b.x, b.y, '#ffd166', 8);
-            if (t.hp <= 0) this.destroyTruck(t);
-            break;
-          }
-        }
-        // fuel barrels — chain-reaction hazards
-        if (!dead) for (const br of this.barrels) {
-          if (br.dead || br.x < bx0 || br.x > bx1 || br.y < by0 || br.y > by1) continue;
-          if (Math.hypot(b.x - br.x, b.y - br.y) < 17 + b.r) {
-            dead = true;
-            br.hp -= b.dmg;
-            this.sparks(b.x, b.y, '#ffd166', 6);
-            if (br.hp <= 0) this.igniteBarrel(br);
-            break;
-          }
-        }
-        // satcom arrays — secondary command-net targets
-        if (!dead) for (const s of this.satcoms) {
-          if (s.dead || s.x < bx0 || s.x > bx1 || s.y < by0 || s.y > by1) continue;
-          if (Math.hypot(b.x - s.x, b.y - s.y) < 34 + b.r) {
-            dead = true;
-            s.hp -= b.dmg * (1 + this.mods.emp);
-            this.sparks(b.x, b.y, '#c9a4ff', 8);
-            this.addText(s.x, s.y - 40, `${Math.round(b.dmg * (1 + this.mods.emp))}`, '#d0b0ff', 13);
-            if (s.hp <= 0) this.destroySatcom(s);
-            break;
-          }
-        }
-        // servers (primary objective)
-        if (!dead) for (const s of this.servers) {
-          if (s.dead || s.x < bx0 || s.x > bx1 || s.y < by0 || s.y > by1) continue;
-          if (Math.abs(b.x - s.x) < 40 && Math.abs(b.y - s.y) < 32) {
-            dead = true;
-            s.hp -= b.dmg * (1 + this.mods.emp);
-            s.spark = 0.25;
-            this.sparks(b.x, b.y, '#7ff0ff', 8);
-            this.addText(s.x, s.y - 42, `${Math.round(b.dmg * (1 + this.mods.emp))}`, '#8fe8ff', 14);
-            if (s.hp <= 0) this.destroyServer(s);
-            break;
-          }
-        }
-        if (!dead) for (const c of this.caches) {
-          if (c.dead || c.x < bx0 || c.x > bx1 || c.y < by0 || c.y > by1) continue;
-          if (Math.hypot(b.x - c.x, b.y - c.y) < 24 + b.r) {
-            dead = true; c.hp -= b.dmg; this.sparks(b.x, b.y, '#b7ff9e', 6);
-            if (c.hp <= 0) this.breakCache(c);
-            break;
-          }
-        }
-        if (!dead) for (const mc of this.megaCrates) {
-          if (mc.dead || mc.x < bx0 || mc.x > bx1 || mc.y < by0 || mc.y > by1) continue;
-          if (Math.abs(b.x - mc.x) < mc.w / 2 && Math.abs(b.y - mc.y) < mc.h / 2) {
-            dead = true; mc.hp -= b.dmg; this.sparks(b.x, b.y, mc.color, 8);
-            if (mc.hp <= 0) this.breakMegaCrate(mc);
-            break;
-          }
-        }
-        if (!dead) for (const e of this.enemies) {
-          if (e.spawnT > 0 || e.hp <= 0 || e.x < bx0 || e.x > bx1 || e.y < by0 || e.y > by1) continue;
-          if (b.hits && b.hits.includes(e)) continue;
-          if (segmentCircle({ x: b.px, y: b.py }, b, e, e.def.r + b.r)) {
-            if (b.rocket) { dead = true; break; }
-            // shield-bearers block frontal fire
-            let mult = 1;
-            if (e.def.shield) {
-              const inc = Math.atan2(b.vy, b.vx);
-              const facing = Math.atan2(this.py - e.y, this.px - e.x);
-              let diff = Math.abs(((inc - facing - Math.PI + Math.PI) % TAU) - Math.PI);
-              if (diff > Math.PI) diff = TAU - diff;
-              if (diff < 1.15) {
-                mult = 1 - e.def.shield;
-                this.sparks(b.x, b.y, '#bcd4ff', 10);
-                this.addText(e.x, e.y - e.def.r - 8, 'BLOCKED', '#9fc2ff', 12);
+          // parked / driven vans take fire too
+          if (!dead) for (const v of this.vans) {
+            if (v.dead || v.driving || v.reserved || v.x < bx0 || v.x > bx1 || v.y < by0 || v.y > by1) continue;
+            if (Math.abs(b.x - v.x) < 48 && Math.abs(b.y - v.y) < 48) {
+              dead = true; v.hp -= b.dmg; this.sparks(b.x, b.y, '#ffd166', 6);
+              if (v.hp <= 0) {
+                v.dead = true;
+                this.explode(v.x, v.y, 150, 60, true);
+                this.score += 350;
+                this.addText(v.x, v.y - 40, '+350 TRANSPORT', '#ffd166', 15);
               }
+              break;
             }
-            const crit = Math.random() < this.mods.critChance;
-            const dmg = (crit ? b.dmg * this.mods.critMul : b.dmg) * mult;
-            this.hurtEnemy(e, dmg, b.vx, b.vy, crit);
-            this.sparks(b.x, b.y, crit ? '#fff' : '#ffd7a1', crit ? 12 : 6);
-            if (b.explosive) this.explode(b.x, b.y, 62 + b.explosive * 14, b.dmg * 0.45, false);
-            b.hits?.push(e);
-            if (b.pierce && b.pierce > 0) { b.pierce -= 1; b.dmg *= 0.82; }
-            else { dead = true; break; }
+          }
+          // beam batteries can be destroyed instead of captured
+          if (!dead) for (const l of this.lasers) {
+            if (l.captured || l.x < bx0 || l.x > bx1 || l.y < by0 || l.y > by1) continue;
+            if (Math.hypot(b.x - l.x, b.y - l.y) < 56) {
+              dead = true; l.hp -= b.dmg; this.sparks(b.x, b.y, '#ff8fa3', 8);
+              if (l.hp <= 0) {
+                this.lasers.splice(this.lasers.indexOf(l), 1);
+                this.explode(l.x, l.y, 300, 90, true);
+                this.score += 4500;
+                this.addText(l.x, l.y - 70, 'BEAM BATTERY DESTROYED +4500', '#ff8fa3', 20);
+              }
+              break;
+            }
+          }
+          // armored convoy trucks — shoot them before they unload!
+          if (!dead) for (const t of this.trucks) {
+            if (t.dead || t.x < bx0 || t.x > bx1 || t.y < by0 || t.y > by1) continue;
+            const a = { x: (b.px - t.x) * Math.cos(t.ang) + (b.py - t.y) * Math.sin(t.ang), y: -(b.px - t.x) * Math.sin(t.ang) + (b.py - t.y) * Math.cos(t.ang) };
+            const end = { x: (b.x - t.x) * Math.cos(t.ang) + (b.y - t.y) * Math.sin(t.ang), y: -(b.x - t.x) * Math.sin(t.ang) + (b.y - t.y) * Math.cos(t.ang) };
+            if (segmentBox(a, end, { x: -78, y: -33, w: 156, h: 66 }, b.r) !== null) {
+              dead = true;
+              t.hp -= b.dmg;
+              this.sparks(b.x, b.y, '#ffd166', 8);
+              if (t.hp <= 0) this.destroyTruck(t);
+              break;
+            }
+          }
+          // fuel barrels — chain-reaction hazards
+          if (!dead) for (const br of this.barrels) {
+            if (br.dead || br.x < bx0 || br.x > bx1 || br.y < by0 || br.y > by1) continue;
+            if (Math.hypot(b.x - br.x, b.y - br.y) < 17 + b.r) {
+              dead = true;
+              br.hp -= b.dmg;
+              this.sparks(b.x, b.y, '#ffd166', 6);
+              if (br.hp <= 0) this.igniteBarrel(br);
+              break;
+            }
+          }
+          // satcom arrays — secondary command-net targets
+          if (!dead) for (const s of this.satcoms) {
+            if (s.dead || s.x < bx0 || s.x > bx1 || s.y < by0 || s.y > by1) continue;
+            if (Math.hypot(b.x - s.x, b.y - s.y) < 34 + b.r) {
+              dead = true;
+              s.hp -= b.dmg * (1 + this.mods.emp);
+              this.sparks(b.x, b.y, '#c9a4ff', 8);
+              this.addText(s.x, s.y - 40, `${Math.round(b.dmg * (1 + this.mods.emp))}`, '#d0b0ff', 13);
+              if (s.hp <= 0) this.destroySatcom(s);
+              break;
+            }
+          }
+          // servers (primary objective)
+          if (!dead) for (const s of this.servers) {
+            if (s.dead || s.x < bx0 || s.x > bx1 || s.y < by0 || s.y > by1) continue;
+            if (Math.abs(b.x - s.x) < 40 && Math.abs(b.y - s.y) < 32) {
+              dead = true;
+              s.hp -= b.dmg * (1 + this.mods.emp);
+              s.spark = 0.25;
+              this.sparks(b.x, b.y, '#7ff0ff', 8);
+              this.addText(s.x, s.y - 42, `${Math.round(b.dmg * (1 + this.mods.emp))}`, '#8fe8ff', 14);
+              if (s.hp <= 0) this.destroyServer(s);
+              break;
+            }
+          }
+          if (!dead) for (const c of this.caches) {
+            if (c.dead || c.x < bx0 || c.x > bx1 || c.y < by0 || c.y > by1) continue;
+            if (Math.hypot(b.x - c.x, b.y - c.y) < 24 + b.r) {
+              dead = true; c.hp -= b.dmg; this.sparks(b.x, b.y, '#b7ff9e', 6);
+              if (c.hp <= 0) this.breakCache(c);
+              break;
+            }
+          }
+          if (!dead) for (const mc of this.megaCrates) {
+            if (mc.dead || mc.x < bx0 || mc.x > bx1 || mc.y < by0 || mc.y > by1) continue;
+            if (Math.abs(b.x - mc.x) < mc.w / 2 && Math.abs(b.y - mc.y) < mc.h / 2) {
+              dead = true; mc.hp -= b.dmg; this.sparks(b.x, b.y, mc.color, 8);
+              if (mc.hp <= 0) this.breakMegaCrate(mc);
+              break;
+            }
+          }
+          if (!dead) for (const e of this.enemies) {
+            if (e.spawnT > 0 || e.hp <= 0 || e.x < bx0 || e.x > bx1 || e.y < by0 || e.y > by1) continue;
+            if (b.hits && b.hits.includes(e)) continue;
+            if (segmentCircle({ x: b.px, y: b.py }, b, e, e.def.r + b.r)) {
+              if (b.rocket) { dead = true; break; }
+              // shield-bearers block frontal fire
+              let mult = 1;
+              if (e.def.shield) {
+                const inc = Math.atan2(b.vy, b.vx);
+                const facing = Math.atan2(this.py - e.y, this.px - e.x);
+                let diff = Math.abs(((inc - facing - Math.PI + Math.PI) % TAU) - Math.PI);
+                if (diff > Math.PI) diff = TAU - diff;
+                if (diff < 1.15) {
+                  mult = 1 - e.def.shield;
+                  this.sparks(b.x, b.y, '#bcd4ff', 10);
+                  this.addText(e.x, e.y - e.def.r - 8, 'BLOCKED', '#9fc2ff', 12);
+                }
+              }
+              const crit = Math.random() < this.mods.critChance;
+              const dmg = (crit ? b.dmg * this.mods.critMul : b.dmg) * mult;
+              this.hurtEnemy(e, dmg, b.vx, b.vy, crit);
+              this.sparks(b.x, b.y, crit ? '#fff' : '#ffd7a1', crit ? 12 : 6);
+              if (b.explosive) this.explode(b.x, b.y, 62 + b.explosive * 14, b.dmg * 0.45, false);
+              b.hits?.push(e);
+              if (b.pierce && b.pierce > 0) { b.pierce -= 1; b.dmg *= 0.82; }
+              else { dead = true; break; }
+            }
           }
         }
       } else if (!dead) {
@@ -6166,7 +6293,9 @@ export class Game {
         }
       }
       if (dead) {
-        if (b.rocket) this.explode(b.x, b.y, 150, Math.max(70, b.dmg), true);
+        // a Sidewinder's warhead is for aircraft: it must never rake the ground
+        if (b.rocket && airArm) this.sparks(b.x, b.y, '#cfefff', 10);
+        else if (b.rocket) this.explode(b.x, b.y, 150, Math.max(70, b.dmg), true);
         bl.splice(i, 1);
       }
     }
@@ -6532,10 +6661,7 @@ export class Game {
       this.status = 'transit';
       this.piloting = true;
       this.firing = false;
-      this.playerHeli = {
-        x: e.x, y: e.y, vx: 0, vy: -700, ang: -Math.PI / 2,
-        rotor: 0, bank: 0.28, hp: 900, maxHp: 900, fuel: 100, fireCd: 0, rocketCd: 0, landed: false,
-      };
+      this.playerHeli = makeHeli(e.x, e.y, -Math.PI / 2, { vx: 0, vy: -700, bank: 0.28, landed: false });
       this.setBanner('LEVEL 6 · THE CAGE', 'FIVE SECTORS DOWN — ONE PRISON LEFT');
       this.onTransit(6);
       sfx.rotor();
@@ -6548,10 +6674,7 @@ export class Game {
     this.status = 'transit';
     this.piloting = true;
     this.firing = false;
-    this.playerHeli = {
-      x: e.x, y: e.y, vx: 0, vy: -700, ang: -Math.PI / 2,
-      rotor: 0, bank: 0.28, hp: 900, maxHp: 900, fuel: 100, fireCd: 0, rocketCd: 0, landed: false,
-    };
+    this.playerHeli = makeHeli(e.x, e.y, -Math.PI / 2, { vx: 0, vy: -700, bank: 0.28, landed: false });
     this.onTransit(this.sector + 1);
     sfx.rotor();
   }
@@ -7147,6 +7270,7 @@ export class Game {
     this.drawMines(ctx, camX, camY);
     this.drawGrenades(ctx);
     this.drawBullets(ctx);
+    this.drawHeliOrdnance(ctx);
     this.drawParticles(ctx);
     this.drawShocks(ctx);
     this.drawTexts(ctx);
@@ -9757,6 +9881,32 @@ export class Game {
     }
   }
 
+  /** Target bracket for the air-to-air station: what the Sidewinder is actually holding. */
+  private drawHeliOrdnance(ctx: CanvasRenderingContext2D) {
+    const h = this.playerHeli;
+    if (!h || !this.piloting) return;
+    if (HELI_ORDNANCE[h.station ?? 0].target === 'ground') return;
+    const target = this.heliAirTarget(h, 2600);
+    if (!target) return;
+    if (target.x < this.camX - 80 || target.x > this.camX + this.w + 80) return;
+    if (target.y < this.camY - 80 || target.y > this.camY + this.h + 80) return;
+    const d = Math.hypot(target.x - h.x, target.y - h.y);
+    const r = 34 + Math.sin(this.simulationTime * 6) * 3;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(159,228,255,0.85)';
+    ctx.lineWidth = 1.6;
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath(); ctx.arc(target.x, target.y, r, 0, TAU); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(159,228,255,0.45)';
+    ctx.beginPath(); ctx.moveTo(h.x, h.y); ctx.lineTo(target.x, target.y); ctx.stroke();
+    ctx.fillStyle = 'rgba(190,240,255,0.9)';
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${h.station === 2 ? 'AIM-9 LOCK' : 'AIR CONTACT'} · ${Math.round(d)} m`, target.x, target.y - r - 8);
+    ctx.restore();
+  }
+
   private drawBullets(ctx: CanvasRenderingContext2D) {
     ctx.lineCap = 'round';
     for (const b of this.bullets) {
@@ -9764,8 +9914,8 @@ export class Game {
       if (b.rocket) {
         ctx.save();
         ctx.translate(b.x, b.y); ctx.rotate(Math.atan2(b.vy, b.vx));
-        ctx.fillStyle = '#ffd08a'; ctx.fillRect(-10, -4, 20, 8);
-        ctx.fillStyle = '#ff6b35';
+        ctx.fillStyle = b.arm === 'air' ? '#dcefff' : '#ffd08a'; ctx.fillRect(-10, -4, 20, 8);
+        ctx.fillStyle = b.arm === 'air' ? '#7fd8ff' : '#ff6b35';
         ctx.beginPath(); ctx.moveTo(10, -4); ctx.lineTo(18, 0); ctx.lineTo(10, 4); ctx.fill();
         ctx.restore();
         continue;

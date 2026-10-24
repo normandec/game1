@@ -324,7 +324,31 @@ export function HudLayer({
               <div className="mt-1 h-1.5 overflow-hidden rounded-sm bg-black/60">
                 <div className="h-full bg-sky-300 shadow-[0_0_8px_#67e8f9]" style={{ width: `${(hud.heliHp / hud.heliMaxHp) * 100}%` }} />
               </div>
-              <div className="font-tech mt-1 text-center text-[9px] tracking-widest text-teal-100/60">WASD FLY · LMB GUN · G ROCKET · F LAND</div>
+              {/* three separate stations, each blind to the wrong target class */}
+              <div className="mt-1.5 grid grid-cols-3 gap-1">
+                {([
+                  ['CHAIN', 'GROUND+AIR', hud.heliAmmo[0]],
+                  ['HELLFIRE', 'GROUND', hud.heliAmmo[1]],
+                  ['SIDEWINDER', 'AIR', hud.heliAmmo[2]],
+                ] as [string, string, number][]).map(([name, cls, ammo], i) => (
+                  <div
+                    key={name}
+                    className={`rounded-sm border px-1 py-0.5 text-center ${
+                      hud.heliStation === i
+                        ? 'border-sky-300 bg-sky-400/20 text-sky-50'
+                        : 'border-sky-300/20 text-sky-200/50'
+                    }`}
+                  >
+                    <div className="text-[8px] font-bold tracking-[0.12em]">{i + 1} {name}</div>
+                    <div className="font-tech text-[8px] tracking-[0.1em] opacity-70">{cls}</div>
+                    <div className="font-tech text-[9px]">{ammo < 0 ? 'BELT' : `${ammo} RDY`}</div>
+                  </div>
+                ))}
+              </div>
+              <div className={`font-tech mt-1 text-center text-[9px] tracking-widest ${hud.heliLock ? 'text-cyan-200' : 'text-teal-100/40'}`}>
+                {hud.heliLock ? '◈ AIR CONTACT — SIDEWINDER READY' : 'NO AIR CONTACT'}
+              </div>
+              <div className="font-tech mt-0.5 text-center text-[9px] tracking-widest text-teal-100/60">WASD FLY · 1/2/3 STATION · LMB FIRE · G HELLFIRE · F LAND</div>
             </div>
           )}
 
