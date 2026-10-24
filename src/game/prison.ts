@@ -35,11 +35,16 @@ export interface PrisonGuard {
   hp: number; maxHp: number; state: GuardState;
   patrol: { x: number; z: number }[]; node: number;
   cool: number; alertT: number; tower: boolean; flash: number;
+  /** ragdoll state: velocity, tilt and the limb phase used by the renderer */
+  vx: number; vz: number; vy: number; tilt: number; spin: number; limb: number;
+  /** true for the two control-room detachments: they hold the room, not the corridor */
+  elite: boolean; room: string;
 }
 
 export interface PrisonInmate {
   id: number; cell: number; x: number; z: number; y: number; ang: number;
   hp: number; maxHp: number; state: InmateState; cool: number; target: number; flash: number;
+  vx: number; vz: number; vy: number; tilt: number; spin: number; limb: number;
 }
 
 export interface PrisonWall {
@@ -60,13 +65,32 @@ export interface PrisonButton {
 
 export interface PrisonProp {
   x: number; z: number; y: number; w: number; d: number; h: number;
-  kind: 'bed' | 'toilet' | 'sink' | 'table' | 'bench' | 'locker' | 'desk' | 'crate' | 'console' | 'pipe' | 'medkit' | 'lamp' | 'camera';
+  kind: 'bed' | 'toilet' | 'sink' | 'table' | 'bench' | 'locker' | 'desk' | 'crate' | 'console' | 'pipe' | 'medkit' | 'lamp' | 'camera'
+    | 'monitor' | 'chair' | 'tray' | 'pot' | 'rack' | 'shelf' | 'cabinet' | 'workbench' | 'laundry' | 'stretcher'
+    | 'siren' | 'vent' | 'fridge' | 'tank' | 'weaponrack';
   solid: boolean;
+}
+
+/**
+ * A physical lever inside a control room. The master release can only be thrown by
+ * hand, with the mouse, from inside the room it lives in.
+ */
+export interface PrisonLever {
+  id: string; label: string; sub: string; room: string;
+  /** handle position — what the crosshair has to be on */
+  x: number; z: number; y: number;
+  /** console the handle sits on */
+  baseX: number; baseZ: number;
+  pulled: boolean;
+  /** 0..1, filled while the handle is held */
+  progress: number;
+  /** only the master lever needs a long, loud hold */
+  holdTime: number;
 }
 
 export interface PrisonPickup { x: number; z: number; y: number; kind: 'ammo' | 'medkit' | 'armor' | 'keys'; taken: boolean }
 
-export interface PrisonEvent { kind: 'shot' | 'hit' | 'break' | 'open-all' | 'sally' | 'shout' | 'down' | 'pickup' | 'exit' | 'alarm'; x: number; z: number; y: number }
+export interface PrisonEvent { kind: 'shot' | 'hit' | 'break' | 'open-all' | 'sally' | 'shout' | 'down' | 'pickup' | 'exit' | 'alarm' | 'armory'; x: number; z: number; y: number }
 
 export interface PrisonStats { freed: number; guardsDown: number; inmatesDown: number; shots: number; hits: number; looted: number }
 
@@ -84,6 +108,11 @@ export class PrisonSim {
   inmates: PrisonInmate[] = [];
   walls: PrisonWall[] = [];
   buttons: PrisonButton[] = [];
+  levers: PrisonLever[] = [];
+  /** Rooms by name, so the HUD and the compass can say where things are. */
+  rooms: { name: string; x: number; z: number; w: number; d: number }[] = [];
+  /** 0..1 how loud the sirens are right now (rises when the alarm is tripped). */
+  siren = 0;
   props: PrisonProp[] = [];
   pickups: PrisonPickup[] = [];
   events: PrisonEvent[] = [];
@@ -152,6 +181,7 @@ export class PrisonSim {
         id: this.inmates.length, cell: c.id, x: c.x, z: c.z - c.face * 0.6, y: 0,
         ang: c.face > 0 ? Math.PI / 2 : -Math.PI / 2,
         hp: 60, maxHp: 60, state: 'cell', cool: 0, target: -1, flash: 0,
+        vx: 0, vz: 0, vy: 0, tilt: 0, spin: 0, limb: 0,
       };
       c.occupant = n.id;
       this.inmates.push(n);
@@ -161,11 +191,12 @@ export class PrisonSim {
     this.addShell();
     this.addBarsAndCellWalls();
     this.addBlocks();
+    this.addRooms();
 
     // ---------- guards ----------
     this.spawnGuards();
 
-    // ---------- buttons, props, loot ----------
+    // ---------- levers, buttons, props, loot ----------
     this.addControlRooms();
     this.addCellProps();
     this.addPickups();
@@ -199,10 +230,26 @@ export class PrisonSim {
     // the cell house shell: one enormous hall around all four wings
     const H = 104;
     const hallX = WING_ROWS * CELL_W / 2 + 10;
-    W(0, -H + 34, hallX * 2, 3, 0, 14);          // north hall wall
-    W(-hallX, 0, 3, H * 2 - 68, 0, 14);          // west hall wall
-    W(hallX, 0, 3, H * 2 - 68, 0, 14);           // east hall wall
-    W(0, H - 34, hallX * 2, 3, 0, 14);           // south hall wall
+    /* The hall walls are cut wherever an outer room has its door, otherwise the rooms
+     * in the service ring would be sealed off from the cell house. */
+    const along = (fixedZ: number | null, fixedX: number | null, from: number, to: number, gaps: [number, number][], t = 3) => {
+      let cur = from;
+      for (const [g0, g1] of [...gaps].sort((a, b) => a[0] - b[0])) {
+        if (g0 > cur + 0.5) {
+          const c = (cur + g0) / 2, len = g0 - cur;
+          if (fixedZ !== null) W(c, fixedZ, len, t, 0, 14); else W(fixedX!, c, t, len, 0, 14);
+        }
+        cur = Math.max(cur, g1);
+      }
+      if (to > cur + 0.5) {
+        const c = (cur + to) / 2, len = to - cur;
+        if (fixedZ !== null) W(c, fixedZ, len, t, 0, 14); else W(fixedX!, c, t, len, 0, 14);
+      }
+    };
+    along(-H + 34, null, -hallX, hallX, [[-77, -67], [67, 77]]);        // north hall wall
+    along(H - 34, null, -hallX, hallX, [[-61, -51], [51, 61]]);         // south hall wall
+    along(null, -hallX, -70, 70, [[-15, -5], [25, 35]]);                // west hall wall
+    along(null, hallX, -70, 70, [[-15, -5], [35, 45]]);                 // east hall wall
 
     // cross corridors between wings, every 15 cells
     for (let wing = 0; wing < WINGS - 1; wing++) {
@@ -234,20 +281,117 @@ export class PrisonSim {
     }
   }
 
+  /**
+   * Walled rooms in the outer ring. Each one is four walls with a single doorway —
+   * previously these were solid blocks, which is why the control rooms could not be
+   * entered and the master button could never be pressed.
+   */
   private addBlocks() {
-    const B = (x: number, z: number, w: number, d: number, y1 = 7) =>
+    this.room(-56, 84, 30, 22, 6, 'n', 'CONTROL A');
+    this.room(56, 84, 30, 22, 6, 'n', 'CONTROL B');
+    this.room(-72, -92, 40, 24, 6, 's', 'MEDICAL');
+    this.room(72, -92, 44, 24, 7, 's', 'CANTEEN');
+    this.room(95, 40, 22, 26, 6, 'w', 'ARMORY');
+    this.room(95, -10, 22, 26, 6, 'w', 'WORKSHOP');
+    this.room(-95, 30, 22, 24, 6, 'e', 'LAUNDRY');
+    this.room(-95, -10, 22, 24, 6, 'e', 'GUARD HOUSE');
+    // low bleachers along the north yard wall
+    const B = (x: number, z: number, w: number, d: number, y1 = 3) =>
       this.walls.push({ x, z, w, d, y0: 0, y1, kind: 'wall' });
-    // medical bay, north-west corner inside the perimeter
-    B(-78, -80, 48, 30, 6); B(-102, -65, 30, 26, 6);
-    // armory, south-east corner
-    B(80, 82, 40, 26, 6); B(104, 66, 24, 30, 6);
-    // mess hall, north-east
-    B(84, -82, 44, 28, 6);
-    // control rooms: small fortresses with one door each
-    B(-56, 76, 26, 20, 6);
-    B(56, -76, 26, 20, 6);
-    // yard bleachers / workshop stubs
-    B(-20, -100, 34, 8, 3); B(20, -100, 34, 8, 3);
+    B(-20, -100, 34, 8); B(20, -100, 34, 8);
+  }
+
+  /** Four walls, a doorway, and a name the HUD can point at. */
+  private room(cx: number, cz: number, w: number, d: number, h: number, door: 'n' | 's' | 'e' | 'w', name: string) {
+    const t = 1.1, hw = w / 2, hd = d / 2, gap = 6.4;
+    const W = (x: number, z: number, ww: number, dd: number) =>
+      this.walls.push({ x, z, w: ww, d: dd, y0: 0, y1: h, kind: 'wall' });
+    const horiz = (z: number, open: boolean) => {
+      if (!open) { W(cx, z, w + t, t); return; }
+      W(cx - (hw + gap / 2) / 2, z, hw - gap / 2, t);
+      W(cx + (hw + gap / 2) / 2, z, hw - gap / 2, t);
+    };
+    const vert = (x: number, open: boolean) => {
+      if (!open) { W(x, cz, t, d + t); return; }
+      W(x, cz - (hd + gap / 2) / 2, t, hd - gap / 2);
+      W(x, cz + (hd + gap / 2) / 2, t, hd - gap / 2);
+    };
+    horiz(cz - hd, door === 'n');
+    horiz(cz + hd, door === 's');
+    vert(cx - hw, door === 'w');
+    vert(cx + hw, door === 'e');
+    this.rooms.push({ name, x: cx, z: cz, w, d });
+  }
+
+  /** The furniture that makes each room read as the room it is. */
+  private addRooms() {
+    const P = (x: number, z: number, w: number, d: number, h: number, kind: PrisonProp['kind'], solid = true, y = 0) =>
+      this.props.push({ x, z, w, d, h, kind, solid, y });
+
+    /* ---- CANTEEN: eight tables, trays, a serving line and a kitchen ---- */
+    for (let i = 0; i < 4; i++) {
+      for (let j = 0; j < 2; j++) {
+        const tx = 72 - 14 + i * 9.2, tz = -92 - 6 + j * 12;
+        P(tx, tz, 4.6, 1.3, 0.78, 'table');
+        P(tx, tz - 1.1, 3.6, 0.5, 0.46, 'bench');
+        P(tx, tz + 1.1, 3.6, 0.5, 0.46, 'bench');
+        P(tx + 1.6, tz + 0.2, 0.5, 0.36, 0.08, 'tray', false, 0.8);
+      }
+    }
+    P(72, -101, 1.1, 1.1, 1.9, 'pot');           // serving urns
+    P(75, -101, 1.1, 1.1, 1.9, 'pot');
+    P(66, -101, 3.4, 1.0, 0.95, 'shelf');        // servery counter
+    P(89, -99, 1.0, 1.0, 2.1, 'fridge');
+    P(56, -86, 0.9, 0.9, 0.9, 'crate');
+    P(88, -85, 1.4, 0.9, 1.1, 'sink');
+
+    /* ---- ARMORY: weapon racks, lockers, a bolted cage ---- */
+    for (let i = 0; i < 5; i++) P(88 + i * 3.2, 30, 2.2, 0.7, 1.9, 'weaponrack');
+    P(98, 36, 0.9, 0.7, 1.9, 'rack');
+    P(103, 44, 1.2, 0.9, 2.0, 'cabinet');
+    P(99, 44, 1.2, 0.9, 2.0, 'cabinet');
+    P(90, 46, 2.6, 1.0, 1.0, 'crate');
+
+    /* ---- MEDICAL: beds, cabinets, a trolley ---- */
+    for (let i = 0; i < 3; i++) P(-84 + i * 7, -98, 2.2, 1.0, 0.62, 'stretcher');
+    P(-90, -84, 1.1, 0.8, 1.9, 'cabinet');
+    P(-82, -84, 1.1, 0.8, 1.9, 'cabinet');
+    P(-60, -96, 1.4, 0.9, 0.9, 'desk');
+
+    /* ---- WORKSHOP: benches, tool cabinets, a press ---- */
+    for (let i = 0; i < 3; i++) P(88 + i * 4, -18, 3.4, 1.1, 0.92, 'workbench');
+    P(103, -2, 1.2, 1.0, 2.0, 'cabinet');
+    P(88, -2, 1.6, 1.6, 1.6, 'tank');
+
+    /* ---- LAUNDRY: machine bank ---- */
+    for (let i = 0; i < 5; i++) P(-104 + i * 4.4, 24, 2.0, 1.1, 1.3, 'laundry');
+    P(-104, 38, 1.4, 1.0, 1.9, 'shelf');
+
+    /* ---- GUARD HOUSE: lockers, a ready bench, a coffee urn ---- */
+    for (let i = 0; i < 5; i++) P(-104 + i * 4.4, -18, 1.4, 0.9, 2.0, 'locker');
+    P(-95, -4, 4.0, 1.0, 0.5, 'bench');
+    P(-86, -16, 0.9, 0.9, 1.0, 'pot');
+
+    /* ---- CONTROL A / B: console banks, monitors, chairs ---- */
+    for (const b of [[-66, 88], [-56, 88], [-46, 88], [46, 88], [56, 88], [66, 88]]) {
+      P(b[0], b[1], 3.0, 1.2, 1.05, 'console');
+      for (let k = -1; k <= 1; k++) P(b[0] + k * 0.9, b[1] - 0.35, 0.8, 0.14, 0.62, 'monitor', false, 1.1);
+      P(b[0], b[1] - 1.9, 0.9, 0.9, 0.95, 'chair');
+    }
+    // wall monitor banks, the thing you look at while the handle is thrown
+    for (const [x, z] of [[-66, 94.2], [-56, 94.2], [-46, 94.2], [46, 94.2], [56, 94.2], [66, 94.2]] as [number, number][]) {
+      for (let k = 0; k < 3; k++) P(x - 1.2 + k * 1.2, z, 1.05, 0.16, 0.72, 'monitor', false, 2.2);
+    }
+
+    /* ---- ALARM HARDWARE: sirens on the walls, beacons over every door ---- */
+    for (const [x, z] of [[-72, -70], [72, -70], [-72, 70], [72, 70], [0, -70], [0, 70], [-108, 0], [108, 0], [0, -108], [0, 108]] as [number, number][]) {
+      P(x, z, 0.7, 0.4, 0.5, 'siren', false, 5.4);
+    }
+    // ventilation trunks along the hall ceiling: the prison breathes
+    for (let z = -60; z <= 60; z += 20) {
+      P(-80, z, 1.0, 3.0, 0.7, 'vent', false, 6.4);
+      P(80, z, 1.0, 3.0, 0.7, 'vent', false, 6.4);
+    }
   }
 
   private spawnGuards() {
@@ -257,6 +401,7 @@ export class PrisonSim {
         id: id++, x, z, ang: rnd(0, TAU), y: tower ? 9.5 : 0,
         hp: 150, maxHp: 150, state: 'patrol', patrol, node: 0,
         cool: rnd(0.4, 1.6), alertT: 0, tower, flash: 0,
+        vx: 0, vz: 0, vy: 0, tilt: 0, spin: 0, limb: 0, elite: false, room: '',
       });
     };
     // 4 per wing corridor, walking the length of the block
@@ -285,20 +430,48 @@ export class PrisonSim {
       [-40, -60], [40, 60], [56, -88], [-56, 88], [10, -100], [-10, 100]] as [number, number][]) {
       push(x, z, [{ x, z }, { x: x + 12, z: z + 6 }]);
     }
+    // control-room detachments: the rooms are held, not patrolled
+    const held: [string, number, number][] = [
+      ['CONTROL A', -62, 82], ['CONTROL A', -56, 86], ['CONTROL A', -50, 82], ['CONTROL A', -56, 78],
+      ['CONTROL B', 50, 82], ['CONTROL B', 56, 86], ['CONTROL B', 62, 78],
+    ];
+    for (const [room, x, z] of held) {
+      this.guards.push({
+        id: id++, x, z, ang: rnd(0, TAU), y: 0,
+        hp: 260, maxHp: 260, state: 'patrol',
+        patrol: [{ x: x - 3, z }, { x: x + 3, z }, { x, z: z + 3 }, { x, z: z - 3 }], node: 0,
+        cool: rnd(0.3, 0.9), alertT: 0, tower: false, flash: 0,
+        vx: 0, vz: 0, vy: 0, tilt: 0, spin: 0, limb: 0, elite: true, room,
+      });
+    }
     // eight tower marksmen
     for (const [x, z] of [[-106, -106], [106, -106], [-106, 106], [106, 106], [0, -106], [0, 106], [-106, 0], [106, 0]] as [number, number][]) {
       push(x, z, [{ x, z }], true);
     }
   }
 
+  /**
+   * Control rooms. The master release is not a button any more: it is a physical
+   * handle on a console, inside a guarded room full of monitors, and it is thrown
+   * with the mouse while you stand in front of it.
+   */
   private addControlRooms() {
-    this.buttons.push(
-      { id: 'open-all', label: 'CELL BLOCK MASTER', sub: 'RELEASE EVERY CELL IN THE COMPOUND', x: -56, z: 80, y: 1.1, kind: 'open-all', used: false, room: 'CONTROL A' },
-      { id: 'lights', label: 'LIGHTING GRID', sub: 'CUT THE HALL LIGHTS', x: -62, z: 80, y: 1.1, kind: 'lights', used: false, room: 'CONTROL A' },
-      { id: 'sally', label: 'SALLY PORT', sub: 'OPEN THE SOUTH GATE', x: 56, z: -80, y: 1.1, kind: 'sally', used: false, room: 'CONTROL B' },
-      { id: 'armory', label: 'ARMORY RACK', sub: 'RELEASE THE WEAPONS LOCKERS', x: 52, z: -80, y: 1.1, kind: 'armory', used: false, room: 'CONTROL B' },
-      { id: 'alarm', label: 'ALARM LOOP', sub: 'LOOP THE SIRENS AND SLOW RESPONSE', x: 60, z: -76, y: 1.1, kind: 'alarm', used: false, room: 'CONTROL B' },
-    );
+    const L = (
+      id: string, label: string, sub: string, room: string,
+      x: number, z: number, holdTime: number,
+    ) => this.levers.push({
+      id, label, sub, room, x, z, y: 1.22, baseX: x, baseZ: z + 1.1,
+      pulled: false, progress: 0, holdTime,
+    });
+    L('master', 'CELL BLOCK MASTER', 'THROW THE HANDLE TO OPEN EVERY CELL', 'CONTROL A', -56, 79.4, 3.6);
+    L('lights', 'LIGHTING GRID', 'CUT THE HALL LIGHTS', 'CONTROL A', -46, 79.4, 1.2);
+    L('sally', 'SALLY PORT', 'OPEN THE SOUTH GATE', 'CONTROL B', 56, 79.4, 2.0);
+    L('armory', 'ARMORY RACK', 'RELEASE THE WEAPONS LOCKERS', 'CONTROL B', 66, 79.4, 1.6);
+    L('alarm', 'ALARM LOOP', 'LOOP THE SIRENS AND SLOW RESPONSE', 'CONTROL B', 46, 79.4, 1.6);
+    // the consoles the handles are bolted to
+    for (const l of this.levers) {
+      this.props.push({ x: l.baseX, z: l.baseZ, y: 0, w: 2.6, d: 1.2, h: 1.05, kind: 'console', solid: true });
+    }
   }
 
   private addCellProps() {
@@ -444,9 +617,71 @@ export class PrisonSim {
     return null;
   }
 
-  get buttonNear(): PrisonButton | null {
-    for (const b of this.buttons) if (Math.hypot(b.x - this.px, b.z - this.pz) < 3.2) return b;
+  /** The lever the operative is close enough to put a hand on. */
+  get leverNear(): PrisonLever | null {
+    let best: PrisonLever | null = null; let bd = 3.6;
+    for (const l of this.levers) {
+      if (l.pulled) continue;
+      const d = Math.hypot(l.x - this.px, l.z - this.pz);
+      if (d < bd) { bd = d; best = l; }
+    }
+    return best;
+  }
+
+  /** True when the operative is inside one of the two control rooms. */
+  get inControlRoom(): string | null {
+    for (const r of this.rooms) {
+      if (!r.name.startsWith('CONTROL')) continue;
+      if (Math.abs(this.px - r.x) < r.w / 2 && Math.abs(this.pz - r.z) < r.d / 2) return r.name;
+    }
     return null;
+  }
+
+  /**
+   * Hold the handle. `held` comes from the mouse button while the crosshair is on the
+   * lever; the handle only travels while the operative is standing at it.
+   */
+  pullLever(id: string, dt: number, held: boolean): { lever: PrisonLever | null; done: boolean } {
+    const l = this.levers.find((q) => q.id === id);
+    if (!l || l.pulled) return { lever: l ?? null, done: false };
+    if (!held || Math.hypot(l.x - this.px, l.z - this.pz) > 3.8) {
+      l.progress = Math.max(0, l.progress - dt * 0.9);
+      return { lever: l, done: false };
+    }
+    l.progress = Math.min(1, l.progress + dt / l.holdTime);
+    if (Math.random() < dt * 6) this.events.push({ kind: 'hit', x: l.x, z: l.z, y: l.y });
+    if (l.progress < 1) {
+      this.message = `${l.label} … ${Math.round(l.progress * 100)}%`;
+      this.messageT = 0.4;
+      return { lever: l, done: false };
+    }
+    l.pulled = true;
+    this.applyLever(l);
+    return { lever: l, done: true };
+  }
+
+  private applyLever(l: PrisonLever) {
+    if (l.id === 'master') {
+      this.openAll();
+      this.message = 'CELL BLOCK MASTER THROWN — EVERY DOOR IN THE COMPOUND IS OPEN';
+    } else if (l.id === 'sally') {
+      this.sallyOpen = true;
+      for (const leaf of this.gateLeaf) leaf.open = true;
+      this.events.push({ kind: 'sally', x: l.x, z: l.z, y: 1 });
+      this.message = 'SALLY PORT OPEN — GET TO THE SOUTH GATE';
+    } else if (l.id === 'lights') {
+      this.lightsOut = !this.lightsOut;
+      this.message = this.lightsOut ? 'LIGHTING GRID DOWN' : 'LIGHTING GRID RESTORED';
+    } else if (l.id === 'armory') {
+      this.reserve += 60; this.armor = Math.max(this.armor, 60);
+      for (const n of this.inmates) if (n.state === 'free' || n.state === 'fight') n.hp = Math.min(n.maxHp, n.hp + 20);
+      this.events.push({ kind: 'armory', x: l.x, z: l.z, y: 1 });
+      this.message = 'ARMORY RACK OPEN — AMMUNITION AND PLATES FOR EVERYONE';
+    } else if (l.id === 'alarm') {
+      this.alarmOn = !this.alarmOn;
+      this.message = this.alarmOn ? 'ALARM LOOPED — RESPONSE IS STUCK IN THE SALLY' : 'ALARM LOOP RESTORED';
+    }
+    this.messageT = 5;
   }
 
   /** Hitscan pistol round. Returns what it hit, for the renderer's tracers. */
@@ -509,13 +744,20 @@ export class PrisonSim {
       if (g) {
         g.hp -= 46; g.flash = 0.12; g.state = 'engage'; g.alertT = 12;
         this.stats.hits++;
-        if (g.hp <= 0) { g.state = 'down'; this.stats.guardsDown++; this.events.push({ kind: 'down', x: g.x, z: g.z, y: 1 }); }
+        if (g.hp <= 0) {
+          g.state = 'down'; this.stats.guardsDown++;
+          g.vx = dx * 3.2; g.vz = dz * 3.2; g.vy = 2.6; g.spin = rnd(-7, 7);
+          this.events.push({ kind: 'down', x: g.x, z: g.z, y: 1 });
+        }
       }
     } else if (target?.kind === 'inmate') {
       const n = this.inmates[target.ref];
       if (n) {
         n.hp -= 34; n.flash = 0.12;
-        if (n.hp <= 0) { n.state = 'down'; this.stats.inmatesDown++; }
+        if (n.hp <= 0) {
+          n.state = 'down'; this.stats.inmatesDown++;
+          n.vx = dx * 3.0; n.vz = dz * 3.0; n.vy = 2.4; n.spin = rnd(-6, 6);
+        }
       }
     } else if (target?.kind === 'lock') {
       const c = this.cells[target.ref];
@@ -548,20 +790,13 @@ export class PrisonSim {
     this.alarm = 1;
   }
 
-  useButton() {
-    const b = this.buttonNear;
-    if (!b) return null;
-    b.used = true;
-    if (b.kind === 'open-all') { this.openAll(); this.message = 'CELL BLOCK MASTER ENGAGED — EVERY DOOR IS OPEN'; }
-    else if (b.kind === 'sally') { this.sallyOpen = true; for (const l of this.gateLeaf) l.open = true; this.events.push({ kind: 'sally', x: b.x, z: b.z, y: 1 }); this.message = 'SALLY PORT OPEN — GET TO THE SOUTH GATE'; }
-    else if (b.kind === 'lights') { this.lightsOut = !this.lightsOut; this.message = this.lightsOut ? 'LIGHTING GRID DOWN' : 'LIGHTING GRID RESTORED'; }
-    else if (b.kind === 'armory') {
-      this.reserve += 60; this.armor = Math.max(this.armor, 60);
-      for (const n of this.inmates) if (n.state === 'free' || n.state === 'fight') n.hp = Math.min(n.maxHp, n.hp + 20);
-      this.message = 'ARMORY RACK OPEN — AMMUNITION AND PLATES FOR EVERYONE';
-    } else if (b.kind === 'alarm') { this.alarmOn = !this.alarmOn; this.message = this.alarmOn ? 'ALARM LOOPED — RESPONSE IS STUCK IN THE SALLY' : 'ALARM LOOP RESTORED'; }
-    this.messageT = 4.5;
-    return b;
+  /** Kept for the keyboard fallback: throws the nearest non-master lever. */
+  useButton(): PrisonLever | null {
+    const l = this.leverNear;
+    if (!l || l.id === 'master') return null;
+    l.pulled = true;
+    this.applyLever(l);
+    return l;
   }
 
   /* ------------------------------------------------------------------ */
@@ -598,13 +833,13 @@ export class PrisonSim {
 
     // ---- guards ----
     for (const g of this.guards) {
-      if (g.state === 'down') continue;
+      if (g.state === 'down') { this.physBody(g, dt); continue; }
       g.flash = Math.max(0, g.flash - dt);
       g.cool = Math.max(0, g.cool - dt);
       const dToP = Math.hypot(this.px - g.x, this.pz - g.z);
       const sees = dToP < (g.tower ? 95 : 46) && this.lineOfSight(g.x, g.z, this.px, this.pz);
       if (sees && this.alarmOn) { g.state = 'alert'; g.alertT = Math.max(g.alertT, 6); }
-      if (sees && dToP < 34) { g.state = 'engage'; g.alertT = Math.max(g.alertT, 10); }
+      if (sees && dToP < (g.elite ? 58 : 34)) { g.state = 'engage'; g.alertT = Math.max(g.alertT, g.elite ? 16 : 10); }
 
       // a freed inmate next to a guard is a fight, and guards shoot them too
       let foe: PrisonInmate | null = null; let fd = 30;
@@ -621,7 +856,7 @@ export class PrisonSim {
         g.ang = Math.atan2(tz - g.z, tx - g.x);
         const engageFoe = !!foe && (fd < 9 || !sees);
         if (g.cool <= 0) {
-          g.cool = g.tower ? 1.5 : 0.95;
+          g.cool = g.tower ? 1.5 : g.elite ? 0.6 : 0.95;
           if (engageFoe && foe) { foe.hp -= 18; foe.flash = 0.1; if (foe.hp <= 0) { foe.state = 'down'; this.stats.inmatesDown++; } }
           else {
             this.events.push({ kind: 'shot', x: g.x, z: g.z, y: g.y + 1.1 });
@@ -636,15 +871,17 @@ export class PrisonSim {
         const d = Math.hypot(dx, dz);
         if (d < 1.2) g.node++;
         else {
-          const sp = (this.alarm > 0.5 ? 2.6 : 1.5) * dt;
+          const sp = (this.alarm > 0.5 ? 2.6 : 1.5) * (g.elite ? 1.3 : 1) * dt;
           g.x += (dx / d) * sp; g.z += (dz / d) * sp;
           g.ang = Math.atan2(dz, dx);
+          g.limb += dt * 7.5;
         }
       }
     }
 
     // ---- inmates ----
     for (const n of this.inmates) {
+      if (n.state === 'down') { this.physBody(n, dt); n.flash = Math.max(0, n.flash - dt); continue; }
       n.flash = Math.max(0, n.flash - dt);
       if (n.state === 'free') {
         // look for the nearest standing guard
@@ -661,16 +898,16 @@ export class PrisonSim {
         if (!g || g.state === 'down') { n.state = 'free'; continue; }
         const dx = g.x - n.x, dz = g.z - n.z, d = Math.hypot(dx, dz) || 1;
         n.ang = Math.atan2(dz, dx);
-        if (d > 1.3) { n.x += (dx / d) * 3.1 * dt; n.z += (dz / d) * 3.1 * dt; }
+        if (d > 1.3) { n.x += (dx / d) * 3.1 * dt; n.z += (dz / d) * 3.1 * dt; n.limb += dt * 8.4; }
         else {
           g.hp -= 26 * dt;
           if (g.hp <= 0) {
             g.state = 'down'; this.stats.guardsDown++;
+            g.vx = -(dx / d) * 2.2; g.vz = -(dz / d) * 2.2; g.vy = 2.0; g.spin = rnd(-5, 5);
             this.events.push({ kind: 'down', x: g.x, z: g.z, y: 1 });
           }
         }
       }
-      if (n.state === 'down' && Math.random() < dt * 0.02) n.hp = Math.min(n.maxHp, n.hp + 1);
     }
 
     // ---- pickups ----
@@ -692,6 +929,34 @@ export class PrisonSim {
       this.events.push({ kind: 'exit', x: this.px, z: this.pz, y: 1 });
     }
     this.alarm = clamp(this.alarm - dt * 0.06, 0, 1);
+    // The siren follows the alarm: it winds up when something is wrong and dies away.
+    const want = this.alarmOn ? 1 : this.alarm > 0.35 ? 0.65 : 0;
+    this.siren += (want - this.siren) * Math.min(1, dt * 2.2);
+  }
+
+  /**
+   * A body that falls keeps falling. Downed guards and inmates are integrated here:
+   * gravity, a bounce on the concrete, friction, and a tilt that ends flat on the floor.
+   */
+  private physBody(o: { x: number; z: number; y: number; vx: number; vz: number; vy: number; tilt: number; spin: number }, dt: number) {
+    o.vy -= 19 * dt;
+    o.y = Math.max(0, o.y + o.vy * dt);
+    if (o.y <= 0 && o.vy < 0) {
+      o.y = 0;
+      o.vy = Math.abs(o.vy) > 1.6 ? -o.vy * 0.26 : 0;
+      o.vx *= 0.72; o.vz *= 0.72;
+    }
+    const nx = o.x + o.vx * dt, nz = o.z + o.vz * dt;
+    if (!this.staticBlocked(nx, nz, 0.4)) { o.x = nx; o.z = nz; }
+    else { o.vx *= -0.35; o.vz *= -0.35; }
+    const damp = Math.pow(0.08, dt);
+    o.vx *= damp; o.vz *= damp;
+    o.tilt = clamp(o.tilt + o.spin * dt, -1.62, 1.62);
+    o.spin *= Math.pow(0.25, dt);
+    if (o.y === 0 && Math.abs(o.spin) < 0.8) {
+      const target = (o.tilt >= 0 ? 1 : -1) * 1.55;
+      o.tilt += (target - o.tilt) * Math.min(1, dt * 5.5);
+    }
   }
 
   damagePlayer(dmg: number) {

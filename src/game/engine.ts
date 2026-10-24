@@ -936,6 +936,35 @@ export class Game {
       this.enemies.push(e);
     });
 
+    // CITY POLICE: custody patrols walking the streets of the theatre, not only the
+    // island. They hold a beat around each installation and the fortress ring road, and
+    // any one of them will put the operative in cuffs and send him to THE CAGE.
+    const policeRing = (cx2: number, cy2: number, r: number): Point[] => [
+      { x: cx2 + r, y: cy2 }, { x: cx2 + r * 0.6, y: cy2 + r * 0.8 },
+      { x: cx2, y: cy2 + r }, { x: cx2 - r * 0.7, y: cy2 + r * 0.7 },
+      { x: cx2 - r, y: cy2 }, { x: cx2 - r * 0.6, y: cy2 - r * 0.8 },
+      { x: cx2, y: cy2 - r }, { x: cx2 + r * 0.7, y: cy2 - r * 0.7 },
+    ];
+    const beats: Point[][] = [];
+    for (const poi of this.pois.slice(0, 7)) beats.push(policeRing(poi.x, poi.y, Math.min(420, Math.max(240, poi.r * 0.8))));
+    beats.push(policeRing(HQ.cx, HQ.cy, 1050));
+    beats.push(policeRing(AIRFIELD.x, AIRFIELD.y, 620));
+    beats.forEach((route, i) => {
+      const pts = route.map((q) => this.infantryRoutesReadyPoint(q.x, q.y));
+      const id = `police-${i}`;
+      this.patrolTeams.push({
+        id, x: pts[0].x, y: pts[0].y, angle: 0, node: 1, wait: i * 0.8 + 1,
+        points: pts, kind: 'road', columns: 2, spacing: 32, speed: 64,
+      });
+      for (let slot = 0; slot < 2; slot++) {
+        const stand = this.infantryRoutesReadyPoint(pts[0].x + slot * 32, pts[0].y + 24);
+        const e = this.makeEnemy('custodian', stand.x, stand.y, -5000000 - i * 4 - slot, slot);
+        e.spawnT = 0; e.garrison = true; e.patrolTeam = id; e.patrolSlot = slot; e.leader = slot === 0;
+        e.homeX = stand.x; e.homeY = stand.y;
+        this.enemies.push(e);
+      }
+    });
+
     // Every installation has one fixed heavy machine-gun emplacement.
     const emplacementSites: { id: string; x: number; y: number; r: number }[] = [
       ...this.pois.filter(p => !p.secret).map(p => ({ id: p.id, x: p.x, y: p.y, r: Math.min(260, p.r * 0.42) })),
@@ -2367,6 +2396,9 @@ export class Game {
   private renderArrest(ctx: CanvasRenderingContext2D) {
     const W = this.w, H = this.h;
     const p = clamp(1 - this.arrestT / this.arrestDuration, 0, 1);
+    // Stage 0 is the street: an officer has your arms behind your back. Only after that
+    // does the frame cut to the inside of the transport.
+    if (this.arrestStage === 0) { this.renderCuffed(ctx, p); return; }
     const shake = Math.sin(this.arrestT * 31) * 3 + Math.sin(this.arrestT * 57) * 2;
 
     ctx.save();
@@ -2454,6 +2486,182 @@ export class Game {
     ctx.fillStyle = '#9fc2ff'; ctx.fillRect(W * 0.25, H * 0.9, W * 0.5 * p, 5);
     ctx.textAlign = 'left';
     ctx.restore();
+  }
+
+  /** The half-second that matters: cuffs on the street, before the van. */
+  private renderCuffed(ctx: CanvasRenderingContext2D, p: number) {
+    const W = this.w, H = this.h;
+    const t = this.simulationTime;
+
+    // ---- night street, from eye level, seen over an officer's shoulder ----
+    const sky = ctx.createLinearGradient(0, 0, 0, H * 0.66);
+    sky.addColorStop(0, '#060a0e');
+    sky.addColorStop(0.6, '#0f1a21');
+    sky.addColorStop(1, '#1b262c');
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H * 0.66);
+    // distant blocks
+    ctx.fillStyle = '#0c141a';
+    for (let i = 0; i < 9; i++) {
+      const bw = 60 + ((i * 53) % 90), bh = 70 + ((i * 97) % 150);
+      ctx.fillRect(i * (W / 9) - 10, H * 0.66 - bh, bw, bh);
+      ctx.fillStyle = 'rgba(255,214,150,0.20)';
+      for (let wy = 0; wy < bh - 24; wy += 22) {
+        for (let wx = 8; wx < bw - 14; wx += 20) if ((wx + wy + i) % 3) ctx.fillRect(i * (W / 9) + wx, H * 0.66 - bh + 12 + wy, 6, 9);
+      }
+      ctx.fillStyle = '#0c141a';
+    }
+    // tarmac
+    const road = ctx.createLinearGradient(0, H * 0.62, 0, H);
+    road.addColorStop(0, '#121a1e');
+    road.addColorStop(1, '#05080a');
+    ctx.fillStyle = road; ctx.fillRect(0, H * 0.62, W, H * 0.38);
+    // wet reflections of the two light bars
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    const refl = ctx.createLinearGradient(0, H * 0.64, 0, H);
+    refl.addColorStop(0, 'rgba(90,150,255,0.30)');
+    refl.addColorStop(1, 'rgba(90,150,255,0)');
+    ctx.fillStyle = refl; ctx.fillRect(W * 0.06, H * 0.64, W * 0.30, H * 0.36);
+    const refl2 = ctx.createLinearGradient(0, H * 0.64, 0, H);
+    refl2.addColorStop(0, 'rgba(255,80,80,0.28)');
+    refl2.addColorStop(1, 'rgba(255,80,80,0)');
+    ctx.fillStyle = refl2; ctx.fillRect(W * 0.64, H * 0.64, W * 0.30, H * 0.36);
+    ctx.restore();
+    // lane paint
+    ctx.strokeStyle = 'rgba(226,232,216,0.16)'; ctx.lineWidth = 6;
+    ctx.setLineDash([62, 48]);
+    ctx.beginPath(); ctx.moveTo(0, H * 0.90); ctx.lineTo(W, H * 0.90); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // ---- the transport van behind, with its light bar going ----
+    const vx = W * 0.60, vy = H * 0.44, vw = W * 0.42, vh = H * 0.26;
+    ctx.fillStyle = '#131c22'; ctx.fillRect(vx, vy, vw, vh + 40);
+    ctx.fillStyle = '#1c2932'; ctx.fillRect(vx, vy, vw, 26);
+    ctx.strokeStyle = 'rgba(150,180,200,0.20)'; ctx.lineWidth = 2; ctx.strokeRect(vx, vy, vw, vh + 40);
+    // barred rear window
+    ctx.fillStyle = '#080d10'; ctx.fillRect(vx + vw * 0.12, vy + 44, vw * 0.34, vh * 0.42);
+    ctx.strokeStyle = '#5b6a72'; ctx.lineWidth = 3;
+    for (let i = 0; i <= 4; i++) {
+      const bx = vx + vw * 0.12 + (vw * 0.34 / 4) * i;
+      ctx.beginPath(); ctx.moveTo(bx, vy + 44); ctx.lineTo(bx, vy + 44 + vh * 0.42); ctx.stroke();
+    }
+    // light bar: alternating blue / red, hard flashes
+    const flash = Math.floor(t * 6) % 2 === 0;
+    for (let i = 0; i < 2; i++) {
+      const on = (i === 0) === flash;
+      const lx = vx + vw * (0.34 + i * 0.30);
+      const col = i === 0 ? '90,150,255' : '255,70,70';
+      if (on) {
+        const gl = ctx.createRadialGradient(lx + 20, vy - 6, 2, lx + 20, vy - 6, 160);
+        gl.addColorStop(0, `rgba(${col},0.55)`);
+        gl.addColorStop(1, `rgba(${col},0)`);
+        ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(lx + 20, vy - 6, 160, 0, TAU); ctx.fill();
+      }
+      ctx.fillStyle = on ? `rgba(${col},0.95)` : `rgba(${col},0.18)`;
+      ctx.fillRect(lx, vy - 12, 40, 10);
+    }
+
+    // ---- the officer who has you: shoulders, helmet, visor, one hand on your arm ----
+    const ox = W * 0.40 + Math.sin(t * 1.9) * 5;
+    const shoulderY = H * 0.56;
+    // torso
+    ctx.fillStyle = '#16232d';
+    ctx.beginPath();
+    ctx.moveTo(ox - W * 0.145, H + 20);
+    ctx.lineTo(ox - W * 0.115, shoulderY + 36);
+    ctx.quadraticCurveTo(ox - W * 0.085, shoulderY - 8, ox - W * 0.042, shoulderY - 20);
+    ctx.lineTo(ox + W * 0.042, shoulderY - 20);
+    ctx.quadraticCurveTo(ox + W * 0.085, shoulderY - 8, ox + W * 0.115, shoulderY + 36);
+    ctx.lineTo(ox + W * 0.145, H + 20);
+    ctx.closePath(); ctx.fill();
+    // body armour plate + shoulder flash
+    ctx.fillStyle = '#1e2f3d';
+    ctx.beginPath();
+    ctx.moveTo(ox - W * 0.065, shoulderY + 6);
+    ctx.lineTo(ox + W * 0.065, shoulderY + 6);
+    ctx.lineTo(ox + W * 0.052, shoulderY + 170);
+    ctx.lineTo(ox - W * 0.052, shoulderY + 170);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,170,210,0.22)'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = 'rgba(200,60,60,0.65)';
+    ctx.fillRect(ox + W * 0.09, shoulderY + 34, 34, 11);
+    // neck + head + helmet
+    ctx.fillStyle = '#8e6a52';
+    ctx.fillRect(ox - 13, shoulderY - 52, 26, 26);
+    ctx.fillStyle = '#0d1620';
+    ctx.beginPath(); ctx.arc(ox, shoulderY - 78, 34, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#26343f';
+    ctx.beginPath(); ctx.arc(ox, shoulderY - 84, 36, Math.PI, TAU); ctx.fill();
+    ctx.fillRect(ox - 37, shoulderY - 86, 74, 9);
+    // visor: cold blue, catches the bar light
+    const vis = ctx.createLinearGradient(ox - 26, 0, ox + 26, 0);
+    vis.addColorStop(0, 'rgba(90,150,210,0.9)');
+    vis.addColorStop(0.5, 'rgba(150,205,245,0.95)');
+    vis.addColorStop(1, 'rgba(60,105,150,0.9)');
+    ctx.fillStyle = vis;
+    ctx.fillRect(ox - 26, shoulderY - 88, 52, 11);
+    // the arm reaching for your cuffs
+    ctx.strokeStyle = '#16232d'; ctx.lineWidth = 34; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(ox + W * 0.10, shoulderY + 54);
+    ctx.quadraticCurveTo(ox + W * 0.16, shoulderY + 150, W * 0.52, H * 0.83);
+    ctx.stroke();
+    ctx.fillStyle = '#8e6a52';
+    ctx.beginPath(); ctx.arc(W * 0.52, H * 0.83, 20, 0, TAU); ctx.fill();
+
+    // ---- the partner, further back and out of focus ----
+    const px2 = W * 0.16;
+    ctx.fillStyle = '#101a22';
+    ctx.beginPath();
+    ctx.moveTo(px2 - W * 0.06, H + 20);
+    ctx.lineTo(px2 - W * 0.045, H * 0.62);
+    ctx.quadraticCurveTo(px2, H * 0.52, px2 + W * 0.045, H * 0.62);
+    ctx.lineTo(px2 + W * 0.06, H + 20);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.arc(px2, H * 0.575, 30, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(120,170,210,0.35)';
+    ctx.fillRect(px2 - 22, H * 0.567, 44, 8);
+
+    // ---- rain, in front of everything ----
+    ctx.strokeStyle = 'rgba(196,222,238,0.20)'; ctx.lineWidth = 2;
+    for (let i = 0; i < 110; i++) {
+      const x = (i * 149 + t * 700) % W;
+      const y = (i * 233 + t * 1500) % H;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 7, y + 30); ctx.stroke();
+    }
+
+    // ---- your cuffed wrists, shoved into frame ----
+    const shake = Math.sin(t * 24) * 4;
+    ctx.save();
+    ctx.translate(W * 0.5 + shake, H * 0.86);
+    ctx.scale(1.5, 1.5);
+    // forearms
+    ctx.strokeStyle = '#3d2a20'; ctx.lineWidth = 30; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-150, 90); ctx.lineTo(-46, 6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(150, 90); ctx.lineTo(46, 6); ctx.stroke();
+    // hands
+    ctx.fillStyle = '#a67c5e';
+    ctx.beginPath(); ctx.ellipse(-52, 0, 34, 27, -0.2, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(52, 0, 34, 27, 0.2, 0, TAU); ctx.fill();
+    // cuffs
+    ctx.strokeStyle = '#c3d0d8'; ctx.lineWidth = 11;
+    ctx.beginPath(); ctx.ellipse(-52, 0, 30, 24, -0.15, 0.2, Math.PI * 1.9); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(52, 0, 30, 24, 0.15, -Math.PI * 0.9, Math.PI * 0.8); ctx.stroke();
+    ctx.strokeStyle = '#7f8d96'; ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.moveTo(-22, -2); ctx.lineTo(22, -2); ctx.stroke();
+    ctx.restore();
+
+    // ---- caption ----
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#e9f6f6';
+    ctx.font = '900 40px ui-monospace, monospace';
+    ctx.fillText('C U F F E D', W / 2, H * 0.115);
+    ctx.font = '600 13px ui-monospace, monospace';
+    ctx.fillStyle = '#9fc2d4';
+    ctx.fillText('HYDRA CUSTODY · THE STREET IS OVER · TRANSPORT IS WAITING', W / 2, H * 0.115 + 26);
+    ctx.fillStyle = '#0d1a1e'; ctx.fillRect(W * 0.25, H * 0.955, W * 0.5, 5);
+    ctx.fillStyle = '#9fc2ff'; ctx.fillRect(W * 0.25, H * 0.955, W * 0.5 * p, 5);
+    ctx.textAlign = 'left';
   }
 
   /** Step through the sally port on the island, or wake up here after an arrest. */
@@ -4837,6 +5045,19 @@ export class Game {
         } else if (e.type === 'turret') { gx = e.homeX; gy = e.homeY; sp = 0; }
         else if (dist < 700 && dHome < 900) { gx = ppx; gy = ppy; }
         else { gx = e.homeX; gy = e.homeY; }
+
+        // Custody officers are not soldiers: they close the distance and put hands on
+        // you. A street beat cop leaves his route the moment he has eyes on the operative.
+        if (e.type === 'custodian' && !e.policePost) {
+          const seesPlayer = dist < 640 && this.hasLine(e.x, e.y, this.px, this.py);
+          if (seesPlayer) {
+            e.alert = true;
+            gx = ppx; gy = ppy; sp = Math.max(sp, def.speed * 1.55);
+            e.ang = lerpAngle(e.ang, Math.atan2(this.py - e.y, this.px - e.x), 1 - Math.exp(-8 * dt));
+          } else if (dist > 900 && !e.policePost) {
+            e.alert = false;
+          }
+        }
       } else if (squad) {
         const mates = this.squadMembers.get(squad.id) || NO_ENEMIES;
         const leader = mates.find((m) => m.leader) || mates[0];
@@ -5015,7 +5236,7 @@ export class Game {
 
       // Custody officers do not shoot: they walk you down and cuff you.
       if (e.type === 'custodian' && !this.piloting && !this.flyingPlane && !this.drivingVan
-          && !this.playerTank && dist < def.r + 17 && this.status === 'playing') {
+          && !this.playerTank && dist < def.r + 26 && this.status === 'playing') {
         // A dash or the AEGIS shield still beats a pair of handcuffs.
         // The gate detail only steps in once the operative is past the sally port; on the
         // bridge and the forecourt they let him walk up to the door.
