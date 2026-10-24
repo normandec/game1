@@ -5,8 +5,11 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import {
   PrisonSim, CELL_D, CELL_W, CELL_H, CORRIDOR_HALF, WING_ROWS, wingZ, type PrisonStats,
 } from '../game/prison';
+import { PrisonAudio } from '../game/prisonAudio';
 
 export type PrisonMode = 'arrest' | 'visit';
+
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 interface Props {
   mode: PrisonMode;
   onExit: (stats: PrisonStats, escaped: boolean) => void;
@@ -18,13 +21,18 @@ interface Screen {
   cells: number; free: number; guards: number; sally: boolean; lights: boolean;
   compass: { label: string; angle: number; dist: number }[];
   stats: PrisonStats; flashlight: boolean;
+  weapon: string;
+  cuffed: number;
+  hatchNear: boolean;
+  hatchProgress: number;
+  muted: boolean;
 }
 
 const EMPTY: Screen = {
   hp: 100, armor: 0, mag: 12, magSize: 12, reserve: 48, reloading: false, alarm: 0,
   prompt: '', message: '', messageT: 0, cells: 0, free: 0, guards: 0, sally: false,
   lights: false, compass: [], stats: { freed: 0, guardsDown: 0, inmatesDown: 0, shots: 0, hits: 0, looted: 0 },
-  flashlight: false,
+  flashlight: false, weapon: 'M9 SIDEARM', cuffed: 0, hatchNear: false, hatchProgress: 0, muted: false,
 };
 
 export default function Prison3D({ mode, onExit }: Props) {
@@ -44,6 +52,8 @@ export default function Prison3D({ mode, onExit }: Props) {
     const sim = new PrisonSim(11);
     simRef.current = sim;
     sim.wake();
+    // Sound is synthesised, not loaded: no assets in a single-file build.
+    const audio = new PrisonAudio();
 
     const W = hostEl.clientWidth || 1280;
     const H = hostEl.clientHeight || 720;
@@ -353,24 +363,36 @@ export default function Prison3D({ mode, onExit }: Props) {
     if (gateMesh) scene.add(gateMesh);
 
     const groups: Record<string, THREE.BufferGeometry[]> = {
-      bed: [], metal: [], wood: [], lamp: [], screen: [], siren: [], cloth: [], stone: [], bench: [], camera: [],
+      bed: [], metal: [], wood: [], screen: [], siren: [], cloth: [], stone: [], bench: [], camera: [],
+      mattress: [], celllamp: [], steel: [], red: [], board: [],
     };
     for (const p of sim.props) {
-      const key = p.kind === 'bed' ? 'bed'
-        : p.kind === 'lamp' ? 'lamp'
+      const key =
+        p.kind === 'bed' ? 'bed'
+        : p.kind === 'mattress' ? 'mattress'
+        : p.kind === 'celllamp' ? 'celllamp'
         : p.kind === 'monitor' ? 'screen'
         : p.kind === 'siren' ? 'siren'
         : p.kind === 'bench' ? 'bench'
         : p.kind === 'camera' ? 'camera'
+        : (p.kind === 'stove' || p.kind === 'cooker' || p.kind === 'sink' || p.kind === 'toilet' || p.kind === 'fridge' || p.kind === 'locker' || p.kind === 'bin') ? 'steel'
+        : p.kind === 'board' ? 'board'
+        : p.kind === 'extinguisher' ? 'red'
         : (p.kind === 'table' || p.kind === 'desk' || p.kind === 'crate' || p.kind === 'workbench' || p.kind === 'shelf') ? 'wood'
         : (p.kind === 'stretcher' || p.kind === 'laundry' || p.kind === 'chair') ? 'cloth'
         : p.kind === 'pot' || p.kind === 'tank' ? 'stone'
         : 'metal';
-      if (key === 'lamp' || key === 'camera') { continue; }   // built with their own fixtures
+      if (key === 'camera') continue;                        // built with their own fixtures
       groups[key].push(box(p.w, p.h, p.d, p.x, p.y + p.h / 2, p.z));
     }
     const propMats: Record<string, THREE.Material> = {
-      bed: matBed, metal: matMetal, wood: matWood, lamp: matLamp, bench: matBench,
+      bed: matBed, metal: matMetal, wood: matWood, bench: matBench,
+      mattress: new THREE.MeshStandardMaterial({ color: 0xa8a89a, roughness: 0.97 }),
+      // the cell lamp: a warm bulb behind a wire guard, the only light after lock-up
+      celllamp: new THREE.MeshBasicMaterial({ color: 0xffd9a0 }),
+      steel: new THREE.MeshStandardMaterial({ color: 0x7d868c, roughness: 0.42, metalness: 0.7 }),
+      red: new THREE.MeshStandardMaterial({ color: 0x9c1f1a, roughness: 0.55, metalness: 0.3 }),
+      board: new THREE.MeshStandardMaterial({ color: 0x6a5740, roughness: 0.92 }),
       screen: new THREE.MeshBasicMaterial({ color: 0x3fd9b0 }),
       siren: new THREE.MeshBasicMaterial({ color: 0xd8323a }),
       cloth: new THREE.MeshStandardMaterial({ color: 0x46545e, roughness: 0.95 }),
@@ -479,6 +501,7 @@ export default function Prison3D({ mode, onExit }: Props) {
     const lampHousing: THREE.BufferGeometry[] = [];
     const lampTubes: THREE.BufferGeometry[] = [];
     const lampSpots: THREE.Vector3[] = [];
+    for (const p of sim.props) if (p.kind === 'celllamp') lampSpots.push(new THREE.Vector3(p.x, p.y - 0.1, p.z));
     for (const p of lampProps) {
       lampHousing.push(box(1.72, 0.14, 0.46, p.x, p.y + 0.16, p.z));
       for (const sgn of [-1, 1]) {
@@ -718,52 +741,204 @@ export default function Prison3D({ mode, onExit }: Props) {
       leverHandles.push({ id: l.id, handle: pivot, lamp });
     }
 
+    /* ---------------- loot on the floor: guns, crates, kit ---------------- */
+    type LootView = { take: () => boolean; group: THREE.Group };
+    const matCrateOlive = new THREE.MeshStandardMaterial({ color: 0x4d5238, roughness: 0.85 });
+    const matCrateSteel = new THREE.MeshStandardMaterial({ color: 0x3c4448, roughness: 0.5, metalness: 0.6 });
+    const matGunBody = new THREE.MeshStandardMaterial({ color: 0x23282c, roughness: 0.45, metalness: 0.7 });
+    const matGunWood = new THREE.MeshStandardMaterial({ color: 0x4a3524, roughness: 0.8 });
+    const matMed = new THREE.MeshStandardMaterial({ color: 0xd8d6cc, roughness: 0.7 });
+    const matArmor = new THREE.MeshStandardMaterial({ color: 0x3f4a55, roughness: 0.5, metalness: 0.45 });
+    const matKey = new THREE.MeshStandardMaterial({ color: 0xc8a93a, roughness: 0.35, metalness: 0.85, emissive: 0x1e1700 });
+    const matRed = new THREE.MeshStandardMaterial({ color: 0xb8241d, roughness: 0.6 });
+
+    /** A gun on a rack: the profile of the weapon says which one it is. */
+    const buildGun = (kind: string, y: number) => {
+      const grp = new THREE.Group();
+      const add = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, yy: number, z: number, rz = 0) => {
+        const m = new THREE.Mesh(geo, mat);
+        m.position.set(x, y + yy, z);
+        m.rotation.z = rz;
+        grp.add(m);
+      };
+      if (kind === 'carbine') {
+        add(new THREE.BoxGeometry(0.86, 0.07, 0.06), matGunBody, 0, 0.02, 0);
+        add(new THREE.BoxGeometry(0.2, 0.1, 0.05), matGunWood, -0.42, 0, 0);
+        add(new THREE.BoxGeometry(0.06, 0.2, 0.05), matGunBody, 0.05, -0.12, 0);
+        add(new THREE.BoxGeometry(0.24, 0.09, 0.05), matGunBody, -0.02, -0.02, 0);
+        add(new THREE.CylinderGeometry(0.018, 0.018, 0.34, 8), matGunBody, 0.62, 0.02, 0, Math.PI / 2);
+      } else if (kind === 'shotgun') {
+        add(new THREE.BoxGeometry(0.94, 0.07, 0.06), matGunBody, 0, 0.02, 0);
+        add(new THREE.BoxGeometry(0.24, 0.08, 0.06), matGunWood, -0.44, -0.01, 0);
+        add(new THREE.BoxGeometry(0.3, 0.07, 0.06), matGunWood, 0.1, -0.05, 0);
+        add(new THREE.CylinderGeometry(0.024, 0.024, 0.5, 8), matGunBody, 0.5, 0.05, 0, Math.PI / 2);
+      } else {
+        add(new THREE.BoxGeometry(0.5, 0.08, 0.06), matGunBody, 0, 0.02, 0);
+        add(new THREE.BoxGeometry(0.06, 0.22, 0.05), matGunBody, -0.08, -0.13, 0);
+        add(new THREE.BoxGeometry(0.2, 0.06, 0.05), matGunBody, 0.2, 0.05, 0);
+      }
+      return grp;
+    };
+
+    const loot: LootView[] = [];
+    for (const p of sim.pickups) {
+      const grp = new THREE.Group();
+      grp.position.set(p.x, 0, p.z);
+      if (p.kind === 'weapon' && p.weapon) {
+        // a slab of rack with the gun standing on it
+        const shelf = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.06, 0.3), matCrateSteel);
+        shelf.position.y = 0.95;
+        grp.add(shelf);
+        const gun = buildGun(p.weapon, 1.02);
+        gun.rotation.y = -0.35;
+        grp.add(gun);
+      } else if (p.kind === 'ammo') {
+        const crate = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.36, 0.42), matCrateOlive);
+        crate.position.y = 0.18;
+        grp.add(crate);
+        const lid = new THREE.Mesh(new THREE.BoxGeometry(0.64, 0.05, 0.44), matCrateOlive);
+        lid.position.y = 0.38;
+        grp.add(lid);
+        const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.06, 0.02), matKey);
+        stripe.position.set(0, 0.24, 0.215);
+        grp.add(stripe);
+      } else if (p.kind === 'medkit') {
+        const b = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.34), matMed);
+        b.position.y = 0.15; grp.add(b);
+        const crossA = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.07, 0.02), matRed);
+        crossA.position.set(0, 0.16, 0.18); grp.add(crossA);
+        const crossB = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.2, 0.02), matRed);
+        crossB.position.set(0, 0.16, 0.18); grp.add(crossB);
+      } else if (p.kind === 'armor') {
+        const v = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.44, 0.2), matArmor);
+        v.position.y = 0.5; v.rotation.x = 0.16; grp.add(v);
+        const stand = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.34), matCrateSteel);
+        stand.position.y = 0.15; grp.add(stand);
+      } else {
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(0.11, 0.02, 6, 12), matKey);
+        ring.position.y = 0.94; ring.rotation.x = Math.PI / 2; grp.add(ring);
+        for (let k = 0; k < 4; k++) {
+          const key = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.14, 0.02), matKey);
+          key.position.set(Math.cos(k * 1.6) * 0.09, 0.86, Math.sin(k * 1.6) * 0.09);
+          grp.add(key);
+        }
+      }
+      // a cold glow so loot can be found in a dark wing
+      const halo = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.9, 0.9),
+        new THREE.MeshBasicMaterial({ color: p.kind === 'weapon' ? 0xffd27a : 0x9fe6d0, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false }),
+      );
+      halo.rotation.x = -Math.PI / 2;
+      halo.position.y = 0.02;
+      grp.add(halo);
+      scene.add(grp);
+      loot.push({ take: () => p.taken, group: grp });
+    }
+
+    /* ---------------- the workshop grate: the way out ---------------- */
+    const hatchGroup = new THREE.Group();
+    hatchGroup.position.set(sim.hatch.x, 0, sim.hatch.z);
+    const hatchRim = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.16, 1.5), matCrateSteel);
+    hatchRim.position.y = 0.06;
+    hatchGroup.add(hatchRim);
+    const hatchHole = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.2), new THREE.MeshBasicMaterial({ color: 0x04070a }));
+    hatchHole.rotation.x = -Math.PI / 2;
+    hatchHole.position.y = 0.08;
+    hatchGroup.add(hatchHole);
+    // the lid: a grid of bars that lifts and slides aside once it is pried
+    const hatchLid = new THREE.Group();
+    const lidMat = new THREE.MeshStandardMaterial({ color: 0x2b3438, roughness: 0.5, metalness: 0.75 });
+    for (let k = -3; k <= 3; k++) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(1.58, 0.06, 0.07), lidMat);
+      bar.position.set(0, 0.14, k * 0.18);
+      hatchLid.add(bar);
+    }
+    for (let k = -3; k <= 3; k++) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, 1.24), lidMat);
+      bar.position.set(k * 0.24, 0.15, 0);
+      hatchLid.add(bar);
+    }
+    hatchGroup.add(hatchLid);
+    // a ladder into the dark
+    const ladder = new THREE.Group();
+    for (const sx of [-0.26, 0.26]) {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.0, 0.06), lidMat);
+      rail.position.set(sx, 0.0, -0.5);
+      ladder.add(rail);
+    }
+    for (let k = 0; k < 5; k++) {
+      const rung = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.05, 0.05), lidMat);
+      rung.position.set(0, 0.2 - k * 0.22, -0.5);
+      ladder.add(rung);
+    }
+    ladder.visible = false;
+    hatchGroup.add(ladder);
+    scene.add(hatchGroup);
+
+
     /* ---------------- bodies ----------------
-     * People, not boxes: hips, chest, head, two arms, two legs. Every limb is an
-     * instanced mesh so four hundred figures still cost one draw call per part, and the
-     * pose is driven by the simulation's walk cycle and ragdoll tilt.
+     * A prison officer, not a box with a head: navy tunic with yellow shoulder patches,
+     * a badge, a duty belt with pouches and cuffs, black boots, bare hands (nobody in
+     * this prison carries a firearm), and a gait that reads as walking or running.
+     * Every part is an instanced mesh, so three hundred figures stay cheap.
      */
-    const matGuardArmor = new THREE.MeshStandardMaterial({ color: 0x3b4f66, roughness: 0.58, metalness: 0.34 });
-    const matGuardLeg = new THREE.MeshStandardMaterial({ color: 0x22303e, roughness: 0.85 });
-    const matHelmet = new THREE.MeshStandardMaterial({ color: 0x5f7d99, roughness: 0.35, metalness: 0.65 });
+    const matGuardArmor = new THREE.MeshStandardMaterial({ color: 0x2c3a52, roughness: 0.62, metalness: 0.12 });
+    const matGuardLeg = new THREE.MeshStandardMaterial({ color: 0x1d2733, roughness: 0.86 });
     const matSkin = new THREE.MeshStandardMaterial({ color: 0xc39a7c, roughness: 0.86 });
+    const matHair = new THREE.MeshStandardMaterial({ color: 0x2a2119, roughness: 0.95 });
+    const matBoot = new THREE.MeshStandardMaterial({ color: 0x141619, roughness: 0.7, metalness: 0.15 });
+    const matBelt = new THREE.MeshStandardMaterial({ color: 0x111417, roughness: 0.8 });
+    const matBrass = new THREE.MeshStandardMaterial({ color: 0xd8c04a, roughness: 0.35, metalness: 0.7, emissive: 0x241d00 });
+    const matSteel = new THREE.MeshStandardMaterial({ color: 0x9aa6ad, roughness: 0.3, metalness: 0.9 });
     const matInmateCloth = new THREE.MeshStandardMaterial({ color: 0xa8702c, roughness: 0.96 });
     const matInmateLeg = new THREE.MeshStandardMaterial({ color: 0x84561f, roughness: 0.96 });
 
-    const mkParts = (count: number, body: THREE.Material, legs: THREE.Material, head: THREE.Material) => {
-      const mk = (geo: THREE.BufferGeometry, mat: THREE.Material) => {
-        const m = new THREE.InstancedMesh(geo, mat, count);
-        m.frustumCulled = false;
-        scene.add(m);
-        return m;
-      };
-      return {
-        torso: mk(new THREE.BoxGeometry(0.44, 0.6, 0.26), body),
-        hips: mk(new THREE.BoxGeometry(0.4, 0.22, 0.24), legs),
-        head: mk(new THREE.SphereGeometry(0.142, 12, 9), head),
-        armL: mk(new THREE.BoxGeometry(0.115, 0.56, 0.125), body),
-        armR: mk(new THREE.BoxGeometry(0.115, 0.56, 0.125), body),
-        legL: mk(new THREE.BoxGeometry(0.155, 0.6, 0.165), legs),
-        legR: mk(new THREE.BoxGeometry(0.155, 0.6, 0.165), legs),
-      };
+    const mkInst = (geo: THREE.BufferGeometry, mat: THREE.Material, count: number) => {
+      const m = new THREE.InstancedMesh(geo, mat, count);
+      m.frustumCulled = false;
+      scene.add(m);
+      return m;
     };
+
+    const mkParts = (count: number, body: THREE.Material, legs: THREE.Material, head: THREE.Material) => ({
+      torso: mkInst(new THREE.BoxGeometry(0.46, 0.62, 0.28), body, count),
+      hips: mkInst(new THREE.BoxGeometry(0.4, 0.22, 0.26), legs, count),
+      neck: mkInst(new THREE.CylinderGeometry(0.062, 0.07, 0.1, 8), head, count),
+      head: mkInst(new THREE.SphereGeometry(0.145, 12, 10), head, count),
+      hair: mkInst(new THREE.SphereGeometry(0.152, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.6), matHair, count),
+      armL: mkInst(new THREE.BoxGeometry(0.115, 0.56, 0.13), body, count),
+      armR: mkInst(new THREE.BoxGeometry(0.115, 0.56, 0.13), body, count),
+      legL: mkInst(new THREE.BoxGeometry(0.16, 0.62, 0.17), legs, count),
+      legR: mkInst(new THREE.BoxGeometry(0.16, 0.62, 0.17), legs, count),
+      handL: mkInst(new THREE.SphereGeometry(0.062, 8, 6), head, count),
+      handR: mkInst(new THREE.SphereGeometry(0.062, 8, 6), head, count),
+      bootL: mkInst(new THREE.BoxGeometry(0.17, 0.16, 0.3), matBoot, count),
+      bootR: mkInst(new THREE.BoxGeometry(0.17, 0.16, 0.3), matBoot, count),
+    });
+
     const gBody = mkParts(sim.guards.length, matGuardArmor, matGuardLeg, matSkin);
-    const gHelmet = new THREE.InstancedMesh(new THREE.BoxGeometry(0.31, 0.11, 0.31), matHelmet, sim.guards.length);
-    const gGun = new THREE.InstancedMesh(new THREE.BoxGeometry(0.07, 0.07, 0.62), matMetal, sim.guards.length);
-    const gVisor = new THREE.InstancedMesh(new THREE.BoxGeometry(0.26, 0.055, 0.03), new THREE.MeshStandardMaterial({ color: 0x0e1a22, roughness: 0.2, metalness: 0.9 }), sim.guards.length);
-    for (const m of [gHelmet, gGun, gVisor]) { m.frustumCulled = false; scene.add(m); }
+    // the uniform details that make him read as a prison officer at a glance
+    const gBelt = mkInst(new THREE.BoxGeometry(0.46, 0.11, 0.31), matBelt, sim.guards.length);
+    const gBuckle = mkInst(new THREE.BoxGeometry(0.09, 0.07, 0.03), matBrass, sim.guards.length);
+    const gPouchL = mkInst(new THREE.BoxGeometry(0.1, 0.13, 0.08), matBelt, sim.guards.length);
+    const gPouchR = mkInst(new THREE.BoxGeometry(0.1, 0.13, 0.08), matBelt, sim.guards.length);
+    const gCuffA = mkInst(new THREE.TorusGeometry(0.045, 0.014, 6, 10), matSteel, sim.guards.length);
+    const gCuffB = mkInst(new THREE.TorusGeometry(0.045, 0.014, 6, 10), matSteel, sim.guards.length);
+    const gPatchL = mkInst(new THREE.BoxGeometry(0.1, 0.075, 0.03), matBrass, sim.guards.length);
+    const gPatchR = mkInst(new THREE.BoxGeometry(0.1, 0.075, 0.03), matBrass, sim.guards.length);
+    const gBadge = mkInst(new THREE.BoxGeometry(0.055, 0.07, 0.02), matBrass, sim.guards.length);
+    const gBaton = mkInst(new THREE.CylinderGeometry(0.018, 0.022, 0.42, 6), matBelt, sim.guards.length);
     sim.guards.forEach((g, i) => {
       if (!g.elite) return;
-      // the control-room detachments wear darker armour with a red shoulder
-      gBody.torso.setColorAt(i, new THREE.Color(0x2b3550));
-      gBody.armL.setColorAt(i, new THREE.Color(0x2b3550));
-      gBody.armR.setColorAt(i, new THREE.Color(0x2b3550));
+      // the control-room detachments wear a darker tunic
+      gBody.torso.setColorAt(i, new THREE.Color(0x20283c));
+      gBody.armL.setColorAt(i, new THREE.Color(0x20283c));
+      gBody.armR.setColorAt(i, new THREE.Color(0x20283c));
     });
 
     const iBody = mkParts(sim.inmates.length, matInmateCloth, matInmateLeg, matSkin);
-    void matGuard; void matGuardHead; void matInmate; void matInmateHead;
 
-    // pose one limb of one figure, honouring yaw, ragdoll tilt and limb swing
+    // pose one point of one figure, honouring yaw, ragdoll tilt, lean and limb swing
     const qYaw = new THREE.Quaternion();
     const qTilt = new THREE.Quaternion();
     const qSwing = new THREE.Quaternion();
@@ -773,49 +948,100 @@ export default function Prison3D({ mode, onExit }: Props) {
     const pose = (
       mesh: THREE.InstancedMesh, i: number,
       ax: number, az: number, baseY: number, ang: number, tilt: number,
-      lx: number, ly: number, lz: number, swing: number,
+      lx: number, ly: number, lz: number, swing: number, lean = 0,
     ) => {
       const rX = -Math.sin(ang), rZ = Math.cos(ang);   // actor right
       const fX = Math.cos(ang), fZ = Math.sin(ang);    // actor forward
-      const ct = Math.cos(tilt), st = Math.sin(tilt);
+      const ct = Math.cos(tilt + lean), st = Math.sin(tilt + lean);
       const ly2 = ly * ct - lz * st;
       const lz2 = ly * st + lz * ct;
       qYaw.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -ang);
-      qTilt.setFromAxisAngle(axisRight, tilt);
+      qTilt.setFromAxisAngle(axisRight, tilt + lean);
       qSwing.setFromAxisAngle(axisRight, swing);
       qOut.copy(qYaw).multiply(qTilt).multiply(qSwing);
       vTmp.set(ax + rX * lx + fX * lz2, baseY + ly2, az + rZ * lx + fZ * lz2);
       m4.compose(vTmp, qOut, s3);
       mesh.setMatrixAt(i, m4);
     };
+
+    /**
+     * A limb hangs from a pivot (shoulder or hip) and swings around it. Doing the maths
+     * about the pivot instead of the body centre is what stops the arms detaching.
+     */
+    const limb = (
+      mesh: THREE.InstancedMesh | null, i: number,
+      ax: number, az: number, baseY: number, ang: number, tilt: number,
+      sideX: number, pivotY: number, pivotZ: number,
+      drop: number, swing: number, lean = 0, forward = 0,
+    ) => {
+      if (!mesh) return;
+      const ct = Math.cos(swing), st = Math.sin(swing);
+      const ly = pivotY - drop * ct - forward * st;
+      const lz = pivotZ + forward * ct - drop * st;
+      pose(mesh, i, ax, az, baseY, ang, tilt, sideX, ly, lz, swing, lean);
+    };
+
+    /**
+     * The gait. Walk and run are the same cycle at different amplitudes; a man standing
+     * still shifts his weight and breathes. Used for officers and inmates alike.
+     */
+    const animate = (
+      parts: ReturnType<typeof mkParts>,
+      i: number, x: number, z: number, y: number, ang: number, tilt: number,
+      limbPhase: number, gait: number, time: number, down: boolean,
+    ) => {
+      const run = clamp01((gait - 2.2) / 2.0);              // 0 walk → 1 sprint
+      const amp = down ? 0 : clamp01(gait / 3.6) * (0.42 + run * 0.5);
+      const idle = gait < 0.25 && !down;
+      const phase = limbPhase;
+      const sw = Math.sin(phase) * amp;
+      const bob = down || idle ? 0 : Math.abs(Math.sin(phase)) * (0.012 + run * 0.035);
+      const breathe = idle ? Math.sin(time * 1.5 + i * 0.7) * 0.008 : 0;
+      const lean = down ? 0 : -(0.02 + run * 0.17 + (amp > 0 ? 0.03 : 0));
+      const baseY = y - bob + breathe;
+
+      pose(parts.torso, i, x, z, baseY, ang, tilt, 0, 1.16, 0, 0, lean);
+      pose(parts.hips, i, x, z, baseY, ang, tilt, 0, 0.82, 0, 0, lean);
+      pose(parts.neck, i, x, z, baseY, ang, tilt, 0, 1.5, 0, 0, lean);
+      pose(parts.head, i, x, z, baseY, ang, tilt, 0, 1.63, 0.01, 0, lean);
+      pose(parts.hair, i, x, z, baseY, ang, tilt, 0, 1.665, 0.005, 0, lean);
+
+      const hipY = 0.72, shoulderY = 1.44;
+      const legSwing = 0.62 * sw;
+      const armSwing = 0.55 * sw;
+      limb(parts.legL, i, x, z, baseY, ang, tilt, -0.12, hipY, 0, 0.34, legSwing, lean);
+      limb(parts.legR, i, x, z, baseY, ang, tilt, 0.12, hipY, 0, 0.34, -legSwing, lean);
+      limb(parts.bootL, i, x, z, baseY, ang, tilt, -0.12, hipY, 0, 0.68, legSwing, lean, 0.06);
+      limb(parts.bootR, i, x, z, baseY, ang, tilt, 0.12, hipY, 0, 0.68, -legSwing, lean, 0.06);
+      limb(parts.armL, i, x, z, baseY, ang, tilt, -0.29, shoulderY, 0, 0.29, -armSwing, lean);
+      limb(parts.armR, i, x, z, baseY, ang, tilt, 0.29, shoulderY, 0, 0.29, armSwing, lean);
+      limb(parts.handL, i, x, z, baseY, ang, tilt, -0.29, shoulderY, 0, 0.6, -armSwing, lean);
+      limb(parts.handR, i, x, z, baseY, ang, tilt, 0.29, shoulderY, 0, 0.6, armSwing, lean);
+    };
+
     const poseGuard = (i: number, g: (typeof sim.guards)[number]) => {
       const down = g.state === 'down';
       const tilt = down ? (g.tilt || 1.4) : 0;
-      const sw = Math.sin(g.limb || 0) * 0.5;
-      const base = g.y;
-      pose(gBody.torso, i, g.x, g.z, base, g.ang, tilt, 0, 1.16, 0, 0);
-      pose(gBody.hips, i, g.x, g.z, base, g.ang, tilt, 0, 0.8, 0, 0);
-      pose(gBody.head, i, g.x, g.z, base, g.ang, tilt, 0, 1.63, 0, 0);
-      pose(gHelmet, i, g.x, g.z, base, g.ang, tilt, 0, 1.71, 0, 0);
-      pose(gVisor, i, g.x, g.z, base, g.ang, tilt, 0, 1.63, 0.12, 0);
-      pose(gBody.armL, i, g.x, g.z, base, g.ang, tilt, -0.29, 1.28, 0, sw);
-      pose(gBody.armR, i, g.x, g.z, base, g.ang, tilt, 0.29, 1.28, 0, -sw * (down ? 0 : 0.8) - (down ? 0 : 0.35));
-      pose(gBody.legL, i, g.x, g.z, base, g.ang, tilt, -0.12, 0.5, 0, -sw * 0.9);
-      pose(gBody.legR, i, g.x, g.z, base, g.ang, tilt, 0.12, 0.5, 0, sw * 0.9);
-      pose(gGun, i, g.x, g.z, base, g.ang, tilt, 0.3, 1.06, 0.36, 0);
+      const gait = down ? 0 : g.gait || 0;
+      animate(gBody, i, g.x, g.z, g.y, g.ang, tilt, g.limb || 0, gait, sim.time, down);
+      const lean = down ? 0 : -(0.02 + clamp01((gait - 2.2) / 2) * 0.17);
+      // belt, buckle, pouches, cuffs, patches, badge and baton ride on the tunic
+      pose(gBelt, i, g.x, g.z, g.y, g.ang, tilt, 0, 0.95, 0, 0, lean);
+      pose(gBuckle, i, g.x, g.z, g.y, g.ang, tilt, 0, 0.95, 0.16, 0, lean);
+      pose(gPouchL, i, g.x, g.z, g.y, g.ang, tilt, -0.19, 0.95, 0.13, 0, lean);
+      pose(gPouchR, i, g.x, g.z, g.y, g.ang, tilt, 0.19, 0.95, 0.13, 0, lean);
+      pose(gCuffA, i, g.x, g.z, g.y, g.ang, tilt, 0.16, 0.9, 0.17, 0, lean);
+      pose(gCuffB, i, g.x, g.z, g.y, g.ang, tilt, 0.22, 0.88, 0.17, 0, lean);
+      pose(gPatchL, i, g.x, g.z, g.y, g.ang, tilt, -0.2, 1.41, 0.02, 0, lean);
+      pose(gPatchR, i, g.x, g.z, g.y, g.ang, tilt, 0.2, 1.41, 0.02, 0, lean);
+      pose(gBadge, i, g.x, g.z, g.y, g.ang, tilt, -0.13, 1.32, 0.15, 0, lean);
+      pose(gBaton, i, g.x, g.z, g.y, g.ang, tilt, -0.26, 0.82, 0.1, 0, lean);
     };
+
     const poseInmate = (i: number, n: (typeof sim.inmates)[number]) => {
       const down = n.state === 'down';
       const tilt = down ? (n.tilt || 1.4) : 0;
-      const sw = Math.sin(n.limb || 0) * 0.55;
-      const base = n.y;
-      pose(iBody.torso, i, n.x, n.z, base, n.ang, tilt, 0, 1.14, 0, 0);
-      pose(iBody.hips, i, n.x, n.z, base, n.ang, tilt, 0, 0.78, 0, 0);
-      pose(iBody.head, i, n.x, n.z, base, n.ang, tilt, 0, 1.6, 0, 0);
-      pose(iBody.armL, i, n.x, n.z, base, n.ang, tilt, -0.27, 1.26, 0, sw);
-      pose(iBody.armR, i, n.x, n.z, base, n.ang, tilt, 0.27, 1.26, 0, -sw);
-      pose(iBody.legL, i, n.x, n.z, base, n.ang, tilt, -0.11, 0.48, 0, -sw * 0.9);
-      pose(iBody.legR, i, n.x, n.z, base, n.ang, tilt, 0.11, 0.48, 0, sw * 0.9);
+      animate(iBody, i, n.x, n.z, n.y, n.ang, tilt, n.limb || 0, down ? 0 : n.gait || 0, sim.time, down);
     };
 
     /* ---------------- player weapon ---------------- */
@@ -877,7 +1103,9 @@ export default function Prison3D({ mode, onExit }: Props) {
     const keys: Record<string, boolean> = {};
     let firing = false;
     const onKeyDown = (e: KeyboardEvent) => {
+      audio.ensure();
       keys[e.key.toLowerCase()] = true;
+      if (e.key === 'm' || e.key === 'M') audio.setMuted(!audio.muted);
       if (e.key === 'e' || e.key === 'E') {
         const b = sim.useButton();
         if (!b) {
@@ -899,6 +1127,7 @@ export default function Prison3D({ mode, onExit }: Props) {
     };
     const onMouseDown = (e: MouseEvent) => {
       if (e.button !== 0) return;
+      audio.ensure();
       if (document.pointerLockElement !== renderer.domElement) {
         dragging = true;
         try { void renderer.domElement.requestPointerLock(); } catch { /* ignore */ }
@@ -946,12 +1175,65 @@ export default function Prison3D({ mode, onExit }: Props) {
 
       // levers first: holding the button on a handle throws it, and nothing is fired
       const aimed = aimedLever();
+      const nearHatch = !sim.hatch.open && Math.hypot(sim.hatch.x - sim.px, sim.hatch.z - sim.pz) < 2.6;
       if (aimed) {
         sim.pullLever(aimed.id, dt, firing);
+      } else if (nearHatch) {
+        // the only way out of the workshop: hold the button and haul on the grate
+        sim.pryHatch(dt, firing || !!keys['e']);
       } else if (firing) {
         autoFireT -= dt;
-        if (autoFireT <= 0) { autoFireT = 0.16; if (sim.cool <= 0) shoot(); }
+        const rate = sim.spec.cool;
+        if (autoFireT <= 0) {
+          autoFireT = rate;
+          if (sim.cool <= 0) {
+            if (sim.mag <= 0 && sim.reserve <= 0) audio.dryFire();
+            shoot();
+          }
+        }
       }
+
+      // ---- sound: the simulation's events, drained once per frame ----
+      for (const ev of sim.events) {
+        const d = Math.hypot(ev.x - sim.px, ev.z - sim.pz);
+        const near = Math.max(0, 1 - d / 70);
+        switch (ev.kind) {
+          case 'shot': audio.shot(sim.weapon); break;
+          case 'reload': audio.reload(); break;
+          case 'break': audio.steel('lock'); break;
+          case 'hit': audio.scrape(); break;
+          case 'sally': audio.steel('gate'); break;
+          case 'hatch': audio.steel('gate'); break;
+          case 'pickup': audio.pickup(); break;
+          case 'cuff': audio.cuff(); break;
+          case 'down': audio.thud(); break;
+          case 'shout': if (near > 0.05) audio.shout(d); break;
+          case 'alarm': audio.steel('lever'); break;
+          case 'open-all': audio.steel('gate'); break;
+          case 'armory': audio.steel('lever'); break;
+          case 'exit': audio.pickup(); break;
+          default: break;
+        }
+      }
+      sim.events.length = 0;
+
+      // boots, siren and room tone
+      const onFoot = (!!keys['w'] || !!keys['a'] || !!keys['s'] || !!keys['d']
+        || !!keys['arrowup'] || !!keys['arrowdown'] || !!keys['arrowleft'] || !!keys['arrowright']) && sim.cuffed <= 0;
+      audio.update(dt, {
+        moving: onFoot, sprint: !!keys['shift'], siren: sim.siren,
+        lightsOut: sim.lightsOut, volume: 1,
+      });
+
+      // loot you picked up stops being drawn; the grate lid lifts when it gives way
+      for (const l of loot) l.group.visible = !l.take();
+      hatchLid.position.y = sim.hatch.progress * 0.45;
+      hatchLid.position.x = sim.hatch.progress * 1.5;
+      hatchLid.rotation.z = sim.hatch.progress * 0.5;
+      ladder.visible = sim.hatch.open;
+      // the gun in your hands grows when you pick a rifle up
+      const wscale = sim.weapon === 'carbine' ? 1.75 : sim.weapon === 'shotgun' ? 1.5 : sim.weapon === 'smg' ? 1.25 : 1;
+      gunBody.scale.set(1, 1, wscale);
       // handles swing with their progress, lamps go green when thrown
       for (const lv of leverHandles) {
         const st = sim.levers.find((q) => q.id === lv.id);
@@ -1021,17 +1303,16 @@ export default function Prison3D({ mode, onExit }: Props) {
         // only pose bodies near the camera: three hundred cells are not worth the matrices
         if (Math.abs(n.x - sim.px) > 62 || Math.abs(n.z - sim.pz) > 62) {
           m4.makeScale(0, 0, 0);
-          for (const part of [iBody.torso, iBody.hips, iBody.head, iBody.armL, iBody.armR, iBody.legL, iBody.legR]) part.setMatrixAt(i, m4);
+          for (const part of Object.values(iBody)) part.setMatrixAt(i, m4);
           return;
         }
         poseInmate(i, n);
       });
-      for (const part of [gBody.torso, gBody.hips, gBody.head, gBody.armL, gBody.armR, gBody.legL, gBody.legR, gHelmet, gGun, gVisor]) {
-        part.instanceMatrix.needsUpdate = true;
+      for (const m of Object.values(gBody)) m.instanceMatrix.needsUpdate = true;
+      for (const m of [gBelt, gBuckle, gPouchL, gPouchR, gCuffA, gCuffB, gPatchL, gPatchR, gBadge, gBaton]) {
+        m.instanceMatrix.needsUpdate = true;
       }
-      for (const part of [iBody.torso, iBody.hips, iBody.head, iBody.armL, iBody.armR, iBody.legL, iBody.legR]) {
-        part.instanceMatrix.needsUpdate = true;
-      }
+      for (const m of Object.values(iBody)) m.instanceMatrix.needsUpdate = true;
 
       // loose junk: only pieces that moved are re-posed, and only near ones are drawn
       sim.debris.forEach((d, i) => {
@@ -1086,11 +1367,17 @@ export default function Prison3D({ mode, onExit }: Props) {
             const l = sim.leverNear;
             if (l) return l.pulled ? '' : `HOLD LEFT MOUSE · ${l.label}${l.progress > 0.01 ? `  ${Math.round(l.progress * 100)}%` : ''}`;
             if (sim.inControlRoom) return 'CONTROL ROOM · FIND THE MASTER HANDLE';
+            if (!sim.hatch.open && Math.hypot(sim.hatch.x - sim.px, sim.hatch.z - sim.pz) < 2.6) {
+              return `HOLD LEFT MOUSE · PRY THE SERVICE GRATE${sim.hatch.progress > 0.01 ? `  ${Math.round(sim.hatch.progress * 100)}%` : ''}`;
+            }
             return sim.lockNear ? 'SHOOT THE LOCK' : '';
           })(),
           message: sim.message, messageT: sim.messageT,
           cells: sum.opened, free: sum.free, guards: sum.guards, sally: sum.sallyOpen,
           lights: sim.lightsOut, compass, stats: { ...sim.stats }, flashlight: sim.flashlight,
+          weapon: sim.spec.name, cuffed: sim.cuffed, muted: audio.muted,
+          hatchNear: !sim.hatch.open && Math.hypot(sim.hatch.x - sim.px, sim.hatch.z - sim.pz) < 2.6,
+          hatchProgress: sim.hatch.progress,
         });
       }
     };
@@ -1113,6 +1400,7 @@ export default function Prison3D({ mode, onExit }: Props) {
         if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
         else if (mat) (mat as THREE.Material).dispose();
       });
+      audio.dispose();
       envRT.dispose();
       pmrem.dispose();
       renderer.dispose();
@@ -1198,6 +1486,18 @@ export default function Prison3D({ mode, onExit }: Props) {
           })}
         </div>
 
+        {/* cuffed: hands behind the back, the block recedes */}
+        {screen.cuffed > 0 && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#12070acc]">
+            <div className="text-center">
+              <p className="text-[34px] font-black tracking-[0.35em] text-[#e8b3a0]">CUFFED</p>
+              <p className="mt-2 text-[11px] tracking-[0.3em] text-[#c09484]">
+                WALKED BACK TO YOUR CELL · THE LOCK IS NEW
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* centre prompt / message */}
         {screen.messageT > 0 && (
           <div className="absolute left-1/2 top-[26%] w-[560px] -translate-x-1/2 border-l-2 border-[#d8b45a] bg-[#0b1417dd] px-4 py-2 text-[12px] leading-relaxed text-[#e8e0c6]">
@@ -1216,9 +1516,9 @@ export default function Prison3D({ mode, onExit }: Props) {
             {screen.reloading ? 'RELOAD' : `${screen.mag}`}
             <span className="ml-1 text-[12px] text-[#8fa8ab]">/ {screen.magSize}</span>
           </p>
-          <p className="text-[10px] tracking-[0.25em] text-[#8fa8ab]">RESERVE {screen.reserve} · M9 SIDEARM</p>
+          <p className="text-[10px] tracking-[0.25em] text-[#8fa8ab]">RESERVE {screen.reserve} · {screen.weapon}</p>
           <p className="mt-1 text-[10px] tracking-[0.2em] text-[#6f8f93]">
-            {screen.flashlight ? 'FLASHLIGHT ON' : 'F · FLASHLIGHT'} · R · RELOAD
+            {screen.flashlight ? 'FLASHLIGHT ON' : 'F · FLASHLIGHT'} · R · RELOAD · {screen.muted ? 'M · SOUND OFF' : 'M · SOUND ON'}
           </p>
         </div>
 
@@ -1226,9 +1526,11 @@ export default function Prison3D({ mode, onExit }: Props) {
         <div className="absolute bottom-6 left-7 max-w-[380px] text-[10px] leading-relaxed tracking-[0.18em] text-[#93aeb0]">
           <p className="text-[#d8b45a]">OBJECTIVE</p>
           {screen.cells === 0 && <p>1 · SHOOT THE LOCK ON YOUR BARS (3 HITS)</p>}
-          {!screen.sally && <p>2 · REACH CONTROL B · OPEN THE SALLY PORT</p>}
-          <p>3 · {screen.cells < 360 ? 'CONTROL A · MASTER RELEASE (OPTIONAL MAYHEM)' : 'GET OUT THROUGH THE SOUTH GATE'}</p>
+          {!screen.sally && <p>2 · TWO WAYS OUT: CONTROL B → SALLY PORT, OR THE WORKSHOP FLOOR GRATE</p>}
+          <p>3 · {screen.cells < 320 ? 'CONTROL A · MASTER RELEASE (OPTIONAL MAYHEM)' : 'GET OUT THROUGH THE SOUTH GATE'}</p>
+          <p>4 · ARMORY · CARBINE, SHOTGUN, SMG + AMMUNITION</p>
           {screen.sally && <p className="text-[#8fffc4]">SALLY PORT OPEN — RUN SOUTH</p>}
+          {screen.cuffed > 0 && <p className="text-[#e8b3a0]">CUFFED — WAIT FOR THE CELL DOOR</p>}
         </div>
 
         {!locked && (

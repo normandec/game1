@@ -9,10 +9,10 @@
  * sally port. Everything is generated, so nothing had to be deleted from the map.
  */
 
-export const CELL_W = 3.2;
-export const CELL_D = 4.6;
+export const CELL_W = 3.6;
+export const CELL_D = 5.6;          // a real cell: bunk, locker, shelf, toilet, sink
 export const CELL_H = 3.8;
-export const WING_ROWS = 45;
+export const WING_ROWS = 40;        // 40 x 3.6 = 144 m, the block is as long as before
 export const WINGS = 4;
 export const CORRIDOR_HALF = 1.95;
 
@@ -41,12 +41,19 @@ export interface PrisonGuard {
   elite: boolean; room: string;
   /** cached line-of-sight: recomputed every ~0.2 s instead of every frame */
   losT?: number; losSeen?: boolean;
+  /** metres per second right now, so the renderer can pick walk or run */
+  gait: number;
+  /** where the chase last saw the operative */
+  lastX: number; lastZ: number;
+  /** cooldown after a capture, so the same officer cannot cuff twice in a second */
+  cuffCool: number;
 }
 
 export interface PrisonInmate {
   id: number; cell: number; x: number; z: number; y: number; ang: number;
   hp: number; maxHp: number; state: InmateState; cool: number; target: number; flash: number;
   vx: number; vz: number; vy: number; tilt: number; spin: number; limb: number;
+  gait: number;
 }
 
 export interface PrisonWall {
@@ -69,7 +76,8 @@ export interface PrisonProp {
   x: number; z: number; y: number; w: number; d: number; h: number;
   kind: 'bed' | 'toilet' | 'sink' | 'table' | 'bench' | 'locker' | 'desk' | 'crate' | 'console' | 'pipe' | 'medkit' | 'lamp' | 'camera'
     | 'monitor' | 'chair' | 'tray' | 'pot' | 'rack' | 'shelf' | 'cabinet' | 'workbench' | 'laundry' | 'stretcher'
-    | 'siren' | 'vent' | 'fridge' | 'tank' | 'weaponrack';
+    | 'siren' | 'vent' | 'fridge' | 'tank' | 'weaponrack'
+    | 'mattress' | 'celllamp' | 'stove' | 'cooker' | 'bin' | 'board' | 'extinguisher';
   solid: boolean;
 }
 
@@ -90,7 +98,36 @@ export interface PrisonLever {
   holdTime: number;
 }
 
-export interface PrisonPickup { x: number; z: number; y: number; kind: 'ammo' | 'medkit' | 'armor' | 'keys'; taken: boolean }
+export type WeaponId = 'pistol' | 'carbine' | 'shotgun' | 'smg';
+
+export interface WeaponSpec {
+  name: string; mag: number; reserve: number; cool: number; damage: number;
+  spread: number; pellets: number; reload: number; auto: boolean;
+}
+
+/** Four guns, all lootable from the armory and the guard house. */
+export const WEAPONS: Record<WeaponId, WeaponSpec> = {
+  pistol: { name: 'M9 SIDEARM', mag: 12, reserve: 36, cool: 0.16, damage: 46, spread: 0.012, pellets: 1, reload: 1.25, auto: false },
+  carbine: { name: 'AR-4 CARBINE', mag: 30, reserve: 90, cool: 0.1, damage: 54, spread: 0.009, pellets: 1, reload: 1.7, auto: true },
+  shotgun: { name: 'M870 BREACHER', mag: 6, reserve: 24, cool: 0.72, damage: 30, spread: 0.055, pellets: 8, reload: 2.3, auto: false },
+  smg: { name: 'MP-9 COMPACT', mag: 32, reserve: 128, cool: 0.075, damage: 32, spread: 0.02, pellets: 1, reload: 1.5, auto: true },
+};
+
+export interface PrisonPickup {
+  x: number; z: number; y: number;
+  kind: 'ammo' | 'medkit' | 'armor' | 'keys' | 'weapon';
+  /** which gun is lying on the rack, for kind 'weapon' */
+  weapon?: WeaponId;
+  /** rounds handed over, for kind 'ammo' */
+  amount?: number;
+  taken: boolean;
+}
+
+/** The workshop floor grate: pry it open and the prison is behind you. */
+export interface PrisonHatch {
+  x: number; z: number; y: number;
+  hp: number; max: number; open: boolean; progress: number;
+}
 
 /**
  * Loose junk with its own physics: paper, cups, cans, shell casings and splinters.
@@ -106,7 +143,11 @@ export interface PrisonDebris {
   rest: boolean;
 }
 
-export interface PrisonEvent { kind: 'shot' | 'hit' | 'break' | 'open-all' | 'sally' | 'shout' | 'down' | 'pickup' | 'exit' | 'alarm' | 'armory'; x: number; z: number; y: number }
+export interface PrisonEvent {
+  kind: 'shot' | 'hit' | 'break' | 'open-all' | 'sally' | 'shout' | 'down' | 'pickup' | 'exit'
+    | 'alarm' | 'armory' | 'cuff' | 'hatch' | 'reload';
+  x: number; z: number; y: number;
+}
 
 export interface PrisonStats { freed: number; guardsDown: number; inmatesDown: number; shots: number; hits: number; looted: number }
 
@@ -140,7 +181,13 @@ export class PrisonSim {
   px = 0; pz = 0; py = 1.62;
   yaw = Math.PI; pitch = 0;
   hp = 100; maxHp = 100; armor = 0;
+  /** the gun in hand, and its state */
+  weapon: WeaponId = 'pistol';
   mag = 12; magSize = 12; reserve = 48; reloading = 0; cool = 0;
+  /** seconds left of the cuffing cinematic: hands behind the back, no input */
+  cuffed = 0;
+  /** the floor grate in the workshop */
+  hatch: PrisonHatch = { x: 99, z: -19, y: 0, hp: 100, max: 100, open: false, progress: 0 };
   flash = 0; flashlight = false;
   alive = true;
   /** 0 while nobody suspects anything, 1 once the alarm is screaming */
@@ -202,7 +249,7 @@ export class PrisonSim {
         id: this.inmates.length, cell: c.id, x: c.x, z: c.z - c.face * 0.6, y: 0,
         ang: c.face > 0 ? Math.PI / 2 : -Math.PI / 2,
         hp: 60, maxHp: 60, state: 'cell', cool: 0, target: -1, flash: 0,
-        vx: 0, vz: 0, vy: 0, tilt: 0, spin: 0, limb: 0,
+        vx: 0, vz: 0, vy: 0, tilt: 0, spin: 0, limb: 0, gait: 0,
       };
       c.occupant = n.id;
       this.inmates.push(n);
@@ -220,7 +267,9 @@ export class PrisonSim {
     // ---------- levers, buttons, props, loot ----------
     this.addControlRooms();
     this.addCellProps();
+    this.addRoomDetails();
     this.addPickups();
+    this.addDebris();
 
     this.reindex();
   }
@@ -423,6 +472,7 @@ export class PrisonSim {
         hp: 150, maxHp: 150, state: 'patrol', patrol, node: 0,
         cool: rnd(0.4, 1.6), alertT: 0, tower, flash: 0,
         vx: 0, vz: 0, vy: 0, tilt: 0, spin: 0, limb: 0, elite: false, room: '',
+        gait: 0, lastX: x, lastZ: z, cuffCool: 0,
       });
     };
     // 4 per wing corridor, walking the length of the block
@@ -463,6 +513,7 @@ export class PrisonSim {
         patrol: [{ x: x - 3, z }, { x: x + 3, z }, { x, z: z + 3 }, { x, z: z - 3 }], node: 0,
         cool: rnd(0.3, 0.9), alertT: 0, tower: false, flash: 0,
         vx: 0, vz: 0, vy: 0, tilt: 0, spin: 0, limb: 0, elite: true, room,
+        gait: 0, lastX: x, lastZ: z, cuffCool: 0,
       });
     }
     // eight tower marksmen
@@ -495,13 +546,29 @@ export class PrisonSim {
     }
   }
 
+  /**
+   * What is actually inside a cell: a bunk with a mattress, a steel locker, a shelf,
+   * a wall lamp, a toilet and (in some) a sink. Cells are 3.6 x 5.6 m, so all of it fits
+   * without the operative getting stuck on the way out.
+   */
   private addCellProps() {
     for (const c of this.cells) {
-      const bx = c.x - c.face * 0.2;
-      this.props.push({ x: bx, z: c.z - CELL_D * 0.28, y: 0, w: 2.1, d: 0.9, h: 0.5, kind: 'bed', solid: true });
-      this.props.push({ x: c.x + CELL_W * 0.32, z: c.z + c.face * 0.9, y: 0, w: 0.5, d: 0.6, h: 0.75, kind: 'toilet', solid: true });
-      if (c.index % 3 === 0) this.props.push({ x: c.x - CELL_W * 0.3, z: c.z - c.face * 1.1, y: 0, w: 0.9, d: 0.5, h: 0.85, kind: 'sink', solid: true });
-      if (c.index % 5 === 0) this.props.push({ x: c.x, z: c.z - c.face * 1.6, y: 0, w: 0.7, d: 0.5, h: 0.45, kind: 'crate', solid: true });
+      const back = c.z - c.face * (CELL_D / 2);
+      // bunk along the back wall, head end against the side wall
+      this.props.push({ x: c.x - 0.55, z: back + c.face * 1.05, y: 0, w: 2.2, d: 0.95, h: 0.45, kind: 'bed', solid: true });
+      this.props.push({ x: c.x - 0.55, z: back + c.face * 1.05, y: 0.45, w: 2.05, d: 0.86, h: 0.14, kind: 'mattress', solid: false });
+      // steel locker beside the bunk
+      this.props.push({ x: c.x + 1.32, z: back + c.face * 0.85, y: 0, w: 0.62, d: 1.0, h: 1.9, kind: 'locker', solid: true });
+      // wall lamp over the bunk: the only light a man has after lock-up
+      this.props.push({ x: c.x + 0.55, z: back + c.face * 0.06, y: 2.42, w: 0.26, d: 0.16, h: 0.42, kind: 'celllamp', solid: false });
+      // toilet by the bars, sink beside it in every second cell
+      this.props.push({ x: c.x + 1.24, z: c.z + c.face * 0.85, y: 0, w: 0.55, d: 0.6, h: 0.75, kind: 'toilet', solid: true });
+      if (c.index % 2 === 0) this.props.push({ x: c.x + 1.24, z: c.z + c.face * 1.85, y: 0, w: 0.5, d: 0.45, h: 0.85, kind: 'sink', solid: true });
+      // a shelf of belongings, a chair, a box: cells are lived in
+      if (c.index % 3 === 0) this.props.push({ x: c.x - 1.5, z: c.z + c.face * 1.5, y: 0, w: 0.45, d: 1.0, h: 1.5, kind: 'shelf', solid: true });
+      if (c.index % 4 === 1) this.props.push({ x: c.x - 1.45, z: c.z + c.face * 1.85, y: 0, w: 0.5, d: 0.5, h: 0.9, kind: 'chair', solid: true });
+      if (c.index % 5 === 2) this.props.push({ x: c.x + 1.32, z: c.z - c.face * 2.3, y: 0, w: 0.62, d: 0.5, h: 0.45, kind: 'crate', solid: true });
+      if (c.index % 7 === 3) this.props.push({ x: c.x + 0.2, z: c.z + c.face * 2.1, y: 0, w: 0.36, d: 0.36, h: 0.6, kind: 'bin', solid: false });
     }
     // corridor furniture + control room consoles
     for (let wing = 0; wing < WINGS; wing++) {
@@ -514,77 +581,126 @@ export class PrisonSim {
     for (const b of this.buttons) {
       this.props.push({ x: b.x, z: b.z - 1.6, y: 0, w: 3.2, d: 1.1, h: 1.05, kind: 'console', solid: true });
     }
-    // towering pipe runs that make the hall read as machinery, not a box
+    // towerinq pipe runs that make the hall read as machinery, not a box
     for (let wing = 0; wing < WINGS; wing++) {
       for (let k = -6; k <= 6; k++) {
         this.props.push({ x: k * 11, z: wingZ(wing) - CORRIDOR_HALF - CELL_D - 1.2, y: 3.9, w: 0.4, d: 0.4, h: 0.4, kind: 'pipe', solid: false });
       }
     }
-    // Twin-tube fixtures down the middle of every gallery, every 7.2 m: the row of
-    // lights is what gives the corridor its perspective.
-    const galleryHalf = (WING_ROWS * CELL_W) / 2;
+    // ceiling fixtures in every gallery, every 7.2 m
     for (let wing = 0; wing < WINGS; wing++) {
       const z = wingZ(wing);
-      for (let x = -galleryHalf + 4; x <= galleryHalf - 4; x += 7.2) {
+      const half = (WING_ROWS * CELL_W) / 2;
+      for (let x = -half + 4; x <= half - 4; x += 7.2) {
         this.props.push({ x, z, y: 3.34, w: 1.72, d: 0.46, h: 0.14, kind: 'lamp', solid: false });
       }
     }
-    // Rooms, control rooms and the yard keep their own lights.
     for (const [x, z] of [[-56, 88], [56, 88], [-72, -92], [72, -92], [95, 40], [95, -10], [-95, 30], [-95, -10], [0, 96], [0, -96], [-80, 0], [80, 0], [-61, 88], [61, 88]] as [number, number][]) {
       this.props.push({ x, z, y: 3.3, w: 1.72, d: 0.46, h: 0.14, kind: 'lamp', solid: false });
     }
     // CCTV on the cell fronts, one every ~20 m, alternating sides.
     for (let wing = 0; wing < WINGS; wing++) {
       const z = wingZ(wing);
+      const half = (WING_ROWS * CELL_W) / 2;
       let n = 0;
-      for (let x = -galleryHalf + 9; x <= galleryHalf - 9; x += 19.5, n++) {
+      for (let x = -half + 9; x <= half - 9; x += 19.5, n++) {
         const side = n % 2 === 0 ? 1 : -1;
         this.props.push({ x, z: z + side * (CORRIDOR_HALF - 0.32), y: 3.12, w: 0.4, d: 0.4, h: 0.3, kind: 'camera', solid: false });
       }
     }
-    this.props.push({ x: 84, z: -82, y: 0, w: 6, d: 1.2, h: 0.9, kind: 'table', solid: true });
-    this.props.push({ x: 80, z: 84, y: 0, w: 4, d: 1.0, h: 1.8, kind: 'locker', solid: true });
-    this.props.push({ x: -78, z: -80, y: 0, w: 3, d: 0.9, h: 1.2, kind: 'desk', solid: true });
-    this.props.push({ x: -78, z: -76, y: 0, w: 0.6, d: 0.6, h: 1.1, kind: 'medkit', solid: false });
+  }
 
-    /* ---------------- clutter: the prison lives in, it is not a showroom ---------------- */
-    // Chairs, trays, buckets, mops and cable coils along every gallery and room.
-    for (const wing of [0, 1, 2, 3]) {
-      const z = wingZ(wing);
-      for (let k = -6; k <= 6; k++) {
-        const x = k * 11.4 + rnd(-1.6, 1.6);
-        const near = Math.abs(x) < 6 ? 1.9 : 0;
-        this.props.push({ x, z: z + (k % 2 ? 1 : -1) * (CORRIDOR_HALF - 0.5), y: 0, w: 0.62, d: 0.62, h: 0.92, kind: 'chair', solid: false });
-        if (k % 2 === 0) this.props.push({ x: x + 2.1, z: z + near, y: 0, w: 0.5, d: 0.5, h: 0.4, kind: 'pot', solid: false });
-        if (k % 3 === 0) this.props.push({ x: x - 2.4, z: z - near, y: 0, w: 0.7, d: 0.7, h: 0.5, kind: 'crate', solid: false });
-        if (k % 4 === 0) this.props.push({ x: x + 3.4, z: z - (CORRIDOR_HALF - 0.42), y: 0, w: 1.1, d: 0.6, h: 0.34, kind: 'laundry', solid: false });
-        // a cardboard box or two left in the walkway, like the box in the reference
-        if (k % 3 === 1) this.props.push({
-          x: x + rnd(-1.5, 1.5), z: z + (k % 2 ? 1 : -1) * rnd(0.2, CORRIDOR_HALF - 0.9),
-          y: 0, w: rnd(0.7, 1.0), d: rnd(0.55, 0.8), h: rnd(0.45, 0.72), kind: 'crate', solid: false,
-        });
-      }
-      // pipe runs and cable trays overhead, floor drains at the gallery ends
-      for (let k = -9; k <= 9; k++) {
-        this.props.push({ x: k * 8.2, z: z + CORRIDOR_HALF + 0.12, y: 2.9, w: 0.16, d: 0.16, h: 0.16, kind: 'pipe', solid: false });
-        if (k % 2 === 0) this.props.push({ x: k * 8.2, z: z - CORRIDOR_HALF - 0.12, y: 3.1, w: 0.12, d: 0.12, h: 0.12, kind: 'pipe', solid: false });
-      }
+  /**
+   * The service ring: a working kitchen, a real armory, a guard house with a key board,
+   * a workshop with the floor grate that leads out. Every room is furnished, none of them
+   * is an empty box.
+   */
+  private addRoomDetails() {
+    const P = (x: number, z: number, w: number, d: number, h: number, kind: PrisonProp['kind'], solid = true, y = 0) =>
+      this.props.push({ x, z, w, d, h, kind, solid, y });
+
+    /* ---- CANTEEN + KITCHEN (x 50..94, z -104..-80) ---- */
+    // the hot line against the south wall: stoves, pots, a hood over them
+    for (let i = 0; i < 4; i++) {
+      const x = 58 + i * 3.4;
+      P(x, -101.4, 3.0, 1.3, 0.95, 'stove');
+      P(x - 0.7, -101.4, 0.5, 0.5, 0.35, 'cooker', false, 0.95);
+      P(x + 0.7, -101.4, 0.5, 0.5, 0.35, 'cooker', false, 0.95);
+      P(x, -101.4, 3.2, 1.5, 0.5, 'vent', false, 2.5);
     }
-    for (let i = 0; i < 42; i++) {
-      const a = rnd(0, TAU), r = rnd(16, 92);
-      this.props.push({ x: Math.cos(a) * r, z: Math.sin(a) * r, y: 0, w: 0.4, d: 0.4, h: 0.34, kind: 'pot', solid: false });
-    }
-    for (const spot of [[-72, -92], [72, -92], [95, 40], [95, -10], [-95, 30], [-95, -10]]) {
-      for (let i = 0; i < 6; i++) {
-        this.props.push({
-          x: spot[0] + rnd(-9, 9), z: spot[1] + rnd(-9, 9), y: 0,
-          w: rnd(0.5, 1.1), d: rnd(0.5, 1.1), h: rnd(0.3, 0.9),
-          kind: (['crate', 'chair', 'tray', 'shelf', 'pot'] as const)[i % 5], solid: false,
-        });
-      }
+    P(74, -100.6, 4.0, 1.2, 0.92, 'workbench');        // prep table
+    P(74, -100.6, 0.7, 0.5, 0.2, 'tray', false, 0.92);
+    P(85, -99.4, 1.4, 1.0, 0.95, 'sink');
+    P(88.5, -99.4, 1.4, 1.0, 0.95, 'sink');
+    P(52.5, -95, 1.2, 1.2, 1.0, 'fridge');
+    P(52.5, -92.5, 1.2, 1.2, 1.0, 'fridge');
+    P(52.5, -88, 1.0, 1.0, 1.6, 'shelf');
+    P(56, -84, 1.0, 1.0, 0.9, 'bin', false);
+    P(90, -84, 0.9, 0.9, 0.8, 'bin', false);
+    for (let i = 0; i < 6; i++) P(60 + i * 5.2, -86.5, 0.8, 0.8, 0.9, 'crate', false);
+    // trays and jugs on the tables, so the mess hall looks used
+    for (let i = 0; i < 4; i++) for (let j = 0; j < 2; j++) {
+      const tx = 72 - 14 + i * 9.2, tz = -92 - 6 + j * 12;
+      P(tx - 0.9, tz + 0.2, 0.34, 0.3, 0.22, 'pot', false, 0.78);
+      P(tx + 0.9, tz - 0.2, 0.5, 0.36, 0.08, 'tray', false, 0.78);
     }
 
-    /* ---------------- loose junk with real physics ---------------- */
+    /* ---- ARMORY (x 84..106, z 27..53) ---- */
+    for (let i = 0; i < 5; i++) P(88 + i * 3.2, 30, 2.2, 0.7, 1.9, 'weaponrack');
+    P(86.5, 34.5, 1.1, 0.9, 0.7, 'crate');            // ammo crates
+    P(90.5, 34.5, 1.1, 0.9, 0.7, 'crate');
+    P(94.5, 34.5, 1.1, 0.9, 0.7, 'crate');
+    P(88, 44, 1.2, 0.9, 2.0, 'cabinet');
+    P(92, 44, 1.2, 0.9, 2.0, 'cabinet');
+    P(96, 44, 1.2, 0.9, 2.0, 'locker');
+    P(99, 44, 1.2, 0.9, 2.0, 'locker');
+    P(90, 47.5, 4.2, 1.0, 0.9, 'workbench');          // cleaning bench
+    P(101, 37, 0.6, 0.6, 0.3, 'board', false, 1.8);
+
+    /* ---- GUARD HOUSE (x -106..-84, z -22..2) ---- */
+    for (let i = 0; i < 5; i++) P(-104 + i * 4.4, -18, 1.4, 0.9, 2.0, 'locker');
+    P(-95, -4, 4.0, 1.0, 0.5, 'bench');
+    P(-86, -16, 0.9, 0.9, 1.0, 'pot');
+    P(-88, -4.5, 1.2, 0.7, 0.85, 'desk');
+    P(-90.5, -4.5, 1.2, 0.7, 0.85, 'desk');
+    P(-86.5, -8, 0.5, 0.5, 0.9, 'chair', false);
+    P(-89.5, -8, 0.5, 0.5, 0.9, 'chair', false);
+    P(-104, 0, 0.9, 0.12, 1.3, 'board');              // key board
+    P(-100, 0, 0.9, 0.12, 1.3, 'board');              // duty roster
+    P(-97, -1, 0.6, 0.6, 0.9, 'bin', false);
+
+    /* ---- WORKSHOP (x 84..106, z -23..3) ---- */
+    for (let i = 0; i < 3; i++) P(88 + i * 4, -18, 3.4, 1.1, 0.92, 'workbench');
+    P(84.9, -21.4, 0.9, 0.6, 1.1, 'extinguisher', false);
+    P(103, -2, 1.2, 1.0, 2.0, 'cabinet');
+    P(88, -2, 1.6, 1.6, 1.6, 'tank');
+    P(97, -6, 1.1, 1.1, 0.9, 'bin', false);
+    P(92, -12, 1.4, 1.1, 0.6, 'crate', false);
+    P(100, -8, 0.9, 0.9, 0.9, 'pot', false);
+    // the grate: oil stains, a toolbox and a work lamp around it
+    P(98.4, -19.6, 1.0, 0.7, 0.35, 'crate', false);
+    P(101.2, -18.6, 0.5, 0.4, 0.3, 'pot', false);
+    P(99, -21.6, 0.5, 0.12, 1.2, 'board', false, 1.2);
+
+    /* ---- MEDICAL ---- */
+    P(-88, -84.6, 1.0, 0.7, 0.95, 'desk');
+    P(-70, -84.6, 1.0, 0.7, 0.95, 'desk');
+    P(-64, -90, 1.1, 0.8, 0.9, 'bin', false);
+
+    /* ---- LAUNDRY ---- */
+    for (let i = 0; i < 3; i++) P(-100 + i * 4.4, 36.5, 3.6, 1.1, 0.85, 'workbench');
+    P(-103, 44, 1.0, 1.0, 1.6, 'shelf');
+    P(-88, 22.5, 0.9, 0.9, 0.9, 'bin', false);
+
+    /* ---- the service ring and the yard: notices, extinguishers, bins ---- */
+    for (const [x, z] of [[-70, 60], [70, 60], [-70, -60], [70, -60], [0, 84], [0, -84]] as [number, number][]) {
+      P(x, z, 1.6, 0.14, 1.1, 'board', false, 1.5);
+      P(x + 3.4, z, 0.6, 0.5, 1.1, 'extinguisher', false);
+    }
+  }
+
+  /** Six thousand pieces of loose junk, kicked by boots and thrown by gunfire. */
+  private addDebris() {
     this.debris = [];
     const drop = (x: number, z: number, y: number, kind: number, size: number) => {
       this.debris.push({
@@ -593,21 +709,20 @@ export class PrisonSim {
         size, kind, rest: true,
       });
     };
-    // six pieces per cell, scattered on the floor and under the bunk
+    // a cell is lived in: papers, cups, casings under the bunk
     for (const c of this.cells) {
-      const n = 8 + (c.index % 4);
+      const n = 20 + (c.index % 5);      // a cell is never swept
       for (let i = 0; i < n; i++) {
         const kind = [0, 0, 1, 3, 2, 4][i % 6];
         drop(c.x + rnd(-CELL_W * 0.42, CELL_W * 0.42), c.z + rnd(-CELL_D * 0.42, CELL_D * 0.42),
           0.01 + (kind === 3 ? 0.005 : 0), kind, kind === 0 ? rnd(0.1, 0.18) : rnd(0.05, 0.11));
       }
     }
-    // galleries: papers and casings blown down the corridor
+    // galleries: papers and casings swept against the bars
     for (const wing of [0, 1, 2, 3]) {
       const z = wingZ(wing);
       for (let i = 0; i < 460; i++) {
         const kind = i % 5 === 0 ? 1 : i % 7 === 0 ? 2 : i % 3 === 0 ? 3 : 0;
-        // most of it is swept against the bars, a third lies in the walkway
         const edge = i % 3 !== 0;
         const side = i % 2 === 0 ? 1 : -1;
         const lz = edge
@@ -616,7 +731,7 @@ export class PrisonSim {
         drop(rnd(-72, 72), lz, 0.01, kind, rnd(0.05, 0.16));
       }
     }
-    // rooms, the yard and the workshop floor
+    // the rooms, the yard and the workshop floor
     for (const [rx, rz] of [[-56, 84], [56, 84], [-72, -92], [72, -92], [95, 40], [95, -10], [-95, 30], [-95, -10], [0, 96], [0, -96]]) {
       for (let i = 0; i < 110; i++) {
         const kind = i % 9 === 0 ? 5 : i % 4 === 0 ? 2 : i % 3 === 0 ? 3 : 0;
@@ -626,12 +741,30 @@ export class PrisonSim {
   }
 
   private addPickups() {
+    // consumables in the same places as before
     this.pickups.push({ x: -78, z: -76, y: 0.9, kind: 'medkit', taken: false });
-    this.pickups.push({ x: 80, z: 84, y: 0.9, kind: 'ammo', taken: false });
+    this.pickups.push({ x: 80, z: 84, y: 0.9, kind: 'ammo', amount: 24, taken: false });
     this.pickups.push({ x: 56, z: -80, y: 0.9, kind: 'armor', taken: false });
     this.pickups.push({ x: -56, z: 80, y: 0.9, kind: 'keys', taken: false });
-    this.pickups.push({ x: 0, z: 0, y: 0.9, kind: 'ammo', taken: false });
+    this.pickups.push({ x: 0, z: 0, y: 0.9, kind: 'ammo', amount: 18, taken: false });
     this.pickups.push({ x: 0, z: -96, y: 0.9, kind: 'medkit', taken: false });
+    this.pickups.push({ x: -72, z: -88, y: 0.9, kind: 'medkit', taken: false });
+    this.pickups.push({ x: 74, z: -96, y: 0.9, kind: 'armor', taken: false });
+
+    // ARMORY: three racks, three guns, and crates of ammunition
+    this.pickups.push({ x: 88, z: 31.4, y: 1.1, kind: 'weapon', weapon: 'carbine', taken: false });
+    this.pickups.push({ x: 93.0, z: 31.4, y: 1.1, kind: 'weapon', weapon: 'shotgun', taken: false });
+    this.pickups.push({ x: 97.6, z: 31.4, y: 1.1, kind: 'weapon', weapon: 'smg', taken: false });
+    this.pickups.push({ x: 86.5, z: 34.5, y: 0.8, kind: 'ammo', amount: 90, taken: false });
+    this.pickups.push({ x: 90.5, z: 34.5, y: 0.8, kind: 'ammo', amount: 60, taken: false });
+    this.pickups.push({ x: 94.5, z: 34.5, y: 0.8, kind: 'ammo', amount: 60, taken: false });
+    this.pickups.push({ x: 99.5, z: 47.5, y: 1.1, kind: 'weapon', weapon: 'shotgun', taken: false });
+    // GUARD HOUSE: the sergeant's shotgun behind the desk
+    this.pickups.push({ x: -88, z: -3.2, y: 1.0, kind: 'weapon', weapon: 'shotgun', taken: false });
+    this.pickups.push({ x: -104, z: -14, y: 0.9, kind: 'ammo', amount: 36, taken: false });
+    // WORKSHOP: a stash the inmates hid under the bench
+    this.pickups.push({ x: 92, z: -15.4, y: 0.9, kind: 'ammo', amount: 45, taken: false });
+    this.pickups.push({ x: 84.9, z: -21.4, y: 0.9, kind: 'armor', taken: false });
   }
 
   /** Spatial hash for walls and props: one pass per frame is enough with 8 m buckets. */
@@ -656,9 +789,10 @@ export class PrisonSim {
 
   private spawnInCell() {
     const cell = this.cells[this.homeCell];
-    // Step out of the bunk instead of waking up inside its collision box.
-    this.px = cell.x - CELL_W * 0.24;   // beside the bunk, clear of the toilet
-    this.pz = cell.z + cell.face * 0.35;
+    // Step out of the bunk instead of waking up inside its collision box. The middle
+    // column of the cell is kept clear of furniture, so the door is always reachable.
+    this.px = cell.x + 0.05;
+    this.pz = cell.z + cell.face * 0.4;
     this.yaw = cell.face > 0 ? Math.PI / 2 : -Math.PI / 2;
     this.pitch = 0;
     this.phase = 'cell';
@@ -719,9 +853,22 @@ export class PrisonSim {
   /* shooting                                                            */
   /* ------------------------------------------------------------------ */
 
+  get spec(): WeaponSpec { return WEAPONS[this.weapon]; }
+
+  /** Pick a gun up off a rack: full magazine, and a real reserve. */
+  equip(id: WeaponId): boolean {
+    if (this.weapon === id) return false;
+    const w = WEAPONS[id];
+    this.weapon = id; this.magSize = w.mag; this.mag = w.mag;
+    this.reserve = Math.max(this.reserve, w.reserve);
+    this.reloading = 0;
+    return true;
+  }
+
   reload() {
     if (this.reloading > 0 || this.mag >= this.magSize || this.reserve <= 0) return;
-    this.reloading = 1.25;
+    this.reloading = this.spec.reload;
+    this.events.push({ kind: 'reload', x: this.px, z: this.pz, y: 1.2 });
   }
 
   get lockNear(): PrisonCell | null {
@@ -731,6 +878,34 @@ export class PrisonSim {
       if (Math.hypot(lx - this.px, lz - this.pz) < 2.4) return c;
     }
     return null;
+  }
+
+  /** Stand at the workshop grate and hold: the bars give way in about four seconds. */
+  pryHatch(dt: number, held: boolean) {
+    if (this.hatch.open) return { open: true, progress: 1 };
+    const d = Math.hypot(this.hatch.x - this.px, this.hatch.z - this.pz);
+    if (!held || d > 2.6 || this.cuffed > 0) {
+      this.hatch.progress = Math.max(0, this.hatch.progress - dt * 0.7);
+      return { open: false, progress: this.hatch.progress };
+    }
+    this.hatch.progress = Math.min(1, this.hatch.progress + dt / 4.2);
+    this.alarm = Math.min(1, this.alarm + dt * 0.28);
+    if (Math.random() < dt * 5) this.throwDebris(this.hatch.x, this.hatch.z, 1.8, 2.2);
+    if (this.hatch.progress < 1) {
+      this.message = `PRYING THE SERVICE GRATE … ${Math.round(this.hatch.progress * 100)}%`;
+      this.messageT = 0.4;
+      return { open: false, progress: this.hatch.progress };
+    }
+    this.hatch.open = true;
+    this.message = 'THE GRATE IS OFF — DROP INTO THE SERVICE DUCT';
+    this.messageT = 6;
+    this.events.push({ kind: 'hatch', x: this.hatch.x, z: this.hatch.z, y: 0.4 });
+    return { open: true, progress: 1 };
+  }
+
+  /** Standing over an open grate, or through an open sally port. */
+  get atHatch() {
+    return this.hatch.open && Math.hypot(this.hatch.x - this.px, this.hatch.z - this.pz) < 1.15;
   }
 
   /** The lever the operative is close enough to put a hand on. */
@@ -802,11 +977,22 @@ export class PrisonSim {
 
   /** Hitscan pistol round. Returns what it hit, for the renderer's tracers. */
   fire(): { hit: 'wall' | 'guard' | 'inmate' | 'lock' | 'nothing'; x: number; z: number; y: number } {
-    if (this.phase === 'escaped' || this.reloading > 0 || this.cool > 0) return { hit: 'nothing', x: 0, z: 0, y: 0 };
+    if (this.phase === 'escaped' || this.cuffed > 0 || this.reloading > 0 || this.cool > 0) return { hit: 'nothing', x: 0, z: 0, y: 0 };
     if (this.mag <= 0) { this.reload(); return { hit: 'nothing', x: 0, z: 0, y: 0 }; }
-    this.mag--; this.cool = 0.16; this.flash = 0.055; this.stats.shots++;
+    const spec = this.spec;
+    this.mag--; this.cool = spec.cool; this.flash = spec.pellets > 1 ? 0.075 : 0.055; this.stats.shots++;
     this.alarm = Math.min(1, this.alarm + 0.45);
-    const spread = 0.012;
+    this.events.push({ kind: 'shot', x: this.px, z: this.pz, y: this.py });
+    // a shotgun throws a cone of pellets; everything else is a single round
+    let last = { hit: 'nothing' as 'wall' | 'guard' | 'inmate' | 'lock' | 'nothing', x: 0, z: 0, y: 0 };
+    for (let pellet = 0; pellet < spec.pellets; pellet++) {
+      last = this.fireOne(spec);
+    }
+    return last;
+  }
+
+  private fireOne(spec: WeaponSpec): { hit: 'wall' | 'guard' | 'inmate' | 'lock' | 'nothing'; x: number; z: number; y: number } {
+    const spread = spec.spread;
     const ang = this.yaw + rnd(-spread, spread);
     const pitch = this.pitch + rnd(-spread, spread);
     const dx = Math.cos(ang), dz = Math.sin(ang);
@@ -858,7 +1044,7 @@ export class PrisonSim {
     if (target?.kind === 'guard') {
       const g = this.guards[target.ref];
       if (g) {
-        g.hp -= 46; g.flash = 0.12; g.state = 'engage'; g.alertT = 12;
+        g.hp -= spec.damage; g.flash = 0.12; g.state = 'engage'; g.alertT = 12;
         this.stats.hits++;
         if (g.hp <= 0) {
           g.state = 'down'; this.stats.guardsDown++;
@@ -881,7 +1067,6 @@ export class PrisonSim {
     }
     // the round kicks dust and junk off whatever it hits
     this.throwDebris(out.x, out.z, 2.6, 3.4);
-    this.events.push({ kind: 'shot', x: this.px, z: this.pz, y: this.py });
     return out;
   }
 
@@ -942,8 +1127,11 @@ export class PrisonSim {
     }
 
     // ---- player movement (yaw relative) ----
+    // Cuffed: hands behind the back while an officer walks you to the cell.
+    this.cuffed = Math.max(0, this.cuffed - dt);
+    const frozen = this.cuffed > 0;
     const speed = (input.sprint ? 5.4 : 3.3) * (this.lightsOut ? 0.9 : 1);
-    const len = Math.hypot(input.fwd, input.strafe);
+    const len = frozen ? 0 : Math.hypot(input.fwd, input.strafe);
     let kickX = 0, kickZ = 0;
     if (len > 0.01) {
       const f = input.fwd / Math.max(1, len), s = input.strafe / Math.max(1, len);
@@ -955,62 +1143,101 @@ export class PrisonSim {
     }
     this.updateDebris(dt, kickX, kickZ);
 
-    // ---- guards ----
+    // ---- guards: nobody in this prison is armed. They close in and cuff you. ----
     for (const g of this.guards) {
       if (g.state === 'down') { this.physBody(g, dt); continue; }
       g.flash = Math.max(0, g.flash - dt);
       g.cool = Math.max(0, g.cool - dt);
+      g.cuffCool = Math.max(0, g.cuffCool - dt);
       const dToP = Math.hypot(this.px - g.x, this.pz - g.z);
-      // Sight is expensive and does not change within a fifth of a second: cache it per
-      // guard, staggered so the cost is spread over frames instead of spiking.
       if (g.losT === undefined || g.losT <= 0) {
         g.losT = 0.18 + (g.id % 5) * 0.017;
-        g.losSeen = dToP < (g.tower ? 95 : 46) && this.lineOfSight(g.x, g.z, this.px, this.pz);
+        g.losSeen = dToP < (g.tower ? 95 : 42) && this.lineOfSight(g.x, g.z, this.px, this.pz);
       } else {
         g.losT -= dt;
       }
-      const sees = !!g.losSeen && dToP < (g.tower ? 95 : 46);
-      // Nobody fires into a locked cell: the operative is not a threat behind his own bars.
+      const sees = !!g.losSeen && dToP < (g.tower ? 95 : 42);
+      // Nobody chases a man behind his own bars, and nobody chases while you are cuffed.
       const caged = this.inHomeCell && !this.cells[this.homeCell].opened;
-      if (sees && !caged && this.alarmOn) { g.state = 'alert'; g.alertT = Math.max(g.alertT, 6); }
-      if (sees && !caged && dToP < (g.elite ? 58 : 34)) { g.state = 'engage'; g.alertT = Math.max(g.alertT, g.elite ? 16 : 10); }
-      if (caged) g.state = 'patrol';
+      const busy = this.cuffed > 0;
 
-      // a freed inmate next to a guard is a fight, and guards shoot them too
-      let foe: PrisonInmate | null = null; let fd = 30;
+      if (sees && !caged && !busy) {
+        g.alertT = Math.max(g.alertT, 7.5);
+        g.lastX = this.px; g.lastZ = this.pz;
+        if (g.tower) {
+          // a tower officer cannot run you down; he picks up the radio instead
+          if (!this.alarmOn) {
+            this.alarmOn = true; this.alarm = 1;
+            this.message = 'TOWER SPOTTED YOU — THE SIRENS ARE UP';
+            this.messageT = 4;
+            this.events.push({ kind: 'alarm', x: g.x, z: g.z, y: g.y });
+          }
+        } else {
+          if (g.state !== 'engage') this.events.push({ kind: 'shout', x: g.x, z: g.z, y: g.y + 1.5 });
+          g.state = 'engage';
+        }
+      }
+
+      // a freed inmate next to an officer is a scuffle, and the officer uses his hands
+      let foe: PrisonInmate | null = null; let fd = 26;
       for (const n of this.inmates) {
         if (n.state !== 'free' && n.state !== 'fight') continue;
         const d = Math.hypot(n.x - g.x, n.z - g.z);
         if (d < fd) { fd = d; foe = n; }
       }
 
-      if (g.state === 'engage' && (sees || foe)) {
-        g.alertT -= dt;
-        const tx = foe && !sees ? foe.x : this.px;
-        const tz = foe && !sees ? foe.z : this.pz;
-        g.ang = Math.atan2(tz - g.z, tx - g.x);
-        const engageFoe = !!foe && (fd < 9 || !sees);
-        if (g.cool <= 0) {
-          g.cool = g.tower ? 1.5 : g.elite ? 0.6 : 0.95;
-          if (engageFoe && foe) { foe.hp -= 18; foe.flash = 0.1; if (foe.hp <= 0) { foe.state = 'down'; this.stats.inmatesDown++; } }
-          else {
-            this.events.push({ kind: 'shot', x: g.x, z: g.z, y: g.y + 1.1 });
-            if (Math.random() < (g.tower ? 0.55 : 0.42)) this.damagePlayer(g.tower ? 13 : 8);
+      if (g.state === 'engage' && !g.tower) {
+        // chase the operative; if he is out of sight, go to where he was last seen
+        const goToPlayer = sees && !caged && !busy;
+        const tx = goToPlayer ? this.px : foe && !sees ? foe.x : g.lastX;
+        const tz = goToPlayer ? this.pz : foe && !sees ? foe.z : g.lastZ;
+        const dx = tx - g.x, dz = tz - g.z;
+        const d = Math.hypot(dx, dz) || 1;
+        g.ang = Math.atan2(dz, dx);
+        const sprinting = this.alarm > 0.5 || dToP < 14;
+        const sp = (sprinting ? 4.15 : 3.15) * (g.elite ? 1.1 : 1);
+        if (d > 1.05) {
+          const sx = (dx / d) * sp * dt, sz = (dz / d) * sp * dt;
+          const x0 = g.x, z0 = g.z;
+          if (!this.staticBlocked(g.x + sx, g.z, 0.42)) g.x += sx;
+          if (!this.staticBlocked(g.x, g.z + sz, 0.42)) g.z += sz;
+          g.gait = Math.hypot(g.x - x0, g.z - z0) / Math.max(dt, 0.001);
+          g.limb += dt * (3.4 + g.gait * 1.6);
+        } else {
+          g.gait = 0;
+          // close enough to fight an inmate
+          if (foe && !goToPlayer && fd < 1.4) {
+            if (g.cool <= 0) {
+              g.cool = 0.75;
+              foe.hp -= 20; foe.flash = 0.1;
+              this.events.push({ kind: 'hit', x: foe.x, z: foe.z, y: 1.2 });
+              if (foe.hp <= 0) {
+                foe.state = 'down'; this.stats.inmatesDown++;
+                foe.vx = rnd(-2.4, 2.4); foe.vz = rnd(-2.4, 2.4); foe.vy = 2;
+              }
+            }
           }
         }
+        // the cuff: one touch and you are on your way back to the cell
+        if (goToPlayer && g.cuffCool <= 0 && dToP < 1.3) { g.cuffCool = 5; this.cuff(g); }
+        // give up the hunt after a while
+        g.alertT -= dt;
         if (g.alertT <= 0) g.state = 'patrol';
       } else {
         // patrol
         const node = g.patrol[g.node % g.patrol.length];
         const dx = node.x - g.x, dz = node.z - g.z;
         const d = Math.hypot(dx, dz);
-        if (d < 1.2) g.node++;
+        if (d < 1.2) { g.node++; g.gait = 0; }
         else {
-          const sp = (this.alarm > 0.5 ? 2.6 : 1.5) * (g.elite ? 1.3 : 1) * dt;
+          const sp = (this.alarm > 0.5 ? 2.4 : 1.45) * (g.elite ? 1.25 : 1) * dt;
+          const x0 = g.x, z0 = g.z;
           g.x += (dx / d) * sp; g.z += (dz / d) * sp;
           g.ang = Math.atan2(dz, dx);
-          g.limb += dt * 7.5;
+          g.gait = Math.hypot(g.x - x0, g.z - z0) / Math.max(dt, 0.001);
+          g.limb += dt * (3.2 + g.gait * 1.7);
         }
+        if (g.alertT > 0) g.alertT -= dt;
       }
     }
 
@@ -1045,22 +1272,36 @@ export class PrisonSim {
       }
     }
 
-    // ---- pickups ----
+    // ---- pickups: guns off the rack, crates of ammunition, kit ----
     for (const p of this.pickups) {
       if (p.taken) continue;
-      if (Math.hypot(p.x - this.px, p.z - this.pz) < 1.6) {
+      if (Math.hypot(p.x - this.px, p.z - this.pz) < 1.7) {
         p.taken = true; this.stats.looted++;
-        if (p.kind === 'ammo') this.reserve += 36;
-        else if (p.kind === 'medkit') this.hp = Math.min(this.maxHp, this.hp + 45);
+        if (p.kind === 'weapon' && p.weapon) {
+          this.equip(p.weapon);
+          this.message = `${WEAPONS[p.weapon].name} IN HAND — ${WEAPONS[p.weapon].mag} IN THE MAG`;
+        } else if (p.kind === 'ammo') {
+          this.reserve += p.amount ?? 36;
+          this.message = `AMMUNITION +${p.amount ?? 36} · ${this.spec.name}`;
+        } else if (p.kind === 'medkit') this.hp = Math.min(this.maxHp, this.hp + 45);
         else if (p.kind === 'armor') this.armor = Math.min(100, this.armor + 50);
-        else if (p.kind === 'keys') { this.reserve += 12; this.message = 'A RING OF KEYS — SOMEONE ELSE\'S BAD DAY'; this.messageT = 3; }
+        else if (p.kind === 'keys') {
+          this.reserve += 12;
+          this.message = 'A RING OF KEYS — SOMEONE ELSE\'S BAD DAY';
+        }
+        this.messageT = 3.5;
         this.events.push({ kind: 'pickup', x: p.x, z: p.z, y: p.y });
       }
     }
 
-    // ---- escape ----
+    // ---- escape: the sally port, or the duct under the workshop ----
     if (this.sallyOpen && this.pz > 104 && Math.abs(this.px) < 9) {
       this.phase = 'escaped';
+      this.message = 'THROUGH THE SALLY PORT — YOU ARE OUT';
+      this.events.push({ kind: 'exit', x: this.px, z: this.pz, y: 1 });
+    } else if (this.atHatch) {
+      this.phase = 'escaped';
+      this.message = 'DOWN THE SERVICE DUCT — YOU ARE OUT';
       this.events.push({ kind: 'exit', x: this.px, z: this.pz, y: 1 });
     }
     this.alarm = clamp(this.alarm - dt * 0.06, 0, 1);
@@ -1105,12 +1346,42 @@ export class PrisonSim {
     if (this.hp <= 0) this.captured();
   }
 
+  /**
+   * Cuffed. This is the whole threat model now: no officer is armed, they close in,
+   * take your gun and walk you back. The cell door is re-secured with a fresh lock, so
+   * every breakout has to be earned again.
+   */
+  cuff(g?: PrisonGuard) {
+    if (this.phase === 'escaped') return;
+    const c = this.cells[this.homeCell];
+    this.cuffed = 2.6;
+    this.alarm = 1;
+    this.px = c.x + 0.05;
+    this.pz = c.z + c.face * 0.4;
+    this.yaw = c.face > 0 ? Math.PI / 2 : -Math.PI / 2;
+    // the door is shut and a new lock is bolted on
+    c.opened = false; c.lock = 'intact'; c.lockHp = c.lockMax;
+    this.allOpen = false;
+    // the gun you stole is gone; the sergeant keeps it
+    this.weapon = 'pistol'; this.magSize = WEAPONS.pistol.mag; this.mag = WEAPONS.pistol.mag;
+    this.reserve = 12; this.reloading = 0;
+    for (const o of this.guards) {
+      if (o === g) continue;
+      if (Math.hypot(o.x - this.px, o.z - this.pz) < 9) { o.state = 'patrol'; o.alertT = 0; o.cuffCool = 3; }
+    }
+    if (g) { g.state = 'patrol'; g.alertT = 0; }
+    this.message = 'CUFFED — CUFFED AND WALKED BACK · YOUR GUN IS GONE, THE BARS ARE NEW';
+    this.messageT = 6;
+    this.events.push({ kind: 'cuff', x: this.px, z: this.pz, y: 1 });
+  }
+
   /** Beaten unconscious: the guards drag the operative back to the cell. */
   captured() {
     this.hp = this.maxHp; this.armor = 0; this.mag = this.magSize;
     this.px = this.cells[this.homeCell].x;
     this.pz = this.cells[this.homeCell].z;
     this.alarm = 0;
+    this.cuffed = 2.2;
     this.message = 'THEY DRAG YOU BACK TO THE CELL — THE LOCK IS STILL INTACT';
     this.messageT = 5;
   }
