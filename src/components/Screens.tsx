@@ -362,6 +362,17 @@ export function HudLayer({
               ✈ S.H.I.E.L.D. BOMBER · G BOMB CARPET
             </div>
           )}
+          {hud.jet && (
+            <div className="mt-2 rounded-sm border border-cyan-200/70 bg-cyan-300/15 px-2 py-1 text-center text-[10px] font-bold tracking-[0.18em] text-cyan-50">
+              <div>🛩 INTERCEPTOR · {hud.vehicleHp}/{hud.vehicleMax} HULL</div>
+              <div className="font-tech mt-0.5 text-[9px] tracking-widest text-cyan-100/70">
+                SHIFT AFTERBURNER · LMB CANNON · F EJECT
+              </div>
+              <div className="mt-1 h-1 overflow-hidden rounded-sm bg-black/60">
+                <div className="h-full bg-gradient-to-r from-cyan-300 to-white" style={{ width: `${Math.round(hud.jetBoost * 100)}%` }} />
+              </div>
+            </div>
+          )}
           {/* IRON RESERVE: the parade, the guns and the alarm */}
           {hud.armyTotal > 0 && (
             <div className="mt-2 border-t border-lime-300/25 pt-1.5">
