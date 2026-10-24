@@ -16,6 +16,11 @@ export function structuralHealth(kind: StructKind) {
   if (kind === 'keep' || kind === 'tower' || kind === 'vault') return 380;
   if (kind === 'curtain' || kind === 'bunker') return 250;
   if (kind === 'hangar' || kind === 'wall') return 180;
+  // Army district props: a barrel goes up fast, a parked hull takes real ordnance,
+  // and the command consoles are hardened like the bunker they sit in.
+  if (kind === 'barrel') return 90;
+  if (kind === 'tank') return 320;
+  if (kind === 'console') return 280;
   return 220;
 }
 

@@ -1,4 +1,6 @@
 import { sfx } from './audio';
+import type { SectorDressing } from './sectorKits';
+import type { ArmyPlan } from './army';
 import { AIRFIELD, VAULT_ENTRY, ARENA_W, ARENA_H, HQ, PLAYER_START, SECTORS, SpatialGrid, generateWorld, type Rect, type Zone } from './world';
 import { RoutePlanner, segmentBox, segmentCircle, type Point, type Block } from './navigation';
 import { makeGates, makeDetails, gateBlocks, drawGate, drawDetails, type HydraulicGate, type RoomDetail } from './installations';
@@ -82,6 +84,11 @@ export interface Hud {
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
   vaultFound: boolean; nearPrompt: string;
   coords: string; gatePrompt: string; aegisCharges: number; aegisTime: number;
+  /* ---------------- IRON RESERVE ---------------- */
+  armyAlarm: number;
+  armyAwake: number; armyTotal: number;
+  turretsHeld: number; turretsTotal: number;
+  turretPrompt: string;
   mouseSens: number;
   vehicleHp: number; vehicleMax: number; vehicleFuel: number;
   blackoutHud: boolean;
@@ -145,6 +152,13 @@ const ENEMIES: Record<string, EnemyDef> = {
   custodian: { hp: 280, speed: 96, r: 19, dmg: 0, score: 520, color: '#3f6fd8', dark: '#122a52', shield: 0.86, ranged: false },
   turret:    { hp: 260, speed: 0, r: 19, dmg: 0, score: 650, color: '#ff3858', dark: '#4f101c', ranged: true, range: 620, fireRate: 0.72, bulletSpeed: 720, bulletDmg: 11, pellets: 1, spread: 0.018 },
   boss:      { hp: 1500, speed: 72, r: 44, dmg: 28, score: 3000, color: '#ff2d55', dark: '#450a18', ranged: true, range: 520, fireRate: 1.05, bulletSpeed: 460, bulletDmg: 12, pellets: 10, spread: 6.28, boss: true },
+  // ---------------- IRON RESERVE (sector 6) ----------------
+  // The army fights in a different key to Hydra: tighter volleys, longer range, no theatrics.
+  armytrooper: { hp: 62, speed: 118, r: 14, dmg: 12, score: 140, color: '#c9d39a', dark: '#3d4a2a', ranged: true, range: 420, fireRate: 1.15, bulletSpeed: 640, bulletDmg: 9, pellets: 1, spread: 0.045 },
+  armyguard:   { hp: 150, speed: 86, r: 17, dmg: 18, score: 340, color: '#a9b477', dark: '#333d22', shield: 0.5, ranged: true, range: 330, fireRate: 1.0, bulletSpeed: 580, bulletDmg: 12, pellets: 2, spread: 0.11 },
+  armyengineer:{ hp: 82, speed: 104, r: 14, dmg: 8, score: 260, color: '#d8c07a', dark: '#4a3d18', ranged: true, range: 300, fireRate: 1.6, bulletSpeed: 470, bulletDmg: 6, pellets: 1, spread: 0.08 },
+  armymedic:   { hp: 74, speed: 112, r: 14, dmg: 4, score: 300, color: '#bfe8a8', dark: '#2f4a22', ranged: true, range: 280, fireRate: 2.4, bulletSpeed: 440, bulletDmg: 4, pellets: 1, spread: 0.14 },
+  armymajor:   { hp: 260, speed: 92, r: 19, dmg: 14, score: 620, color: '#e2d79a', dark: '#54491c', ranged: true, range: 480, fireRate: 1.4, bulletSpeed: 600, bulletDmg: 11, pellets: 3, spread: 0.09 },
   // unarmed HQ staff
   coder:     { hp: 55, speed: 132, r: 13, dmg: 0, score: 500, color: '#8fd8ff', dark: '#123044', civilian: true },
   general:   { hp: 900, speed: 66, r: 26, dmg: 0, score: 10000, color: '#ffe08a', dark: '#5a3f06', civilian: true },
@@ -184,6 +198,10 @@ interface Enemy {
   patrolTeam?: string; patrolSlot?: number;
   /** Gate detail: holds the prison approach and lets the operative walk up to the gate. */
   policePost?: boolean;
+  /** IRON RESERVE parade: a man standing in ranks who does not move until the alarm. */
+  dormant?: boolean;
+  /** Parade index, so a sleeping rank keeps its slot when it wakes. */
+  rank?: number;
 }
 interface Squad {
   id: number; tactic: Tactic; state: SquadState; doctrine: Doctrine;
@@ -215,6 +233,36 @@ interface Tank {
   cool: number; dead: boolean; announced: boolean; captured: boolean; driven?: boolean; ttl: number; aimT?: number; id: number;
 }
 interface Mine { x: number; y: number; t: number; armed: boolean; }
+
+/** A snowplough working a lane. It never blocks the operative; it only moves snow. */
+interface Plough {
+  ax: number; ay: number; bx: number; by: number;
+  x: number; y: number; ang: number;
+  t: number; dir: 1 | -1; speed: number; side: 1 | -1;
+  pushT: number; blade: number;
+  /** Road-side normal the blade throws to. Fixed in world space: a shoulder is a shoulder
+   *  whether the plough is running up the road or back down it. */
+  nx: number; ny: number;
+  /** Distance from the centreline to the shoulder the load is thrown onto. */
+  off: number;
+}
+/** A heap of snow / dust / slurry beside a road. Ploughs grow it, weather slowly adds to it. */
+interface SnowBank { x: number; y: number; r: number; h: number; fill: number; }
+/**
+ * A twin-gun emplacement inside the army base. It covers the ground and the air, and it
+ * can be taken: knock the crew out of it, walk up, press F.
+ */
+interface ArmyTurret {
+  x: number; y: number; ang: number; hp: number; maxHp: number;
+  owner: 'enemy' | 'player'; cool: number; heavy: boolean;
+  burst: number; flash: number; muzzle: number;
+}
+/** Military fast jet: parked until the base is breached, then it hunts. */
+interface ArmyJet {
+  x: number; y: number; ang: number; hp: number; maxHp: number;
+  state: 'parked' | 'launch' | 'attack' | 'egress';
+  alt: number; speed: number; cool: number; t: number;
+}
 /** Attack gunship — strafes, hovers, rockets the player. */
 interface Heli {
   x: number; y: number; tx: number; ty: number; ang: number; rotor: number;
@@ -431,6 +479,33 @@ export class Game {
   airTransports: AirTransport[] = [];
   airTroops: AirborneTrooper[] = [];
   ruins: Ruin[] = [];
+  /* ---------------- sector dressing: weather that is really there ---------------- */
+  private dressing: SectorDressing | null = null;
+  /** Snowploughs working their lanes (Arctic only). */
+  ploughs: Plough[] = [];
+  /** Heaps of snow / red dust / slurry beside the roads. */
+  snowBanks: SnowBank[] = [];
+  /** Lanes the ploughs have already cleared, drawn over the snow. */
+  private clearedLanes: { x: number; y: number; ang: number; len: number; w: number; t: number }[] = [];
+  private weatherT = 0;
+  /* ---------------- IRON RESERVE ---------------- */
+  private army: ArmyPlan | null = null;
+  /** 0..1 base alarm. The whole district answers it. */
+  armyAlarm = 0;
+  private armyAlerted = false;
+  private armyWakeT = 0;
+  private armyWaves = 0;
+  private armyLaunchT = 0;
+  armyTurrets: ArmyTurret[] = [];
+  armyJets: ArmyJet[] = [];
+  /** Ranks still asleep in the parade ground. */
+  armyDormant = 0;
+  /** The parade, kept from the world build so the ranks can be spawned in populateHQ(). */
+  private armyRanksData: { x: number; y: number; type: string }[] = [];
+  /** Both army shutters, kept apart so the inner one can be powered down. */
+  private armyShutters: Rect[] = [];
+  private armyInnerOpen = false;
+  private armyTanksSent = false;
   private campaignSites: CampaignSites | null = null;
   private blackout = { active: false, t: 0, searchT: 0, lastX: 0, lastY: 0 };
   private responseOrders: { id: string; target: Point; units: number; size: number; sent: number }[] = [];
@@ -760,6 +835,20 @@ export class Game {
       x: l.x, y: l.y, speed: l.speed, sweep: l.sweep,
     })));
     this.obstacles = prepareStructures(world.rects);
+    // Army shutters: prepareStructures() recomputes hp from the kind, so raise the two
+    // gates that were authored to be blast-proof. Only explosives will ever move them.
+    this.armyShutters = this.obstacles.filter((o) => !!o.armyGate);
+    for (const o of this.armyShutters) {
+      const inner = o.armyGate === 'inner';
+      o.hp = o.maxHp = inner ? 5200 : 3000;
+    }
+    // The army builds to a different standard. Its ramparts shrug off anything short of
+    // sustained rocket fire, which is exactly what makes the base feel like a fortress.
+    for (const o of this.obstacles) {
+      if (!o.armyWall) continue;
+      const inner = o.kind === 'bunker';
+      o.hp = o.maxHp = inner ? 5200 : 2600;
+    }
     this.ruins = [];
     this.campaignSites = world.campaignSites;
     this.blackout = { active: false, t: 0, searchT: 0, lastX: 0, lastY: 0 };
@@ -770,6 +859,35 @@ export class Game {
     this.sitePower.clear(); this.gridOutput = 1;
     this.story = PROLOGUE; this.storyTime = 0;
     this.zones = world.zones;
+    /* ---------------- sector dressing ---------------- */
+    this.dressing = world.dressing;
+    this.ploughs = world.dressing.ploughs.map((r) => {
+      const dx = r.bx - r.ax, dy = r.by - r.ay;
+      const len = Math.hypot(dx, dy) || 1;
+      return {
+        ax: r.ax, ay: r.ay, bx: r.bx, by: r.by,
+        x: r.ax, y: r.ay, ang: Math.atan2(dy, dx),
+        t: Math.random(), dir: 1 as const, speed: r.speed, side: r.side, pushT: 0, blade: 0,
+        nx: (dy / len) * r.side, ny: (-dx / len) * r.side, off: r.off || 128,
+      };
+    });
+    this.snowBanks = world.dressing.drifts.map((d) => ({ x: d.x, y: d.y, r: d.r, h: d.h, fill: d.fill }));
+    this.clearedLanes = [];
+    this.weatherT = 0;
+    /* ---------------- IRON RESERVE ---------------- */
+    this.army = world.army;
+    this.armyRanksData = world.ranks || [];
+    this.armyAlarm = 0; this.armyAlerted = false; this.armyWakeT = 0; this.armyWaves = 0;
+    this.armyLaunchT = 0; this.armyTanksSent = false;
+    this.armyTurrets = (world.army?.turrets || []).map((t) => ({
+      x: t.x, y: t.y, ang: t.ang, hp: t.heavy ? 900 : 620, maxHp: t.heavy ? 900 : 620,
+      owner: 'enemy' as const, cool: rand(0, 2), heavy: t.heavy, burst: 0, flash: 0, muzzle: 0,
+    }));
+    this.armyInnerOpen = false;
+    this.armyJets = (world.army?.jets || []).map((j) => ({
+      x: j.x, y: j.y, ang: j.ang, hp: 420, maxHp: 420,
+      state: 'parked' as const, alt: 0, speed: 0, cool: 0, t: 0,
+    }));
     this.gates = makeGates(world);
     this.details = makeDetails(world);
     this.facilities = world.facilities.map(f => ({ ...f, reveal: 0, discovered: false, secured: false, alarm: false, remaining: 0 }));
@@ -827,7 +945,8 @@ export class Game {
     });
     this.vtols = [];
 
-    this.px = PLAYER_START.x; this.py = PLAYER_START.y; this.pvx = 0; this.pvy = 0;
+    const insert = world.dressing?.start || PLAYER_START;
+    this.px = insert.x; this.py = insert.y; this.pvx = 0; this.pvy = 0;
     this.pang = -Math.PI / 2;
     this.hp = this.maxHp = 100;
     this.shieldHp = 0; this.shieldMax = 0;
@@ -944,6 +1063,25 @@ export class Game {
       e.ang = -Math.PI / 2; e.patrolTeam = `kraken-${group}`; e.patrolSlot = slot; e.leader = slot === 0;
       this.enemies.push(e);
     });
+    /* ---------------- IRON RESERVE PARADE ----------------
+     * A thousand men in ranks. They are real units, but they are asleep: no pathing, no
+     * fire, no separation until the base alarm wakes them in waves. That is what makes a
+     * thousand of them affordable, and it is also how a parade ground actually behaves.
+     */
+    if (this.armyRanksData.length) {
+      const types = ['armytrooper', 'armytrooper', 'armytrooper', 'armyguard', 'armytrooper', 'armyengineer', 'armymedic'];
+      this.armyRanksData.forEach((r, idx) => {
+        const type = r.type || types[idx % types.length];
+        const e = this.makeEnemy(type, r.x, r.y, -3000000 - Math.floor(idx / 40), idx % 40);
+        e.spawnT = 0; e.garrison = true; e.homeX = r.x; e.homeY = r.y;
+        e.ang = -Math.PI / 2; e.dormant = true; e.rank = idx; e.alert = false;
+        if (idx % 40 === 0) { e.type = 'armymajor'; e.def = ENEMIES.armymajor; e.hp = e.maxHp = 260; }
+        this.enemies.push(e);
+      });
+      this.armyDormant = this.armyRanksData.length;
+    } else {
+      this.armyDormant = 0;
+    }
     for (let i = 0; i < 6; i++) {
       const x = AIRFIELD.x - 700 + i * 265, y = AIRFIELD.y - 380;
       const pts = [{ x, y }, { x, y: AIRFIELD.y + 25 }, { x: x + 125, y: AIRFIELD.y + 25 }, { x: x + 125, y }]
@@ -1348,6 +1486,7 @@ export class Game {
 
   private pushHud() {
     const serversLeft = this.servers.filter((s) => !s.dead).length;
+    const nearTurret = this.armyTurrets.find((t) => t.owner === 'enemy' && Math.hypot(t.x - this.px, t.y - this.py) < 150);
     const codersLeft = this.coders.filter((c) => c.hp > 0).length;
     const boarding = new Map<number, number>();
     for (const e of this.enemies) if (e.boardingTruck !== undefined) boarding.set(e.boardingTruck, (boarding.get(e.boardingTruck) || 0) + 1);
@@ -1361,6 +1500,14 @@ export class Game {
       ammo: this.ammo === Infinity ? -1 : Math.max(0, Math.floor(this.ammo)),
       grenades: this.grenades, streak: this.streak, mult: this.mult,
       shieldHp: Math.round(this.shieldHp), shieldMax: this.shieldMax,
+      armyAlarm: this.armyAlarm,
+      armyAwake: this.armyRanksData.length ? Math.max(0, this.armyRanksData.length - this.armyDormant) : 0,
+      armyTotal: this.armyRanksData.length,
+      turretsHeld: this.armyTurrets.filter((t) => t.owner === 'player').length,
+      turretsTotal: this.armyTurrets.length,
+      turretPrompt: nearTurret
+        ? (nearTurret.hp > nearTurret.maxHp * 0.45 ? 'SUPPRESS THE EMPLACEMENT · KEEP FIRING' : 'F · SEIZE THE TWIN GUN')
+        : '',
       dashPct: 1 - clamp(this.dashCd / (1.1 * this.mods.dashCdMul), 0, 1),
       enemiesLeft: this.enemies.filter((e) => !e.garrison).length + this.spawnQueue.length + carried + air + reserved,
       grenadeCap: this.mods.grenadeCap,
@@ -1481,6 +1628,10 @@ export class Game {
     this.updateProfile(dt);
     this.updateCommand(dt);
     this.updateWaves(dt);
+    // Weather and the army district run after the wave logic but before the enemies, so a
+    // rank woken by the alarm is already awake when the soldiers think this frame.
+    this.updateDressing(dt);
+    this.updateArmy(dt);
     if (this.status !== 'playing') return;
     this.updateSquads(dt);
     this.updateEnemies(dt);
@@ -1506,6 +1657,337 @@ export class Game {
     this.updateCamera(dt);
     if (this.streakT > 0) { this.streakT -= dt; if (this.streakT <= 0) { this.streak = 0; this.mult = 1; } }
     if (this.bannerT > 0) this.bannerT -= dt;
+  }
+
+
+  /* ================================================================== */
+  /* WEATHER: SNOW ON THE GROUND, PLOUGHS WORKING THE ROADS             */
+  /* ================================================================== */
+
+  /**
+   * Snow is not a filter over the screen: the ploughs really move it. Each pass scrapes a
+   * lane behind the blade and throws the load onto the heaps at the roadside, which grow
+   * while the operative watches and slowly refill in the weather.
+   */
+  private updateDressing(dt: number) {
+    const d = this.dressing;
+    if (!d) return;
+    this.weatherT += dt;
+
+    for (const p of this.ploughs) {
+      const len = Math.hypot(p.bx - p.ax, p.by - p.ay) || 1;
+      p.t += (p.speed / len) * p.dir * dt;
+      if (p.t >= 1) { p.t = 1; p.dir = -1; }
+      else if (p.t <= 0) { p.t = 0; p.dir = 1; }
+      p.x = p.ax + (p.bx - p.ax) * p.t;
+      p.y = p.ay + (p.by - p.ay) * p.t;
+      p.ang = Math.atan2((p.by - p.ay) * p.dir, (p.bx - p.ax) * p.dir);
+      p.blade = 0.5 + 0.5 * Math.sin(this.simulationTime * 7 + p.ax);
+
+      p.pushT -= dt;
+      if (p.pushT > 0) continue;
+      p.pushT = 0.2;
+      // where the blade is throwing the load: always onto the same shoulder
+      const nx = p.nx, ny = p.ny;
+      const bx = p.x + nx * p.off, by = p.y + ny * p.off;
+      let bank: SnowBank | null = null;
+      let bd = 110;
+      for (const b of this.snowBanks) {
+        const dd = Math.hypot(b.x - bx, b.y - by);
+        if (dd < bd) { bd = dd; bank = b; }
+      }
+      if (bank) {
+        bank.fill = Math.min(1.7, bank.fill + 0.05);
+        bank.r = Math.min(165, bank.r + 0.8);
+        bank.h = Math.min(62, bank.h + 0.3);
+        bank.x = bank.x * 0.985 + bx * 0.015;
+        bank.y = bank.y * 0.985 + by * 0.015;
+      } else if (this.snowBanks.length < 1200) {
+        this.snowBanks.push({ x: bx, y: by, r: 32, h: 12, fill: 0.55 });
+      }
+      // the cleared lane behind the blade
+      this.clearedLanes.push({
+        x: p.x - Math.cos(p.ang) * 26, y: p.y - Math.sin(p.ang) * 26,
+        ang: p.ang, len: 120, w: 168, t: 14,
+      });
+      if (this.clearedLanes.length > 420) this.clearedLanes.shift();
+      if (Math.random() < 0.4) {
+        this.addParticle(bx, by, nx * rand(20, 70), ny * rand(20, 70), rand(0.3, 0.7), rand(2, 5),
+          d.snow ? '#eaf6ff' : '#8a8070', false);
+      }
+    }
+
+    // the weather slowly puts it back, and cleared lanes fade as it snows over them
+    if (d.snow) {
+      const refill = dt * 0.0022;
+      for (const b of this.snowBanks) if (b.fill < 1.35) b.fill = Math.min(1.35, b.fill + refill);
+    }
+    for (let i = this.clearedLanes.length - 1; i >= 0; i--) {
+      const l = this.clearedLanes[i];
+      l.t -= dt;
+      if (l.t <= 0) this.clearedLanes.splice(i, 1);
+    }
+  }
+
+  /* ================================================================== */
+  /* IRON RESERVE: THE BASE THAT ANSWERS ALL AT ONCE                    */
+  /* ================================================================== */
+
+  private updateArmy(dt: number) {
+    const a = this.army;
+    if (!a) return;
+
+    const inside = (b: { x: number; y: number; w: number; h: number }) =>
+      this.px > b.x && this.px < b.x + b.w && this.py > b.y && this.py < b.y + b.h;
+    const inBase = inside(a.base);
+
+    // The alarm: crossing into the compound wakes the whole district.
+    if (!this.armyAlerted && inBase) {
+      this.armyAlerted = true;
+      this.armyAlarm = 1;
+      this.armyWakeT = 0.6;
+      this.armyLaunchT = 2.5;
+      this.setBanner('IRON RESERVE · GENERAL QUARTERS', 'A THOUSAND MEN, AND EVERY AIRCRAFT THEY OWN');
+      this.addText(this.px, this.py - 70, '⚠ BASE ALARM — THE PARADE IS WAKING', '#ffd166', 20);
+      sfx.rotor();
+    }
+    if (this.armyAlerted) {
+      this.armyAlarm = Math.min(1, this.armyAlarm + dt * 0.4);
+      // one wave of the parade every three seconds until the ranks are empty: the whole
+      // district is on its feet inside twenty seconds of the alarm
+      this.armyWakeT -= dt;
+      if (this.armyWakeT <= 0 && this.armyDormant > 0) {
+        this.armyWakeT = 3;
+        this.armyWaves++;
+        const woken = this.wakeArmyRanks(150);
+        if (woken > 0) {
+          this.addText(this.px, this.py - 96,
+            `PARADE ${this.armyWaves} · ${woken} MEN FALL IN`, '#e6e2b4', 15);
+          sfx.wave();
+        }
+      }
+      // air: one jet and, until the apron is empty, one gunship per launch cycle
+      this.armyLaunchT -= dt;
+      if (this.armyLaunchT <= 0) {
+        this.armyLaunchT = 24;
+        this.launchArmyAir();
+      }
+    } else if (!inBase) {
+      this.armyAlarm = Math.max(0, this.armyAlarm - dt * 0.25);
+    }
+
+    /* ---- the powered inner gate ----
+     * Both generators feed the shutter in the blast wall. Kill them and it drops; until
+     * then the parade ground is sealed except through the gatehouse or from the air.
+     */
+    if (!this.armyInnerOpen) {
+      const cells = this.campaignSites?.powerCells.filter((c) => c.site === 'army-core') || [];
+      if (cells.length && cells.every((c) => c.dead)) {
+        this.armyInnerOpen = true;
+        let n = 0;
+        for (const o of this.armyShutters) {
+          if (o.armyGate !== 'inner' || o.dead) continue;
+          o.dead = true; n++;
+        }
+        this.navigationDirty = true;
+        this.grid.build(this.obstacles);
+        this.setBanner('BLAST GATE DOWN', 'BOTH GENERATORS ARE OUT — THE PARADE GROUND IS OPEN');
+        this.addText(this.px, this.py - 80, 'INNER SHUTTER DROPS', '#ffd166', 18);
+        sfx.explode();
+        void n;
+      }
+    }
+
+    // The armour park empties once: four hulls roll out behind the infantry.
+    if (this.armyAlerted && !this.armyTanksSent) {
+      this.armyTanksSent = true;
+      for (const spot of a.tankPatrols) {
+        if (this.tanks.length > 7) break;
+        const ang = Math.atan2(this.py - spot.y, this.px - spot.x);
+        this.tanks.push({
+          x: spot.x, y: spot.y,
+          goalX: this.px - Math.cos(ang) * 340, goalY: this.py - Math.sin(ang) * 340,
+          ang, turret: ang, lean: 0,
+          hp: 2400, maxHp: 2400, speed: 0,
+          cool: rand(2.5, 4.5), dead: false, announced: false, captured: false,
+          ttl: 400, id: this.tankSeq++,
+        });
+      }
+      this.addText(this.px, this.py - 120, 'ARMOUR ROLLING OUT OF THE PARK', '#ffb0b0', 16);
+    }
+
+    this.updateArmyTurrets(dt);
+    this.updateArmyJets(dt);
+  }
+
+  /** Wake the nearest sleeping ranks. Returns how many stood up. */
+  private wakeArmyRanks(n: number) {
+    const sleeping: Enemy[] = [];
+    for (const e of this.enemies) if (e.dormant && e.hp > 0) sleeping.push(e);
+    if (!sleeping.length) { this.armyDormant = 0; return 0; }
+    sleeping.sort((p, q) =>
+      (p.x - this.px) ** 2 + (p.y - this.py) ** 2 - ((q.x - this.px) ** 2 + (q.y - this.py) ** 2));
+    const take = Math.min(n, sleeping.length);
+    for (let i = 0; i < take; i++) {
+      const e = sleeping[i];
+      e.dormant = false;
+      e.alert = true;
+      e.garrison = false;
+      e.cool = rand(0.2, 1.4);
+      e.ang = Math.atan2(this.py - e.y, this.px - e.x);
+    }
+    this.armyDormant = sleeping.length - take;
+    return take;
+  }
+
+  /** Send up the base's aircraft: a fast jet, and a gunship until the apron is empty. */
+  private launchArmyAir() {
+    const jet = this.armyJets.find((j) => j.state === 'parked');
+    if (jet) {
+      jet.state = 'launch';
+      jet.alt = 40; jet.speed = 260; jet.t = 0; jet.cool = 1.2;
+      this.addText(jet.x, jet.y - 60, 'JET SCRAMBLE', '#ffd8a0', 16);
+      sfx.rotor();
+    }
+    if (this.helis.length < 7) {
+      const pad = this.army?.helis[(this.armyWaves + this.helis.length) % Math.max(1, this.army.helis.length)];
+      const h: Heli = {
+        x: pad ? pad.x : this.px + rand(-900, 900),
+        y: pad ? pad.y : this.py + rand(-900, 900),
+        tx: this.px, ty: this.py, ang: rand(0, TAU), rotor: 0,
+        state: 'startup', hp: 300, maxHp: 300, cool: 1.5, rocketCd: 3, t: 0,
+        orbitA: rand(0, TAU), medevac: false, carrying: 0, announced: true, bank: 0,
+        altitude: 0,
+      };
+      this.helis.push(h);
+      this.addText(h.x, h.y - 70, 'ATTACK HELICOPTER INBOUND', '#ffb0b0', 15);
+    }
+  }
+
+  private updateArmyTurrets(dt: number) {
+    for (const t of this.armyTurrets) {
+      t.cool -= dt;
+      t.flash = Math.max(0, t.flash - dt);
+      t.muzzle = Math.max(0, t.muzzle - dt * 6);
+      const hostile = t.owner === 'enemy';
+      // who is it shooting at
+      let tx = 0, ty = 0, has = false, range = 0;
+      if (hostile) {
+        if (!this.armyAlerted && Math.hypot(this.px - t.x, this.py - t.y) > 620) continue;
+        tx = this.px; ty = this.py; has = true;
+        range = t.heavy ? 1750 : 1280;
+      } else {
+        let bd = 1450;
+        for (const e of this.enemies) {
+          if (e.hp <= 0 || e.spawnT > 0 || e.def.civilian) continue;
+          const d = Math.hypot(e.x - t.x, e.y - t.y);
+          if (d < bd) { bd = d; tx = e.x; ty = e.y; has = true; }
+        }
+        range = 1450;
+      }
+      if (!has) continue;
+      const d = Math.hypot(tx - t.x, ty - t.y);
+      if (d > range) continue;
+      const want = Math.atan2(ty - t.y, tx - t.x);
+      const turn = Math.max(-3.6 * dt, Math.min(3.6 * dt, ((want - t.ang + Math.PI * 3) % TAU) - Math.PI));
+      t.ang += turn;
+      if (Math.abs(((want - t.ang + Math.PI * 3) % TAU) - Math.PI) > 0.22) continue;
+      if (t.cool > 0) continue;
+      // twin guns: ground and air are the same problem
+      t.cool = t.heavy ? 0.22 : 0.34;
+      t.flash = 0.08;
+      t.muzzle = 1;
+      const rounds = t.heavy ? 3 : 2;
+      for (let i = 0; i < rounds; i++) {
+        const spread = rand(-0.022, 0.022);
+        const a = t.ang + spread;
+        const side = (i % 2 === 0 ? -1 : 1) * 22;
+        this.bullets.push({
+          x: t.x + Math.cos(t.ang + Math.PI / 2) * side,
+          y: t.y + Math.sin(t.ang + Math.PI / 2) * side,
+          px: t.x, py: t.y,
+          vx: Math.cos(a) * 980, vy: Math.sin(a) * 980,
+          dmg: hostile ? (t.heavy ? 14 : 10) : 16,
+          life: 1.6, friendly: !hostile,
+          color: hostile ? '#ffd08a' : '#c6f0ff', r: 3,
+          hits: [], arm: t.heavy ? undefined : 'ground',
+        });
+      }
+      this.addLight(t.x, t.y, 150, '255,210,150', 0.08);
+      if (hostile) sfx.shoot('smg');
+    }
+  }
+
+  private updateArmyJets(dt: number) {
+    for (const j of this.armyJets) {
+      if (j.state === 'parked') continue;
+      j.t += dt;
+      j.cool = Math.max(0, j.cool - dt);
+      const dx = this.px - j.x, dy = this.py - j.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      if (j.state === 'launch') {
+        j.alt = Math.min(360, j.alt + dt * 190);
+        j.speed = Math.min(560, j.speed + dt * 220);
+        j.x += Math.cos(j.ang) * j.speed * dt;
+        j.y += Math.sin(j.ang) * j.speed * dt;
+        if (j.alt >= 330) { j.state = 'attack'; j.t = 0; }
+        continue;
+      }
+      if (j.state === 'egress') {
+        j.speed = Math.min(720, j.speed + dt * 120);
+        j.x += Math.cos(j.ang) * j.speed * dt;
+        j.y += Math.sin(j.ang) * j.speed * dt;
+        j.alt = Math.min(420, j.alt + dt * 60);
+        // bank around and come back
+        const want = Math.atan2(dy, dx);
+        const turn = ((want - j.ang + Math.PI * 3) % TAU) - Math.PI;
+        j.ang += Math.max(-1.5 * dt, Math.min(1.5 * dt, turn));
+        if (j.t > 7) { j.state = 'attack'; j.t = 0; }
+        continue;
+      }
+      // ATTACK: hold an altitude, close, fire, overshoot
+      j.alt = j.alt + (340 - j.alt) * Math.min(1, dt * 2);
+      j.speed = j.speed + (520 - j.speed) * Math.min(1, dt * 2);
+      const want = Math.atan2(dy, dx);
+      const turn = ((want - j.ang + Math.PI * 3) % TAU) - Math.PI;
+      j.ang += Math.max(-1.6 * dt, Math.min(1.6 * dt, turn));
+      j.x += Math.cos(j.ang) * j.speed * dt;
+      j.y += Math.sin(j.ang) * j.speed * dt;
+      const aligned = Math.abs(turn) < 0.16;
+      if (aligned && dist < 1500 && j.cool <= 0) {
+        j.cool = 0.9;
+        for (let i = 0; i < 3; i++) {
+          const a = j.ang + rand(-0.02, 0.02);
+          this.bullets.push({
+            x: j.x, y: j.y, px: j.x, py: j.y,
+            vx: Math.cos(a) * 1150, vy: Math.sin(a) * 1150,
+            dmg: 11, life: 1.4, friendly: false, color: '#ffe2a8', r: 3, hits: [],
+          });
+        }
+        this.addLight(j.x, j.y, 220, '255,220,150', 0.1);
+        sfx.shoot('smg');
+      }
+      if (dist < 320) { j.state = 'egress'; j.t = 0; }
+      if (j.t > 22) { j.state = 'egress'; j.t = 0; }
+    }
+  }
+
+  /** F on a suppressed emplacement: the crew is dead, the guns are yours. */
+  private tryCaptureTurret() {
+    const t = this.armyTurrets.find((q) =>
+      q.owner === 'enemy' && Math.hypot(q.x - this.px, q.y - this.py) < 150);
+    if (!t) return false;
+    if (t.hp > t.maxHp * 0.45) {
+      this.addText(t.x, t.y - 60, 'CREW STILL FIRING — SUPPRESS THE EMPLACEMENT', '#ffb08a', 14);
+      return true;
+    }
+    t.owner = 'player';
+    t.hp = Math.max(t.hp, t.maxHp * 0.55);
+    t.cool = 1.2;
+    this.score += 900;
+    this.addText(t.x, t.y - 66, 'TWIN GUN SEIZED · IT COVERS GROUND AND AIR', '#a9ecff', 16);
+    sfx.click();
+    return true;
   }
 
   /** Field support selected before deployment. */
@@ -1917,10 +2399,18 @@ export class Game {
   }
 
   private updatePatrolTeams(dt: number) {
+    // One bucket pass per frame: a thousand sleeping soldiers must not be re-filtered
+    // once for every marching column on the map.
+    const byTeam = new Map<string, Enemy[]>();
+    for (const e of this.enemies) {
+      if (!e.patrolTeam) continue;
+      const list = byTeam.get(e.patrolTeam);
+      if (list) list.push(e); else byTeam.set(e.patrolTeam, [e]);
+    }
     for (const p of this.patrolTeams) {
       // Every beat marches, whether or not the operative is near: a street full of
       // frozen police officers was the whole complaint.
-      const members = this.enemies.filter(e => e.patrolTeam === p.id);
+      const members = byTeam.get(p.id) || [];
       if (!members.length) continue;
       if (members.some(e => e.alert)) {
         for (const e of members) e.alert = true;
@@ -2241,6 +2731,9 @@ export class Game {
 
   /** Master interact: aircraft, vans, beam batteries, barricades, the black vault. */
   interactHeli() {
+    // Taking a suppressed emplacement comes first: it is the same key, and it only
+    // ever fires when the operative is standing inside one.
+    if (this.tryCaptureTurret()) return;
     if (this.status !== 'playing') return;
     // exit whatever we are piloting first
     if (this.flyingPlane && this.plane) { this.exitPlane(); return; }
@@ -5123,9 +5616,15 @@ export class Game {
     } else if (this.sector === 4) {
       c.push(w % 2 ? 'specter' : 'sapper');
       if (w % 3 === 0) c.push('medic');
-    } else if (this.sector >= 5) {
+    } else if (this.sector === 5) {
       c.push(w % 2 ? 'drone' : 'specter');
       if (w % 2 === 0) c.push('juggernaut');
+    } else if (this.sector >= 6) {
+      // IRON RESERVE: disciplined infantry, sappers, and a major every other wave.
+      c.push(w % 2 ? 'armytrooper' : 'armyguard');
+      if (w % 3 === 0) c.push('armyengineer');
+      if (w % 3 === 1) c.push('armymedic');
+      if (w % 2 === 1) c.push('armymajor');
     }
     if (w >= 2 && !c.includes('commander')) c.push('commander');
     if (w >= 4 && w % 2 === 0 && !c.includes('medic')) c.push('medic');
@@ -5511,6 +6010,8 @@ export class Game {
     for (let i = list.length - 1; i >= 0; i--) {
       const e = list[i];
       if (!e || e.boardingTruck !== undefined) continue;
+      // A man in the parade ground does not path, think or shoot until the alarm wakes him.
+      if (e.dormant) continue;
       if (e.spawnT > 0) { e.spawnT -= dt; continue; }
       const def = e.def;
       const dx = this.px - e.x, dy = this.py - e.y;
@@ -6112,6 +6613,38 @@ export class Game {
           if (p.hp <= 0) { this.airTroops.splice(j, 1); this.score += 100; this.sparks(center.x, center.y, '#c5ad8d', 9); }
           break;
         }
+        // army emplacements: suppress the crew, then take the guns
+        if (!dead && !groundArm) for (const t of this.armyTurrets) {
+          if (t.owner === 'player') continue;
+          if (t.x < bx0 || t.x > bx1 || t.y < by0 || t.y > by1) continue;
+          if (Math.hypot(b.x - t.x, b.y - t.y) < 52 + b.r) {
+            dead = true;
+            t.hp -= b.dmg;
+            this.sparks(b.x, b.y, '#ffd166', 7);
+            if (t.hp <= 0) {
+              t.hp = 0;
+              this.addText(t.x, t.y - 60, 'EMPLACEMENT SUPPRESSED — PRESS F', '#a9ecff', 14);
+            }
+            break;
+          }
+        }
+        // military jets
+        if (!dead && !groundArm) for (const j of this.armyJets) {
+          if (j.state === 'parked') continue;
+          if (j.x < bx0 || j.x > bx1 || j.y < by0 || j.y > by1) continue;
+          if (Math.hypot(b.x - j.x, b.y - j.y) < 46 + b.r) {
+            dead = true;
+            j.hp -= b.dmg;
+            this.sparks(b.x, b.y, '#ffd166', 8);
+            if (j.hp <= 0) {
+              j.state = 'parked';
+              this.explode(j.x, j.y, 190, 70, true);
+              this.score += 1200;
+              this.addText(j.x, j.y - 70, 'JET DOWN +1200', '#ffd8a0', 17);
+            }
+            break;
+          }
+        }
         // gunships
         if (!dead && !groundArm) for (const h of this.helis) {
           if (h.x < bx0 || h.x > bx1 || h.y < by0 || h.y > by1) continue;
@@ -6534,6 +7067,26 @@ export class Game {
   /* ---------------- damage ---------------- */
 
   private hurtEnemy(e: Enemy, dmg: number, vx = 0, vy = 0, crit = false) {
+    // Shooting a man in the ranks wakes the file either side of him.
+    if (e.dormant) {
+      e.dormant = false; e.alert = true; e.garrison = false;
+      if (this.army) {
+        this.armyDormant = Math.max(0, this.armyDormant - 1);
+        if (!this.armyAlerted) {
+          this.armyAlerted = true; this.armyAlarm = 1; this.armyWakeT = 1.2; this.armyLaunchT = 3;
+          this.setBanner('IRON RESERVE · GENERAL QUARTERS', 'THE FIRST SHOT WAKES THE WHOLE BASE');
+          sfx.rotor();
+        }
+        let n = 0;
+        for (const q of this.enemies) {
+          if (!q.dormant || q === e) continue;
+          if (Math.hypot(q.x - e.x, q.y - e.y) > 220) continue;
+          q.dormant = false; q.alert = true; q.garrison = false;
+          if (++n >= 8) break;
+        }
+        this.armyDormant = Math.max(0, this.armyDormant - n);
+      }
+    }
     if (e.hp <= 0 || this.status !== 'playing') return;
     // The general is invulnerable while any mainframe still feeds him targeting data.
     if (e.type === 'general' && this.servers.some((s) => !s.dead)) {
@@ -6662,7 +7215,7 @@ export class Game {
       this.piloting = true;
       this.firing = false;
       this.playerHeli = makeHeli(e.x, e.y, -Math.PI / 2, { vx: 0, vy: -700, bank: 0.28, landed: false });
-      this.setBanner('LEVEL 6 · THE CAGE', 'FIVE SECTORS DOWN — ONE PRISON LEFT');
+      this.setBanner('LEVEL 7 · THE CAGE', 'SIX SECTORS DOWN — ONE PRISON LEFT');
       this.onTransit(6);
       sfx.rotor();
       return;
@@ -6679,7 +7232,7 @@ export class Game {
     sfx.rotor();
   }
 
-  /** LEVEL 6: the operative is set down at the causeway and has to take THE CAGE. */
+  /** LEVEL 7: the operative is set down at the causeway and has to take THE CAGE. */
   private startPrisonLevel() {
     this.status = 'playing';
     this.piloting = false;
@@ -6690,8 +7243,8 @@ export class Game {
     this.prisonReentry = 0;
     this.destination = '';
     this.intermission = 1.1;
-    this.objective = 'LEVEL 6 · THE CAGE — FORCE THE SALLY PORT';
-    this.setBanner('LEVEL 6 · THE CAGE', 'THE LAST LEVEL IS BEHIND THESE WALLS');
+    this.objective = 'LEVEL 7 · THE CAGE — FORCE THE SALLY PORT';
+    this.setBanner('LEVEL 7 · THE CAGE', 'THE LAST LEVEL IS BEHIND THESE WALLS');
     this.tellStory({
       id: 'finale-cage', channel: 'S.H.I.E.L.D. / FINAL DIRECTIVE',
       title: 'The last door in the campaign is a prison door.',
@@ -7221,7 +7774,9 @@ export class Game {
 
     this.drawGround(ctx, camX, camY);
     this.drawLandmass(ctx, camX, camY);
+    this.drawSnowCover(ctx, camX, camY);
     this.drawZones(ctx, camX, camY);
+    this.drawSnowWorks(ctx, camX, camY);
     this.facilityPainter.drawGround(ctx, this.facilities, { x: camX, y: camY, w: this.w, h: this.h }, this.simulationTime);
     drawRuins(ctx, this.ruins, { x: camX, y: camY, w: this.w, h: this.h });
     this.drawDecals(ctx, camX, camY);
@@ -7239,6 +7794,7 @@ export class Game {
     this.drawEnemies(ctx, camX, camY);
     if (this.support === 'drone' && !this.piloting) this.drawSupportDrone(ctx);
     if (this.status !== 'over' && !this.piloting && !this.flyingPlane && !this.drivingVan && !this.playerTank) this.drawPlayer(ctx);
+    this.drawArmyWorks(ctx, camX, camY);
     if (this.playerHeli) this.drawPlayerHeli(ctx, camX, camY);
     this.drawTanks(ctx, camX, camY);
     this.drawVans(ctx, camX, camY);
@@ -7897,6 +8453,66 @@ export class Game {
         case 'grass': break;
         case 'lawn': break;   // painted by drawLandmass(), like the island grass
         case 'fuel': ctx.fillStyle = 'rgba(190,110,50,0.06)'; ctx.fillRect(z.x, z.y, z.w, z.h); break;
+        /* Per-sector ground cover. These are painted as translucent patches so overlapping
+         * zones deepen instead of turning into opaque slabs; every speck is derived from
+         * the zone's own coordinates, so nothing flickers between frames. */
+        case 'snow': {
+          ctx.fillStyle = 'rgba(226,242,250,0.17)';
+          ctx.fillRect(z.x, z.y, z.w, z.h);
+          ctx.strokeStyle = 'rgba(255,255,255,0.13)'; ctx.lineWidth = 2;
+          ctx.strokeRect(z.x + 2, z.y + 2, z.w - 4, z.h - 4);
+          break;
+        }
+        case 'ice': {
+          ctx.fillStyle = 'rgba(150,214,238,0.20)';
+          ctx.fillRect(z.x, z.y, z.w, z.h);
+          // wind-scoured cracks: two deterministic lines per patch
+          ctx.strokeStyle = 'rgba(226,246,255,0.28)'; ctx.lineWidth = 2;
+          const s1 = (z.x * 0.37 + z.y * 0.61) % 1;
+          ctx.beginPath();
+          ctx.moveTo(z.x + z.w * (0.1 + s1 * 0.2), z.y + z.h * 0.15);
+          ctx.lineTo(z.x + z.w * (0.45 + s1 * 0.1), z.y + z.h * 0.62);
+          ctx.lineTo(z.x + z.w * (0.78 + s1 * 0.1), z.y + z.h * 0.9);
+          ctx.moveTo(z.x + z.w * 0.62, z.y + z.h * 0.2);
+          ctx.lineTo(z.x + z.w * 0.5, z.y + z.h * 0.55);
+          ctx.stroke();
+          ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 3;
+          ctx.strokeRect(z.x + 1, z.y + 1, z.w - 2, z.h - 2);
+          break;
+        }
+        case 'marsh': {
+          ctx.fillStyle = 'rgba(74,112,52,0.20)';
+          ctx.fillRect(z.x, z.y, z.w, z.h);
+          ctx.fillStyle = 'rgba(30,54,36,0.22)';
+          for (let i = 0; i < 3; i++) {
+            const px = z.x + z.w * (0.2 + ((i * 37 + z.x) % 60) / 100);
+            const py = z.y + z.h * (0.25 + ((i * 53 + z.y) % 55) / 100);
+            ctx.beginPath();
+            ctx.ellipse(px, py, z.w * 0.16, z.h * 0.1, i * 0.7, 0, TAU);
+            ctx.fill();
+          }
+          break;
+        }
+        case 'slag': {
+          ctx.fillStyle = 'rgba(96,44,48,0.20)';
+          ctx.fillRect(z.x, z.y, z.w, z.h);
+          ctx.fillStyle = 'rgba(255,132,96,0.30)';
+          for (let i = 0; i < 4; i++) {
+            const px = z.x + ((i * 71 + z.x * 3) % Math.max(1, z.w - 8));
+            const py = z.y + ((i * 113 + z.y * 3) % Math.max(1, z.h - 8));
+            ctx.fillRect(px, py, 4, 3);
+          }
+          break;
+        }
+        case 'puddle': {
+          ctx.fillStyle = 'rgba(44,78,96,0.22)';
+          ctx.beginPath();
+          ctx.ellipse(z.x + z.w / 2, z.y + z.h / 2, z.w / 2, z.h / 2, 0, 0, TAU);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(150,220,235,0.16)'; ctx.lineWidth = 2;
+          ctx.stroke();
+          break;
+        }
         case 'runway': {
           ctx.fillStyle = 'rgba(24,32,36,0.85)'; ctx.fillRect(z.x, z.y, z.w, z.h);
           ctx.strokeStyle = 'rgba(230,240,245,0.30)'; ctx.lineWidth = 6;
@@ -8201,6 +8817,271 @@ export class Game {
   }
 
   /** 2.5D extruded structures with per-kind materials. */
+
+  /* ---------------- weather and the army, drawn ---------------- */
+
+  /** Snow (or dust / slurry) lying on the ground, under every road and building. */
+  private drawSnowCover(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    const d = this.dressing;
+    if (!d || (!d.snow && !d.dust && !d.marsh && !d.slag)) return;
+    const t = this.simulationTime;
+    if (d.snow) {
+      // a cold wash over the whole visible ground; roads are painted on top of it
+      const g = ctx.createLinearGradient(camX, camY, camX + this.w * 0.6, camY + this.h);
+      g.addColorStop(0, 'rgba(228,242,248,0.14)');
+      g.addColorStop(0.55, 'rgba(206,226,236,0.10)');
+      g.addColorStop(1, 'rgba(186,212,224,0.08)');
+      ctx.fillStyle = g;
+      ctx.fillRect(camX - 20, camY - 20, this.w + 40, this.h + 40);
+      // wind-scoured streaks
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.lineWidth = 3;
+      const step = 180;
+      const y0 = Math.floor(camY / step) * step;
+      for (let y = y0; y < camY + this.h + step; y += step) {
+        ctx.beginPath();
+        const phase = Math.sin(t * 0.2 + y * 0.01) * 30;
+        for (let x = camX - 40; x < camX + this.w + 40; x += 90) {
+          const yy = y + Math.sin((x + phase) * 0.006) * 12;
+          if (x === camX - 40) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+        }
+        ctx.stroke();
+      }
+    } else if (d.dust) {
+      ctx.fillStyle = 'rgba(190,120,70,0.055)';
+      ctx.fillRect(camX - 20, camY - 20, this.w + 40, this.h + 40);
+    } else if (d.marsh) {
+      ctx.fillStyle = 'rgba(90,140,60,0.045)';
+      ctx.fillRect(camX - 20, camY - 20, this.w + 40, this.h + 40);
+    } else if (d.slag) {
+      ctx.fillStyle = 'rgba(120,60,70,0.05)';
+      ctx.fillRect(camX - 20, camY - 20, this.w + 40, this.h + 40);
+    }
+  }
+
+  /** Cleared lanes, heaps, and the ploughs still working them. */
+  private drawSnowWorks(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    const d = this.dressing;
+    if (!d) return;
+    const on = (x: number, y: number, pad = 160) =>
+      x > camX - pad && x < camX + this.w + pad && y > camY - pad && y < camY + this.h + pad;
+
+    // freshly cleared asphalt: the snow is gone where the blade has been
+    if (d.snow) {
+      for (const l of this.clearedLanes) {
+        if (!on(l.x, l.y, 200)) continue;
+        ctx.save();
+        ctx.translate(l.x, l.y);
+        ctx.rotate(l.ang);
+        ctx.globalAlpha = Math.min(0.9, l.t / 8);
+        ctx.fillStyle = '#20292c';
+        ctx.fillRect(-l.len / 2, -l.w / 2, l.len, l.w);
+        ctx.fillStyle = 'rgba(230,242,248,0.20)';
+        ctx.fillRect(-l.len / 2, -l.w / 2 + 6, l.len, 6);
+        ctx.restore();
+      }
+    }
+
+    // the heaps themselves
+    for (const b of this.snowBanks) {
+      if (!on(b.x, b.y, b.r + 60)) continue;
+      const fill = Math.min(1.6, b.fill);
+      const r = b.r * (0.7 + fill * 0.5);
+      const h = b.h * (0.6 + fill * 0.7);
+      if (d.snow) {
+        ctx.fillStyle = 'rgba(226,242,250,0.72)';
+        ctx.beginPath(); ctx.ellipse(b.x, b.y, r, r * 0.66, 0, 0, TAU); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+        ctx.beginPath(); ctx.ellipse(b.x - r * 0.18, b.y - h * 0.35, r * 0.62, r * 0.4, 0, 0, TAU); ctx.fill();
+        ctx.strokeStyle = 'rgba(140,170,186,0.35)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.ellipse(b.x, b.y + r * 0.2, r * 0.9, r * 0.5, 0, 0, TAU); ctx.stroke();
+      } else if (d.dust) {
+        ctx.fillStyle = 'rgba(168,104,62,0.45)';
+        ctx.beginPath(); ctx.ellipse(b.x, b.y, r, r * 0.6, 0, 0, TAU); ctx.fill();
+      } else if (d.marsh) {
+        ctx.fillStyle = 'rgba(74,104,52,0.4)';
+        ctx.beginPath(); ctx.ellipse(b.x, b.y, r, r * 0.55, 0, 0, TAU); ctx.fill();
+      } else if (d.slag) {
+        ctx.fillStyle = 'rgba(96,64,70,0.4)';
+        ctx.beginPath(); ctx.ellipse(b.x, b.y, r, r * 0.55, 0, 0, TAU); ctx.fill();
+      }
+    }
+
+    // the ploughs: a heavy truck with a blade, a flashing amber bar, and a spray of snow
+    for (const p of this.ploughs) {
+      if (!on(p.x, p.y, 220)) continue;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.ang);
+      // shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(-62, -30, 132, 66);
+      // chassis
+      ctx.fillStyle = '#8a5a1e';                       // municipal orange
+      ctx.fillRect(-58, -28, 116, 56);
+      ctx.fillStyle = '#6d4416';
+      ctx.fillRect(-58, 6, 116, 22);
+      // cab
+      ctx.fillStyle = '#a9722a';
+      ctx.fillRect(12, -24, 40, 48);
+      ctx.fillStyle = 'rgba(190,230,240,0.55)';
+      ctx.fillRect(20, -18, 26, 36);
+      // the hopper on the back
+      ctx.fillStyle = '#5f4a20';
+      ctx.fillRect(-52, -22, 56, 44);
+      // blade, angled to the side it throws to
+      ctx.save();
+      ctx.translate(62, 0);
+      ctx.rotate(p.side * 0.42);
+      ctx.fillStyle = '#c9d4d8';
+      ctx.fillRect(-6, -46, 14, 92);
+      ctx.fillStyle = 'rgba(160,180,190,0.8)';
+      ctx.fillRect(-6, -46, 5, 92);
+      ctx.restore();
+      // amber beacon
+      const blink = 0.45 + 0.55 * Math.abs(Math.sin(this.simulationTime * 6 + p.ax));
+      ctx.fillStyle = `rgba(255,180,60,${blink})`;
+      ctx.beginPath(); ctx.arc(32, -30, 6, 0, TAU); ctx.fill();
+      // wheels
+      ctx.fillStyle = '#14181a';
+      for (const [wx, wy] of [[-40, -32], [-40, 32], [32, -32], [32, 32]] as [number, number][]) {
+        ctx.beginPath(); ctx.arc(wx, wy, 11, 0, TAU); ctx.fill();
+      }
+      ctx.restore();
+      // snow spray off the blade
+      if (d.snow && p.blade > 0.35) {
+        const nx = p.nx, ny = p.ny;
+        ctx.fillStyle = 'rgba(240,250,255,0.35)';
+        for (let i = 0; i < 4; i++) {
+          const a = p.blade * 6 + i * 1.7;
+          const dd = 18 + ((this.simulationTime * 90 + i * 37) % 70);
+          ctx.beginPath();
+          ctx.arc(p.x + nx * dd + Math.cos(a) * 10, p.y + ny * dd + Math.sin(a) * 10, 2.4, 0, TAU);
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  /** Emplacements, jets, the base banner: everything that belongs to the army. */
+  private drawArmyWorks(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    if (!this.army) return;
+    const on = (x: number, y: number, pad = 220) =>
+      x > camX - pad && x < camX + this.w + pad && y > camY - pad && y < camY + this.h + pad;
+
+    // emplacements: a sandbagged pit, twin barrels, and a shield when it is mine
+    for (const t of this.armyTurrets) {
+      if (!on(t.x, t.y)) continue;
+      const mine = t.owner === 'player';
+      ctx.save();
+      ctx.translate(t.x, t.y);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.beginPath(); ctx.ellipse(0, 6, 46, 22, 0, 0, TAU); ctx.fill();
+      // pit
+      ctx.fillStyle = mine ? '#2c4a52' : '#3b4136';
+      ctx.beginPath(); ctx.arc(0, 0, 40, 0, TAU); ctx.fill();
+      ctx.strokeStyle = mine ? 'rgba(150,235,255,0.75)' : 'rgba(200,180,120,0.45)';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(0, 0, 40, 0, TAU); ctx.stroke();
+      // turret body
+      ctx.fillStyle = mine ? '#3f6d78' : '#4a5142';
+      ctx.beginPath(); ctx.arc(0, 0, 24, 0, TAU); ctx.fill();
+      ctx.rotate(t.ang);
+      // twin barrels
+      const recoil = t.muzzle * 6;
+      ctx.fillStyle = '#1d2224';
+      ctx.fillRect(16 - recoil, -11, 46, 7);
+      ctx.fillRect(16 - recoil, 4, 46, 7);
+      ctx.fillStyle = mine ? '#9fe8ff' : '#c8b070';
+      ctx.fillRect(16, -9, 12, 3);
+      ctx.fillRect(16, 6, 12, 3);
+      // muzzle flash
+      if (t.flash > 0) {
+        ctx.fillStyle = 'rgba(255,220,150,0.9)';
+        ctx.beginPath(); ctx.arc(62, 0, 14 * (1 + t.flash * 4), 0, TAU); ctx.fill();
+      }
+      ctx.restore();
+      // health pip
+      const frac = Math.max(0, Math.min(1, t.hp / t.maxHp));
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(t.x - 28, t.y - 52, 56, 6);
+      ctx.fillStyle = frac > 0.45 ? (mine ? '#7fe0ff' : '#e0c070') : '#ff8f6a';
+      ctx.fillRect(t.x - 28, t.y - 52, 56 * frac, 6);
+      if (!mine && frac <= 0.45) {
+        ctx.fillStyle = 'rgba(180,240,255,0.9)';
+        ctx.font = 'bold 10px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('F · SEIZE', t.x, t.y - 60);
+        ctx.textAlign = 'left';
+      }
+    }
+
+    // jets: swept wings, twin tails, afterburner while it is flying
+    for (const j of this.armyJets) {
+      if (!on(j.x, j.y)) continue;
+      const flying = j.state !== 'parked';
+      ctx.save();
+      ctx.translate(j.x, j.y - j.alt * (flying ? 0.22 : 0));
+      ctx.rotate(j.ang);
+      if (flying) {
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(0, j.alt * 0.22, 40, 14, 0, 0, TAU); ctx.fill();
+      }
+      // wings
+      ctx.fillStyle = '#5c6650';
+      ctx.beginPath();
+      ctx.moveTo(6, 0); ctx.lineTo(-16, -56); ctx.lineTo(-30, -52); ctx.lineTo(-14, 0);
+      ctx.lineTo(-30, 52); ctx.lineTo(-16, 56); ctx.closePath(); ctx.fill();
+      // fuselage
+      ctx.fillStyle = '#6d7860';
+      ctx.beginPath();
+      ctx.moveTo(46, 0); ctx.lineTo(6, -12); ctx.lineTo(-44, -10);
+      ctx.lineTo(-44, 10); ctx.lineTo(6, 12); ctx.closePath(); ctx.fill();
+      // canopy
+      ctx.fillStyle = 'rgba(190,230,240,0.7)';
+      ctx.beginPath(); ctx.ellipse(18, 0, 12, 6, 0, 0, TAU); ctx.fill();
+      // tails
+      ctx.fillStyle = '#4d5642';
+      ctx.fillRect(-40, -22, 12, 8);
+      ctx.fillRect(-40, 14, 12, 8);
+      if (flying) {
+        const flame = 12 + Math.sin(this.simulationTime * 30) * 6;
+        ctx.fillStyle = 'rgba(160,220,255,0.8)';
+        ctx.beginPath(); ctx.moveTo(-44, -5); ctx.lineTo(-44 - flame, 0); ctx.lineTo(-44, 5); ctx.fill();
+      }
+      ctx.restore();
+      if (flying) {
+        const frac = Math.max(0, j.hp / j.maxHp);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(j.x - 26, j.y - 70, 52, 5);
+        ctx.fillStyle = frac > 0.4 ? '#ffd8a0' : '#ff7a6a';
+        ctx.fillRect(j.x - 26, j.y - 70, 52 * frac, 5);
+      }
+    }
+
+    // base signage on the approach and over the parade ground
+    const a = this.army;
+    if (on(a.base.x + a.base.w / 2, a.base.y, 900)) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(214,224,170,0.5)';
+      ctx.font = 'bold 52px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('IRON RESERVE', a.base.x + a.base.w / 2, a.base.y - 120);
+      ctx.font = '16px ui-monospace, monospace';
+      ctx.fillStyle = 'rgba(214,224,170,0.35)';
+      ctx.fillText('ARMY GROUP SOUTH · AUTHORISED PERSONNEL ONLY', a.base.x + a.base.w / 2, a.base.y - 92);
+      ctx.restore();
+    }
+    if (on(a.hq.x, a.hq.y, 700)) {
+      ctx.save();
+      ctx.fillStyle = this.armyAlerted ? 'rgba(255,140,120,0.35)' : 'rgba(214,224,170,0.22)';
+      ctx.font = 'bold 30px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(this.armyAlerted ? 'GENERAL QUARTERS' : 'COMMAND BUNKER', a.hq.x, a.hq.y - 120);
+      ctx.restore();
+    }
+  }
+
   private drawStructures(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     this.grid.query(camX - 120, camY - 160, this.w + 240, this.h + 320, this.qset);
     const idxs = Array.from(this.qset);
@@ -8243,6 +9124,10 @@ export class Game {
         case 'checkpoint': top = '#5b6055'; side = '#29352d'; edge = 'rgba(227,187,117,0.4)'; break;
         case 'warehouse': top = '#626465'; side = '#28353e'; edge = 'rgba(226,199,160,0.42)'; break;
         case 'library': top = '#736958'; side = '#322b28'; edge = 'rgba(214,186,133,0.48)'; break;
+        // ARMY DISTRICT: olive steel, tarmac, painted numbers
+        case 'tank':    top = '#4e5a44'; side = '#2a3226'; edge = 'rgba(206,220,160,0.45)'; break;
+        case 'barrel':  top = '#6a5a2c'; side = '#332c14'; edge = 'rgba(230,200,120,0.4)'; break;
+        case 'console': top = '#4a5952'; side = '#243029'; edge = 'rgba(160,235,205,0.45)'; break;
         default:        top = '#26362f'; side = '#131b17'; edge = 'rgba(140,220,190,0.20)'; break;
       }
       if (o.tint && o.kind !== 'crate') top = o.tint;
@@ -8277,7 +9162,48 @@ export class Game {
         ctx.fillStyle = accent; ctx.fillRect(o.x, o.y, o.w, o.h); ctx.restore();
       }
 
+      // Weather on the roofs: the Arctic does not have clean buildings.
+      if (this.dressing?.snow && o.kind !== 'crate' && o.kind !== 'sandbag') {
+        ctx.save();
+        ctx.fillStyle = 'rgba(238,248,255,0.5)';
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(o.x + 3, o.y + 3, Math.max(0, o.w - 6), Math.max(0, o.h - 6));
+        // icicles along the south face
+        ctx.strokeStyle = 'rgba(210,240,250,0.35)';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        for (let sx = o.x + 8; sx < o.x + o.w - 4; sx += 22) {
+          const len = 6 + ((sx * 7 + o.y) % 11);
+          ctx.moveTo(sx, o.y + o.h + H * 0.6);
+          ctx.lineTo(sx + 2, o.y + o.h + H * 0.6 + len);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+
       // material detailing
+      if (o.kind === 'tank') {
+        // tracks, hull, turret and a long main gun — readable from above
+        ctx.fillStyle = '#232a21';
+        ctx.fillRect(o.x + 4, o.y + 4, 22, o.h - 8);
+        ctx.fillRect(o.x + o.w - 26, o.y + 4, 22, o.h - 8);
+        ctx.fillStyle = '#3d4736';
+        ctx.fillRect(o.x + 30, o.y + 12, o.w - 60, o.h - 24);
+        const cxT = o.x + o.w / 2, cyT = o.y + o.h / 2;
+        ctx.fillStyle = '#525f45';
+        ctx.beginPath(); ctx.arc(cxT, cyT, Math.min(o.w, o.h) * 0.26, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#20261d';
+        ctx.fillRect(cxT + o.w * 0.2, cyT - 4, o.w * 0.34, 8);
+        ctx.strokeStyle = 'rgba(200,220,160,0.35)';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(o.x + 30, o.y + 12, o.w - 60, o.h - 24);
+      } else if (o.kind === 'barrel') {
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(o.x + o.w / 2, o.y + o.h / 2, o.w * 0.34, 0, TAU); ctx.stroke();
+        ctx.beginPath(); ctx.arc(o.x + o.w / 2, o.y + o.h / 2, o.w * 0.18, 0, TAU); ctx.stroke();
+      }
       if (o.kind === 'sandbag') {
         ctx.fillStyle = shade(top, 10);
         const along = o.w >= o.h;

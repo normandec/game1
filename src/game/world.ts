@@ -4,6 +4,8 @@
  * ------------------------------------------------------------------ */
 
 import { PRISON_EAST } from './prisonIsland';
+import { ARMY_SOUTH, buildArmyDistrict, type ArmyPlan } from './army';
+import { dressSector, type SectorDressing } from './sectorKits';
 import { populateFacilities, type Facility, type FacilityGuard } from './facilities';
 import {
   addCampaignSites, GOLIATH, MNEMOSYNE, HQ_YARD, KRAKEN_YARD, type CampaignSites, type PatrolRoute,
@@ -20,7 +22,11 @@ import { buildPowerYard, type PowerCell, type PowerSite } from './powerGrid';
 const GEN_W = 12000;
 export const GEN_H = 8200;
 export const ARENA_W = GEN_W + PRISON_EAST;
-export const ARENA_H = GEN_H;
+/** The army district is new ground SOUTH of the legacy frame: nothing above it moves. */
+export const ARENA_H = GEN_H + ARMY_SOUTH;
+/** South edge of the legacy theatre: the army ground begins here. */
+export const LEGACY_H = GEN_H;
+export { ARMY_SOUTH };
 /** East edge of the legacy theatre: the new ground begins here. */
 export const LEGACY_W = GEN_W;
 
@@ -36,6 +42,7 @@ export const SECTORS: SectorTheme[] = [
   { id: 3, name: 'ARCTIC RELAY', codename: 'WHITE STATIC', brief: 'A frozen satellite citadel protected by shield regiments.', ground: '#111a1d', grid: '135,185,205', haze: '72,115,135', accent: '#9fe8ff', weather: 'snow' },
   { id: 4, name: 'VENOM MARSH', codename: 'GREEN CROWN', brief: 'A toxic research base fielding experimental Hydra units.', ground: '#10170d', grid: '115,170,82', haze: '48,82,26', accent: '#a6ff70', weather: 'toxic' },
   { id: 5, name: 'HYDRA NEXUS', codename: 'TRIPLE SERPENT', brief: 'The final underground-overground supreme command fortress.', ground: '#150d10', grid: '190,70,90', haze: '75,16,28', accent: '#ff526f', weather: 'ash' },
+  { id: 6, name: 'IRON RESERVE', codename: 'VOJSKA', brief: 'The army that was never sent: a thousand boots in ranks, and everything they own aimed at you.', ground: '#121512', grid: '160,175,140', haze: '34,42,30', accent: '#cfd8a8', weather: 'dust' },
 ];
 
 export type StructKind =
@@ -46,7 +53,9 @@ export type StructKind =
   | 'plane'
   // ISLAND PRISON (eastern ground): its own materials, so nothing on the island is drawn
   // with the labels and textures of a legacy Hydra base.
-  | 'pine' | 'rock' | 'boat' | 'bastion' | 'cellblock' | 'lighthouse' | 'barrier';
+  | 'pine' | 'rock' | 'boat' | 'bastion' | 'cellblock' | 'lighthouse' | 'barrier'
+  // ARMY DISTRICT: its own vocabulary, so the base never reads like a Hydra outpost.
+  | 'tank' | 'barrel' | 'console';
 
 export interface Rect {
   x: number; y: number; w: number; h: number;
@@ -56,6 +65,10 @@ export interface Rect {
   hp?: number; dead?: boolean;
   facilityDetail?: boolean;
   maxHp?: number; structuralGroup?: number;
+  /** Army shutter: the outer causeway gate or the powered inner blast gate. */
+  armyGate?: 'outer' | 'inner';
+  /** Army rampart: reinforced concrete, far tougher than a Hydra curtain wall. */
+  armyWall?: boolean;
 }
 
 export interface Zone {
@@ -64,7 +77,9 @@ export interface Zone {
   /** Flooded north-west lagoon that carries the prison island. Additive: drawn under everything. */
   | 'lagoon'
   /** Prison-island lawn: the same ground as grass, only greener so the island reads as land. */
-  | 'lawn';
+  | 'lawn'
+  /* Sector dressing: each of these is painted in its own pass, additively. */
+  | 'snow' | 'ice' | 'marsh' | 'slag' | 'puddle';
 }
 
 /** A hangar looks sealed from outside; its roof splits open once you step inside. */
@@ -86,7 +101,7 @@ export interface PoiDef {
 const CORE_HQ = { cx: GEN_W / 2, cy: 2150, w: 3900, h: 2950 };
 export const HQ = { ...CORE_HQ };
 
-const CORE_PLAYER_START = { x: GEN_W / 2, y: ARENA_H - 1400 };
+const CORE_PLAYER_START = { x: GEN_W / 2, y: GEN_H - 1400 };
 export const PLAYER_START = { ...CORE_PLAYER_START };
 const CORE_VAULT_ENTRY = { x: 980, y: 7040 };
 export const VAULT_ENTRY = { ...CORE_VAULT_ENTRY };
@@ -176,6 +191,12 @@ export interface WorldData {
   facilities: Facility[];
   facilityGuards: FacilityGuard[];
   campaignSites: CampaignSites;
+  /** Surface dressing for this sector: snow, drifts, plough lanes, regiment, insertion. */
+  dressing: SectorDressing;
+  /** The IRON RESERVE ground, present only in sector 6. */
+  army: ArmyPlan | null;
+  /** Massed ranks (the army parade): position plus unit type. */
+  ranks: { x: number; y: number; type: string }[];
   /** Every defended generator/server yard on the map, biggest first. */
   powerSites: PowerSite[];
   powerCells: PowerCell[];
@@ -209,10 +230,10 @@ export function generateWorld(sector = 1): WorldData {
   const facilityGuards: FacilityGuard[] = [];
 
   const add = (x: number, y: number, w: number, h: number, kind: StructKind, h3d = 14, tint?: string) => {
-    if (w <= 0 || h <= 0) return;
-    rects.push({ x, y, w, h, kind, h3d, tint });
+    const r: Rect = { x, y, w, h, kind, h3d, tint };
+    if (w > 0 && h > 0) rects.push(r);
+    return r;
   };
-
   /* Map border ramparts are added after the westward expansion (see the tail of this
    * function): they have to enclose the widened arena, not the legacy frame. */
 
@@ -337,7 +358,7 @@ export function generateWorld(sector = 1): WorldData {
   }
 
   // The General's command dais (dead center of the keep)
-  const generalSpot = { x: cx, y: kT + KH / 2 };
+  let generalSpot = { x: cx, y: kT + KH / 2 };
 
   // Programmers work the terminals — clustered around the servers
   for (const s of serverSpots) {
@@ -720,7 +741,7 @@ export function generateWorld(sector = 1): WorldData {
   zones.push({ x: GEN_W - 600, y: 1200, w: roadW, h: GEN_H - 3600, kind: 'road' });
   zones.push({ x: CORE_AIRFIELD.x - 120, y: CORE_AIRFIELD.y + AFH / 2, w: 240, h: 600, kind: 'road' });
 
-  const campaignSites = addCampaignSites({ sector: Math.max(1, Math.min(5, sector)),
+  const campaignSites = addCampaignSites({ sector: Math.max(1, Math.min(6, sector)),
     rects, zones, pois, facilities, guards: facilityGuards,
     gates: gateSpots, vans: vanSpots, caches: cacheSpots, lights: spotlightSpots, barrels: barrelSpots,
     garrison: garrisonSpots, pads: helipads });
@@ -732,7 +753,7 @@ export function generateWorld(sector = 1): WorldData {
   for (const site of campaignSites.powerSites) reservedSites.push({ x: site.x - 150, y: site.y - 150, w: site.w + 300, h: site.h + 520 });
 
   populateFacilities({
-    sector: Math.max(1, Math.min(5, sector)), width: GEN_W, height: GEN_H,
+    sector: Math.max(1, Math.min(6, sector)), width: GEN_W, height: GEN_H,
     rects, zones, facilities, guards: facilityGuards,
     gates: gateSpots, caches: cacheSpots, spotlights: spotlightSpots,
     canPlace: noOverlap,
@@ -759,7 +780,7 @@ export function generateWorld(sector = 1): WorldData {
     return true;
   };
 
-  const sectorPressure = Math.max(1, Math.min(5, sector));
+  const sectorPressure = Math.max(1, Math.min(6, sector));
   let wtries = 0, built = 0;
   while (built < 30 + sectorPressure * 5 && wtries++ < 900) {
     const fw = rnd(420, 760), fh = rnd(360, 620);
@@ -937,7 +958,13 @@ export function generateWorld(sector = 1): WorldData {
    * ================================================================== */
   const B2 = 60;
   add(0, 0, GEN_W, B2, 'curtain', 26);                     // north, legacy
-  add(0, GEN_H - B2, GEN_W, B2, 'curtain', 26);            // south, legacy
+  if (sector >= 6) {
+    // The army causeway: the legacy south rampart is cut open either side of the road.
+    add(0, GEN_H - B2, 6000 - 220, B2, 'curtain', 26);
+    add(6000 + 220, GEN_H - B2, GEN_W - 6000 - 220, B2, 'curtain', 26);
+  } else {
+    add(0, GEN_H - B2, GEN_W, B2, 'curtain', 26);          // south, legacy
+  }
   add(0, 0, B2, GEN_H, 'curtain', 26);                     // west
   add(GEN_W, 0, PRISON_EAST, B2, 'curtain', 26);           // north, new ground
   add(GEN_W, GEN_H - B2, PRISON_EAST, B2, 'curtain', 26);   // south, new ground
@@ -946,11 +973,93 @@ export function generateWorld(sector = 1): WorldData {
   // Service road along the new coast, tying the bridge head into the legacy ring road.
   zones.push({ x: GEN_W - 300, y: 3900, w: 700, h: 420, kind: 'road' });
 
+  /* ================================================================== *
+   * SECTOR DRESSING
+   *
+   * Palettes were never enough: a winter sector needs snow on the ground, heaps along
+   * the roads and ploughs working them. Everything here only appends to the map.
+   * ================================================================== */
+  const dressing = dressSector({
+    sector: Math.max(1, Math.min(6, sector)),
+    zones, add, zone, rnd: rnd, width: GEN_W, height: GEN_H,
+  });
+
+  /* ================================================================== *
+   * ARMY GROUND (sector 6)
+   *
+   * A brand-new 3 400 m deep strip south of the legacy frame. The legacy map keeps every
+   * coordinate; the prison island keeps every pier. This block is new land, reached by a
+   * single causeway road through the old south rampart.
+   * ================================================================== */
+  let army: ArmyPlan | null = null;
+  const ranks: { x: number; y: number; type: string }[] = [];
+  if (sector >= 6) {
+    army = buildArmyDistrict({ y0: GEN_H, add, zone, rnd });
+    dressing.start = { x: army.spawn.x, y: army.spawn.y - 340 };
+
+    // New border for the new ground: its own rampart on the west, east and south.
+    add(0, GEN_H, B2, ARMY_SOUTH, 'curtain', 30);
+    add(ARENA_W - B2, GEN_H, B2, ARMY_SOUTH, 'curtain', 30);
+    add(0, ARENA_H - B2, ARENA_W, B2, 'curtain', 30);
+
+    // The parade: one thousand men and women in ranks, plus a small cadre of officers.
+    const roster = ['armytrooper', 'armytrooper', 'armytrooper', 'armytrooper',
+      'armyguard', 'armytrooper', 'armyengineer', 'armytrooper', 'armymedic'];
+    for (let i = 0; i < army.parade.length; i++) {
+      ranks.push({ ...army.parade[i], type: roster[i % roster.length] });
+    }
+
+    // Army gates are physical shutters; keep them in the world so collision and the
+    // renderer both see them.
+    for (const g of army.gates) {
+      for (const r of g.rects) if (!rects.includes(r)) rects.push(r);
+    }
+    // The parked hulls are scenery (and added by army.ts); the live patrol armour is a
+    // unit, so it must never also be a solid rect at the same coordinates.
+    // Generators join the campaign power grid so they can be shot and blacked out.
+    for (const [i, g] of army.generators.entries()) {
+      campaignSites.powerCells.push({
+        id: `army-gen-${i}`, kind: 'generator', x: g.x, y: g.y,
+        hp: 420, maxHp: 420, dead: false, site: 'army-core',
+      });
+    }
+    campaignSites.powerSites.push({
+      id: 'army-core', name: 'IRON RESERVE / COMMAND', code: 'ARM',
+      x: army.core.x, y: army.core.y, w: army.core.w, h: army.core.h, major: true,
+    });
+
+    // The command bunker hosts the sector mainframes, exactly like the Hydra keeps do.
+    serverSpots.push(
+      { x: army.core.x + 420, y: army.core.y + 300 },
+      { x: army.core.x + army.core.w - 420, y: army.core.y + 300 },
+    );
+    generalSpot = { x: army.hq.x, y: army.hq.y };
+
+    // A searched-then-seized S.H.I.E.L.D. outpost beside the approach, so the level opens
+    // with a fight on your own side of the wire. It stands clear of the causeway: the road
+    // in has to stay open, or the whole level is a shooting gallery you cannot enter.
+    const ox = army.spawn.x - 1450, oy = army.spawn.y + 40;
+    zone(ox - 60, oy - 300, 1250, 900, 'concrete');
+    add(ox - 40, oy - 240, 320, 240, 'vault', 56, '#2c4a44');
+    add(ox + 420, oy - 220, 280, 210, 'laboratory', 44, '#33474a');
+    add(ox - 40, oy + 40, 960, 40, 'sandbag', 20);
+    add(ox - 40, oy - 60, 40, 140, 'sandbag', 20);
+    helipads.push({ x: ox + 760, y: oy + 140 });
+    zone(ox + 620, oy + 10, 300, 300, 'helipad');
+    cacheSpots.push({ x: ox + 620, y: oy + 320 });
+    pois.push({
+      id: 'army', kind: 'depot', x: army.hq.x, y: army.hq.y, r: 1500,
+      name: 'IRON RESERVE', sub: 'ARMY GROUP SOUTH / NO HYDRA INSIGNIA',
+      secret: false, gates: army.gates.map((g) => ({ x: g.x + g.w / 2, y: g.y + g.h / 2 })),
+    });
+  }
+
   return {
     rects, zones, serverSpots, generalSpot, coderSpots, garrisonSpots,
     cacheSpots, gateSpots, helipads, hangarSpot, beaconSpots, satcomSpots, barrelSpots, spotlightSpots,
     hangars, vanSpots, paradeSpots, parkedHelis, laserSpots, pois, vaultSpot, planeSpot,
     facilities, facilityGuards, campaignSites,
     powerSites: campaignSites.powerSites, powerCells: campaignSites.powerCells,
+    dressing, army, ranks,
   };
 }
