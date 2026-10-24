@@ -14,7 +14,7 @@ export const CELL_D = 4.6;
 export const CELL_H = 3.8;
 export const WING_ROWS = 45;
 export const WINGS = 4;
-export const CORRIDOR_HALF = 3.4;
+export const CORRIDOR_HALF = 1.95;
 
 export type LockState = 'intact' | 'broken';
 export type GuardState = 'patrol' | 'alert' | 'engage' | 'down';
@@ -406,12 +406,12 @@ export class PrisonSim {
 
     /* ---- ALARM HARDWARE: sirens on the walls, beacons over every door ---- */
     for (const [x, z] of [[-72, -70], [72, -70], [-72, 70], [72, 70], [0, -70], [0, 70], [-108, 0], [108, 0], [0, -108], [0, 108]] as [number, number][]) {
-      P(x, z, 0.7, 0.4, 0.5, 'siren', false, 5.4);
+      P(x, z, 0.7, 0.4, 0.5, 'siren', false, 3.5);
     }
     // ventilation trunks along the hall ceiling: the prison breathes
     for (let z = -60; z <= 60; z += 20) {
-      P(-80, z, 1.0, 3.0, 0.7, 'vent', false, 6.4);
-      P(80, z, 1.0, 3.0, 0.7, 'vent', false, 6.4);
+      P(-80, z, 1.0, 3.0, 0.7, 'vent', false, 3.1);
+      P(80, z, 1.0, 3.0, 0.7, 'vent', false, 3.1);
     }
   }
 
@@ -507,7 +507,8 @@ export class PrisonSim {
     for (let wing = 0; wing < WINGS; wing++) {
       const z = wingZ(wing);
       for (let k = -4; k <= 4; k++) {
-        this.props.push({ x: k * 16, z: z, y: 0, w: 2.4, d: 0.8, h: 0.75, kind: 'bench', solid: true });
+        const side = k % 2 === 0 ? 1 : -1;
+        this.props.push({ x: k * 16, z: z + side * (CORRIDOR_HALF - 0.52), y: 0, w: 3.0, d: 0.74, h: 0.5, kind: 'bench', solid: true });
       }
     }
     for (const b of this.buttons) {
@@ -519,11 +520,27 @@ export class PrisonSim {
         this.props.push({ x: k * 11, z: wingZ(wing) - CORRIDOR_HALF - CELL_D - 1.2, y: 3.9, w: 0.4, d: 0.4, h: 0.4, kind: 'pipe', solid: false });
       }
     }
-    for (let i = 0; i < 60; i++) {
-      this.props.push({ x: rnd(-100, 100), z: rnd(-100, 100), y: 6.2, w: 2.2, d: 0.5, h: 0.24, kind: 'lamp', solid: false });
+    // Twin-tube fixtures down the middle of every gallery, every 7.2 m: the row of
+    // lights is what gives the corridor its perspective.
+    const galleryHalf = (WING_ROWS * CELL_W) / 2;
+    for (let wing = 0; wing < WINGS; wing++) {
+      const z = wingZ(wing);
+      for (let x = -galleryHalf + 4; x <= galleryHalf - 4; x += 7.2) {
+        this.props.push({ x, z, y: 3.34, w: 1.72, d: 0.46, h: 0.14, kind: 'lamp', solid: false });
+      }
     }
-    for (const [x, z] of [[-56, 88], [56, -88], [0, 60], [0, -60], [-80, 0], [80, 0]] as [number, number][]) {
-      this.props.push({ x, z, y: 4.6, w: 0.5, d: 0.5, h: 0.5, kind: 'camera', solid: false });
+    // Rooms, control rooms and the yard keep their own lights.
+    for (const [x, z] of [[-56, 88], [56, 88], [-72, -92], [72, -92], [95, 40], [95, -10], [-95, 30], [-95, -10], [0, 96], [0, -96], [-80, 0], [80, 0], [-61, 88], [61, 88]] as [number, number][]) {
+      this.props.push({ x, z, y: 3.3, w: 1.72, d: 0.46, h: 0.14, kind: 'lamp', solid: false });
+    }
+    // CCTV on the cell fronts, one every ~20 m, alternating sides.
+    for (let wing = 0; wing < WINGS; wing++) {
+      const z = wingZ(wing);
+      let n = 0;
+      for (let x = -galleryHalf + 9; x <= galleryHalf - 9; x += 19.5, n++) {
+        const side = n % 2 === 0 ? 1 : -1;
+        this.props.push({ x, z: z + side * (CORRIDOR_HALF - 0.32), y: 3.12, w: 0.4, d: 0.4, h: 0.3, kind: 'camera', solid: false });
+      }
     }
     this.props.push({ x: 84, z: -82, y: 0, w: 6, d: 1.2, h: 0.9, kind: 'table', solid: true });
     this.props.push({ x: 80, z: 84, y: 0, w: 4, d: 1.0, h: 1.8, kind: 'locker', solid: true });
@@ -532,15 +549,20 @@ export class PrisonSim {
 
     /* ---------------- clutter: the prison lives in, it is not a showroom ---------------- */
     // Chairs, trays, buckets, mops and cable coils along every gallery and room.
-    for (const wing of [1, 2, 3, 4]) {
+    for (const wing of [0, 1, 2, 3]) {
       const z = wingZ(wing);
       for (let k = -6; k <= 6; k++) {
         const x = k * 11.4 + rnd(-1.6, 1.6);
         const near = Math.abs(x) < 6 ? 1.9 : 0;
-        this.props.push({ x, z: z + (k % 2 ? 1 : -1) * (CORRIDOR_HALF + 0.7), y: 0, w: 0.62, d: 0.62, h: 0.92, kind: 'chair', solid: false });
+        this.props.push({ x, z: z + (k % 2 ? 1 : -1) * (CORRIDOR_HALF - 0.5), y: 0, w: 0.62, d: 0.62, h: 0.92, kind: 'chair', solid: false });
         if (k % 2 === 0) this.props.push({ x: x + 2.1, z: z + near, y: 0, w: 0.5, d: 0.5, h: 0.4, kind: 'pot', solid: false });
         if (k % 3 === 0) this.props.push({ x: x - 2.4, z: z - near, y: 0, w: 0.7, d: 0.7, h: 0.5, kind: 'crate', solid: false });
-        if (k % 4 === 0) this.props.push({ x: x + 3.4, z: z - (CORRIDOR_HALF + 0.6), y: 0, w: 1.1, d: 0.6, h: 0.34, kind: 'laundry', solid: false });
+        if (k % 4 === 0) this.props.push({ x: x + 3.4, z: z - (CORRIDOR_HALF - 0.42), y: 0, w: 1.1, d: 0.6, h: 0.34, kind: 'laundry', solid: false });
+        // a cardboard box or two left in the walkway, like the box in the reference
+        if (k % 3 === 1) this.props.push({
+          x: x + rnd(-1.5, 1.5), z: z + (k % 2 ? 1 : -1) * rnd(0.2, CORRIDOR_HALF - 0.9),
+          y: 0, w: rnd(0.7, 1.0), d: rnd(0.55, 0.8), h: rnd(0.45, 0.72), kind: 'crate', solid: false,
+        });
       }
       // pipe runs and cable trays overhead, floor drains at the gallery ends
       for (let k = -9; k <= 9; k++) {
@@ -581,11 +603,17 @@ export class PrisonSim {
       }
     }
     // galleries: papers and casings blown down the corridor
-    for (const wing of [1, 2, 3, 4]) {
+    for (const wing of [0, 1, 2, 3]) {
       const z = wingZ(wing);
-      for (let i = 0; i < 420; i++) {
+      for (let i = 0; i < 460; i++) {
         const kind = i % 5 === 0 ? 1 : i % 7 === 0 ? 2 : i % 3 === 0 ? 3 : 0;
-        drop(rnd(-72, 72), z + rnd(-CORRIDOR_HALF + 0.2, CORRIDOR_HALF - 0.2), 0.01, kind, rnd(0.05, 0.16));
+        // most of it is swept against the bars, a third lies in the walkway
+        const edge = i % 3 !== 0;
+        const side = i % 2 === 0 ? 1 : -1;
+        const lz = edge
+          ? z + side * (CORRIDOR_HALF - rnd(0.08, 0.55))
+          : z + rnd(-CORRIDOR_HALF + 0.4, CORRIDOR_HALF - 0.4);
+        drop(rnd(-72, 72), lz, 0.01, kind, rnd(0.05, 0.16));
       }
     }
     // rooms, the yard and the workshop floor

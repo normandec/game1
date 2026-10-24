@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { PrisonSim, CELL_D, CELL_W, CELL_H, type PrisonStats } from '../game/prison';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import {
+  PrisonSim, CELL_D, CELL_W, CELL_H, CORRIDOR_HALF, WING_ROWS, wingZ, type PrisonStats,
+} from '../game/prison';
 
 export type PrisonMode = 'arrest' | 'visit';
 interface Props {
@@ -23,29 +26,6 @@ const EMPTY: Screen = {
   lights: false, compass: [], stats: { freed: 0, guardsDown: 0, inmatesDown: 0, shots: 0, hits: 0, looted: 0 },
   flashlight: false,
 };
-
-/** Concrete texture generated on a canvas — no external assets in a single-file build. */
-function concreteTexture(size = 512, base = '#2e3335'): THREE.CanvasTexture {
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const g = c.getContext('2d')!;
-  g.fillStyle = base; g.fillRect(0, 0, size, size);
-  for (let i = 0; i < 5200; i++) {
-    const x = Math.random() * size, y = Math.random() * size;
-    const v = 16 + Math.random() * 42;
-    g.fillStyle = `rgba(${v},${v + 4},${v + 5},${0.05 + Math.random() * 0.16})`;
-    g.fillRect(x, y, 1 + Math.random() * 3, 1 + Math.random() * 3);
-  }
-  // expansion joints
-  g.strokeStyle = 'rgba(0,0,0,0.35)'; g.lineWidth = 3;
-  for (let i = 1; i < 4; i++) {
-    g.beginPath(); g.moveTo(0, (size / 4) * i); g.lineTo(size, (size / 4) * i); g.stroke();
-    g.beginPath(); g.moveTo((size / 4) * i, 0); g.lineTo((size / 4) * i, size); g.stroke();
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  return t;
-}
 
 export default function Prison3D({ mode, onExit }: Props) {
   const host = useRef<HTMLDivElement>(null);
@@ -71,67 +51,241 @@ export default function Prison3D({ mode, onExit }: Props) {
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     renderer.setSize(W, H);
-    renderer.setClearColor(0x070b0e, 1);
-    // Brighter, filmic response: the first visit used to be almost unreadable.
+    renderer.setClearColor(0x05080a, 1);
+    // Filmic response, a touch of bloom-feel through exposure. Bright enough to read.
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.28;
+    renderer.toneMappingExposure = 1.12;
     hostEl.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x0a1216, 0.0105);
-    const camera = new THREE.PerspectiveCamera(74, W / H, 0.08, 420);
+    // Tight, damp air: the gallery fades out well before its far end.
+    scene.fog = new THREE.FogExp2(0x0a1014, 0.019);
+    const camera = new THREE.PerspectiveCamera(72, W / H, 0.06, 320);
+    // 1.66 m eye height, slightly wide: the corridor has to feel narrow and long.
 
-    // Three light layers: a true ambient floor, a soft sky bounce, and cold moonlight
-    // through the skylights. Nobody walks into a pitch-black room any more.
-    scene.add(new THREE.AmbientLight(0x8fa4b4, 0.62));
-    scene.add(new THREE.HemisphereLight(0x6d8ea6, 0x1a2226, 0.85));
-    const moon = new THREE.DirectionalLight(0xa8c6e0, 0.85);
+    /* ---------------- environment ---------------- */
+    // Reflections matter here: wet concrete and black steel both read as real only if
+    // something is reflected. RoomEnvironment gives a pre-filtered map in one shot.
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const envRT = pmrem.fromScene(new RoomEnvironment(), 0.06);
+    scene.environment = envRT.texture;
+
+    scene.add(new THREE.AmbientLight(0x7d95a8, 0.4));
+    scene.add(new THREE.HemisphereLight(0x54748c, 0x0b1013, 0.55));
+    const moon = new THREE.DirectionalLight(0x9dc0dc, 0.28);
     moon.position.set(-60, 120, -40);
     moon.castShadow = false;
     scene.add(moon);
-    // Wall washers down the two main galleries: cheap, static, and they read as strip lights.
-    for (const z of [-45, -15, 15, 45]) {
-      for (const x of [-52, -18, 18, 52]) {
-        const strip = new THREE.PointLight(0xbcd6e8, 9, 34, 2);
-        strip.position.set(x, 6.2, z);
-        scene.add(strip);
+
+    /* ---------------- procedural textures ----------------
+     * Everything is painted on canvases: the build stays a single file, and the grime
+     * is tuned per surface instead of being one grey map everywhere.
+     */
+    const tex = (c: HTMLCanvasElement, srgb = true, repeat = 1) => {
+      const t = new THREE.CanvasTexture(c);
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      t.repeat.set(repeat, repeat);
+      t.anisotropy = 4;
+      if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+      return t;
+    };
+    const cv = (size: number) => {
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      return { c, g: c.getContext('2d')! };
+    };
+
+    /** Painted, filthy concrete: mottling, form-tie holes, drips, chipped paint. */
+    function wallTexture(): THREE.CanvasTexture {
+      const { c, g } = cv(512);
+      g.fillStyle = '#3a444b'; g.fillRect(0, 0, 512, 512);
+      for (let i = 0; i < 4200; i++) {
+        const v = 24 + Math.random() * 46;
+        g.fillStyle = `rgba(${v},${v + 4},${v + 6},${0.05 + Math.random() * 0.14})`;
+        g.fillRect(Math.random() * 512, Math.random() * 512, 2 + Math.random() * 8, 2 + Math.random() * 8);
       }
+      // pale patches where the paint has been scrubbed / chipped away
+      for (let i = 0; i < 42; i++) {
+        const x = Math.random() * 512, y = Math.random() * 512, r = 6 + Math.random() * 34;
+        const grd = g.createRadialGradient(x, y, 0, x, y, r);
+        grd.addColorStop(0, 'rgba(120,134,140,0.20)');
+        grd.addColorStop(1, 'rgba(120,134,140,0)');
+        g.fillStyle = grd; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+      }
+      // vertical water drips from the ceiling line
+      for (let i = 0; i < 90; i++) {
+        const x = Math.random() * 512;
+        const h = 20 + Math.random() * 190, y = Math.random() * 200;
+        const grd = g.createLinearGradient(0, y, 0, y + h);
+        grd.addColorStop(0, 'rgba(10,14,16,0.34)');
+        grd.addColorStop(1, 'rgba(10,14,16,0)');
+        g.fillStyle = grd;
+        g.fillRect(x, y, 1 + Math.random() * 5, h);
+      }
+      // form-tie holes in a loose grid
+      g.fillStyle = 'rgba(8,11,12,0.55)';
+      for (let y = 40; y < 512; y += 92) for (let x = 46; x < 512; x += 96) {
+        g.beginPath(); g.arc(x + Math.random() * 4, y + Math.random() * 4, 2.4, 0, Math.PI * 2); g.fill();
+      }
+      // expansion joints
+      g.strokeStyle = 'rgba(0,0,0,0.4)'; g.lineWidth = 3;
+      g.beginPath(); g.moveTo(0, 256); g.lineTo(512, 256); g.stroke();
+      return tex(c, true, 1);
+    }
+
+    /** Wet, polished institution floor: aggregate, dark scuffs, pale wear tracks. */
+    function floorTexture(): THREE.CanvasTexture {
+      const { c, g } = cv(512);
+      g.fillStyle = '#2b3236'; g.fillRect(0, 0, 512, 512);
+      for (let i = 0; i < 9000; i++) {
+        const v = 18 + Math.random() * 70;
+        g.fillStyle = `rgba(${v},${v + 3},${v + 4},${0.06 + Math.random() * 0.16})`;
+        g.fillRect(Math.random() * 512, Math.random() * 512, 1 + Math.random() * 3, 1 + Math.random() * 3);
+      }
+      // worn traffic lane down the middle of the gallery
+      const lane = g.createLinearGradient(150, 0, 362, 0);
+      lane.addColorStop(0, 'rgba(150,163,168,0)');
+      lane.addColorStop(0.5, 'rgba(150,163,168,0.14)');
+      lane.addColorStop(1, 'rgba(150,163,168,0)');
+      g.fillStyle = lane; g.fillRect(150, 0, 212, 512);
+      // dark wet patches
+      for (let i = 0; i < 26; i++) {
+        const x = Math.random() * 512, y = Math.random() * 512, r = 12 + Math.random() * 60;
+        const grd = g.createRadialGradient(x, y, 0, x, y, r);
+        grd.addColorStop(0, 'rgba(8,12,14,0.45)');
+        grd.addColorStop(1, 'rgba(8,12,14,0)');
+        g.fillStyle = grd; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+      }
+      // saw-cut slab joints
+      g.strokeStyle = 'rgba(6,9,10,0.55)'; g.lineWidth = 2;
+      for (const p of [128, 256, 384]) {
+        g.beginPath(); g.moveTo(0, p); g.lineTo(512, p); g.stroke();
+        g.beginPath(); g.moveTo(p, 0); g.lineTo(p, 512); g.stroke();
+      }
+      return tex(c, true, 1);
+    }
+
+    /** Roughness map for the floor: black = mirror-wet puddle, white = dry concrete. */
+    function floorRoughness(): THREE.CanvasTexture {
+      const { c, g } = cv(512);
+      g.fillStyle = '#b4b4b4'; g.fillRect(0, 0, 512, 512);
+      for (let i = 0; i < 7000; i++) {
+        const v = 150 + Math.random() * 90;
+        g.fillStyle = `rgba(${v},${v},${v},0.25)`;
+        g.fillRect(Math.random() * 512, Math.random() * 512, 2, 2);
+      }
+      // puddles and a permanently wet lane down the middle
+      const wet = (x: number, y: number, r: number, dark: number) => {
+        const grd = g.createRadialGradient(x, y, 0, x, y, r);
+        grd.addColorStop(0, `rgba(10,10,10,${dark})`);
+        grd.addColorStop(0.7, `rgba(30,30,30,${dark * 0.6})`);
+        grd.addColorStop(1, 'rgba(120,120,120,0)');
+        g.fillStyle = grd; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+      };
+      for (let i = 0; i < 34; i++) wet(Math.random() * 512, Math.random() * 512, 14 + Math.random() * 70, 0.85);
+      g.fillStyle = 'rgba(20,20,20,0.5)'; g.fillRect(196, 0, 120, 512);
+      return tex(c, false, 1);
+    }
+
+    /** Soft vertical light smear, used for the reflection on the wet floor. */
+    function streakTexture(): THREE.CanvasTexture {
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 256;
+      const g = c.getContext('2d')!;
+      const along = g.createLinearGradient(0, 0, 64, 0);
+      along.addColorStop(0, 'rgba(255,255,255,0)');
+      along.addColorStop(0.42, 'rgba(255,255,255,0.55)');
+      along.addColorStop(0.5, 'rgba(255,255,255,1)');
+      along.addColorStop(0.58, 'rgba(255,255,255,0.55)');
+      along.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = along; g.fillRect(0, 0, 64, 256);
+      const across = g.createLinearGradient(0, 0, 0, 256);
+      across.addColorStop(0, 'rgba(0,0,0,0)');
+      across.addColorStop(0.5, 'rgba(0,0,0,1)');
+      across.addColorStop(1, 'rgba(0,0,0,0)');
+      g.globalCompositeOperation = 'destination-in';
+      g.fillStyle = across; g.fillRect(0, 0, 64, 256);
+      return tex(c, false, 1);
+    }
+
+    /** Grime running down a wall, as an alpha decal. */
+    function grimeTexture(): THREE.CanvasTexture {
+      const { c, g } = cv(256);
+      g.clearRect(0, 0, 256, 256);
+      for (let i = 0; i < 70; i++) {
+        const x = Math.random() * 256, w = 2 + Math.random() * 16;
+        const h = 30 + Math.random() * 210;
+        const grd = g.createLinearGradient(0, 0, 0, h);
+        grd.addColorStop(0, `rgba(9,13,15,${0.28 + Math.random() * 0.35})`);
+        grd.addColorStop(1, 'rgba(9,13,15,0)');
+        g.fillStyle = grd; g.fillRect(x, 0, w, h);
+      }
+      for (let i = 0; i < 900; i++) {
+        g.fillStyle = `rgba(14,18,20,${Math.random() * 0.25})`;
+        g.fillRect(Math.random() * 256, 120 + Math.random() * 136, 3, 3);
+      }
+      return tex(c, false, 1);
+    }
+
+    /** Sign plate: dark steel with a lit legend. */
+    function signTexture(text: string, color: string): THREE.CanvasTexture {
+      const c = document.createElement('canvas');
+      c.width = 256; c.height = 96;
+      const g = c.getContext('2d')!;
+      g.fillStyle = '#0b1012'; g.fillRect(0, 0, 256, 96);
+      g.strokeStyle = 'rgba(180,200,200,0.35)'; g.lineWidth = 4; g.strokeRect(2, 2, 252, 92);
+      g.fillStyle = color; g.font = 'bold 54px monospace'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(text, 128, 52);
+      return tex(c, true, 1);
     }
 
     /* ---------------- materials ---------------- */
-    const concreteMap = concreteTexture(512, '#31383a');
-    concreteMap.repeat.set(30, 30);
-    const matConcrete = new THREE.MeshStandardMaterial({ color: 0x565f62, map: concreteMap, roughness: 0.94, metalness: 0.04 });
-    const matFloor = new THREE.MeshStandardMaterial({ color: 0x3b4144, map: concreteMap, roughness: 0.88, metalness: 0.06 });
-    const matBars = new THREE.MeshStandardMaterial({ color: 0x8a969d, roughness: 0.42, metalness: 0.82 });
-    const matGate = new THREE.MeshStandardMaterial({ color: 0x6b5a44, roughness: 0.55, metalness: 0.6 });
-    const matBed = new THREE.MeshStandardMaterial({ color: 0x4a5d70, roughness: 0.9 });
-    const matMetal = new THREE.MeshStandardMaterial({ color: 0x707c84, roughness: 0.5, metalness: 0.7 });
-    const matWood = new THREE.MeshStandardMaterial({ color: 0x6b5440, roughness: 0.85 });
-    const matLamp = new THREE.MeshBasicMaterial({ color: 0xd8ecff });
+    const wallMap = wallTexture(); wallMap.repeat.set(6, 3);
+    const floorMap = floorTexture(); floorMap.repeat.set(14, 14);
+    const roughMap = floorRoughness(); roughMap.repeat.set(9, 9);
+
+    const matConcrete = new THREE.MeshStandardMaterial({
+      color: 0x4a565d, map: wallMap, roughness: 0.93, metalness: 0.05, envMapIntensity: 0.25,
+    });
+    // The floor is the star: dark, wet, and only partly rough, so the env map and the
+    // light smears below draw long reflections into it.
+    const matFloor = new THREE.MeshStandardMaterial({
+      color: 0x39434a, map: floorMap, roughnessMap: roughMap,
+      roughness: 1.0, metalness: 0.25, envMapIntensity: 0.22,
+    });
+    const matBars = new THREE.MeshStandardMaterial({
+      color: 0x1a2127, roughness: 0.34, metalness: 0.9, envMapIntensity: 0.75,
+    });
+    const matFrame = new THREE.MeshStandardMaterial({ color: 0x14191d, roughness: 0.55, metalness: 0.6 });
+    const matCeiling = new THREE.MeshStandardMaterial({ color: 0x232a2f, map: wallMap, roughness: 0.96 });
+    const matDado = new THREE.MeshStandardMaterial({ color: 0x1f272c, roughness: 0.7, metalness: 0.15 });
+    const matGate = new THREE.MeshStandardMaterial({ color: 0x3a3f42, roughness: 0.55, metalness: 0.6 });
+    const matBed = new THREE.MeshStandardMaterial({ color: 0x2e3a44, roughness: 0.92 });
+    const matMetal = new THREE.MeshStandardMaterial({ color: 0x59646c, roughness: 0.48, metalness: 0.72 });
+    const matPipe = new THREE.MeshStandardMaterial({ color: 0x2b3339, roughness: 0.45, metalness: 0.7 });
+    const matWood = new THREE.MeshStandardMaterial({ color: 0x4a3b2d, roughness: 0.88 });
+    const matBench = new THREE.MeshStandardMaterial({ color: 0x2a3237, roughness: 0.82, metalness: 0.1 });
+    const matLamp = new THREE.MeshBasicMaterial({ color: 0xe4f2ff });
     const matGuard = new THREE.MeshStandardMaterial({ color: 0x2b3a4a, roughness: 0.7, metalness: 0.2 });
     const matGuardHead = new THREE.MeshStandardMaterial({ color: 0xc9a58b, roughness: 0.8 });
     const matInmate = new THREE.MeshStandardMaterial({ color: 0x9c6b2f, roughness: 0.9 });
     const matInmateHead = new THREE.MeshStandardMaterial({ color: 0xb08f74, roughness: 0.85 });
 
-    /* ---------------- floor ---------------- */
-    const floorGeo = new THREE.PlaneGeometry(240, 240);
-    const floor = new THREE.Mesh(floorGeo, matFloor);
+    /* ---------------- floor, ceiling, rafters ---------------- */
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(260, 260), matFloor);
     floor.rotation.x = -Math.PI / 2;
     scene.add(floor);
-    // painted yard markings and a drain grid, so the floor is not a flat slab
-    const lineMat = new THREE.MeshBasicMaterial({ color: 0x9fb4b8, transparent: true, opacity: 0.16 });
+    const lineMat = new THREE.MeshBasicMaterial({ color: 0x9fb4b8, transparent: true, opacity: 0.1 });
     for (let i = -5; i <= 5; i++) {
-      const line = new THREE.Mesh(new THREE.PlaneGeometry(220, 0.14), lineMat);
+      const line = new THREE.Mesh(new THREE.PlaneGeometry(220, 0.12), lineMat);
       line.rotation.x = -Math.PI / 2; line.position.set(0, 0.02, i * 20);
       scene.add(line);
     }
-    // ceiling for the cell hall
-    const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(224, 224), new THREE.MeshStandardMaterial({ color: 0x1a2023, roughness: 1 }));
-    ceiling.rotation.x = Math.PI / 2; ceiling.position.y = 9.2;
+    const CEIL = 4.05;
+    const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(240, 240), matCeiling);
+    ceiling.rotation.x = Math.PI / 2; ceiling.position.y = CEIL;
     scene.add(ceiling);
 
-    /* ---------------- merged static geometry ---------------- */
     const box = (w: number, h: number, d: number, x: number, y: number, z: number, rotY = 0) => {
       const g = new THREE.BoxGeometry(w, h, d);
       if (rotY) g.rotateY(rotY);
@@ -139,7 +293,54 @@ export default function Prison3D({ mode, onExit }: Props) {
       return g;
     };
 
-    // walls (bars are drawn separately as instanced strips)
+    // concrete beams across every gallery: they break the ceiling into bays and give
+    // the eye a rhythm to measure the corridor with.
+    const beamGeos: THREE.BufferGeometry[] = [];
+    const pipeGeos: THREE.BufferGeometry[] = [];
+    const trayGeos: THREE.BufferGeometry[] = [];
+    const galleryLen = WING_ROWS * CELL_W;               // 144 m, the length of a wing
+    for (let w = 0; w < 4; w++) {
+      const z0 = wingZ(w);
+      for (let x = -galleryLen / 2; x <= galleryLen / 2; x += 5.5) {
+        beamGeos.push(box(0.3, 0.42, CORRIDOR_HALF * 2 + 0.8, x, CEIL - 0.21, z0));
+      }
+      // two service pipes and a cable tray hugging the ceiling, like the reference
+      const cyl = (r: number, len: number, y: number, z: number, mat: THREE.Material) => {
+        const geo = new THREE.CylinderGeometry(r, r, len, 8, 1, true);
+        geo.rotateZ(Math.PI / 2);
+        geo.translate(0, y, z);
+        pipeGeos.push(geo);
+        void mat;
+      };
+      cyl(0.15, galleryLen, CEIL - 0.62, z0 - CORRIDOR_HALF + 0.3, matPipe);
+      cyl(0.1, galleryLen, CEIL - 0.5, z0 - CORRIDOR_HALF + 0.62, matPipe);
+      cyl(0.13, galleryLen, CEIL - 0.55, z0 + CORRIDOR_HALF - 0.34, matPipe);
+      for (const sgn of [-1, 1]) {
+        trayGeos.push(box(galleryLen, 0.1, 0.62, 0, CEIL - 0.72, z0 + sgn * (CORRIDOR_HALF - 0.5)));
+        // brackets
+        for (let x = -galleryLen / 2; x <= galleryLen / 2; x += 6.5) {
+          trayGeos.push(box(0.1, 0.28, 0.1, x, CEIL - 0.86, z0 + sgn * (CORRIDOR_HALF - 0.5)));
+        }
+      }
+    }
+    // conduits run in front of the fascia, junction boxes are bolted to the posts
+    for (let w = 0; w < 4; w++) {
+      const z0 = wingZ(w);
+      for (const sgn of [-1, 1]) {
+        const z = z0 + sgn * (CORRIDOR_HALF - 0.28);
+        trayGeos.push(box(galleryLen, 0.085, 0.085, 0, 3.72, z));
+        trayGeos.push(box(galleryLen, 0.05, 0.05, 0, 3.58, z + 0.05));
+        for (let k = 1; k < WING_ROWS; k += 3) {
+          const x = -galleryLen / 2 + CELL_W * (k + 0.5) + CELL_W / 2;
+          trayGeos.push(box(0.34, 0.46, 0.15, x, 2.5, z0 + sgn * (CORRIDOR_HALF - 0.18)));
+        }
+      }
+    }
+    if (beamGeos.length) scene.add(new THREE.Mesh(mergeGeometries(beamGeos)!, matConcrete));
+    if (pipeGeos.length) scene.add(new THREE.Mesh(mergeGeometries(pipeGeos)!, matPipe));
+    if (trayGeos.length) scene.add(new THREE.Mesh(mergeGeometries(trayGeos)!, matPipe));
+
+    /* ---------------- walls and props ---------------- */
     const wallGeos: THREE.BufferGeometry[] = [];
     const gateGeos: THREE.BufferGeometry[] = [];
     for (const w of sim.walls) {
@@ -151,40 +352,43 @@ export default function Prison3D({ mode, onExit }: Props) {
     const gateMesh = gateGeos.length ? new THREE.Mesh(mergeGeometries(gateGeos)!, matGate) : null;
     if (gateMesh) scene.add(gateMesh);
 
-    // props grouped by material
     const groups: Record<string, THREE.BufferGeometry[]> = {
-      bed: [], metal: [], wood: [], lamp: [], screen: [], siren: [], cloth: [], stone: [],
+      bed: [], metal: [], wood: [], lamp: [], screen: [], siren: [], cloth: [], stone: [], bench: [], camera: [],
     };
     for (const p of sim.props) {
       const key = p.kind === 'bed' ? 'bed'
         : p.kind === 'lamp' ? 'lamp'
         : p.kind === 'monitor' ? 'screen'
         : p.kind === 'siren' ? 'siren'
-        : (p.kind === 'bench' || p.kind === 'table' || p.kind === 'desk' || p.kind === 'crate' || p.kind === 'workbench' || p.kind === 'shelf') ? 'wood'
+        : p.kind === 'bench' ? 'bench'
+        : p.kind === 'camera' ? 'camera'
+        : (p.kind === 'table' || p.kind === 'desk' || p.kind === 'crate' || p.kind === 'workbench' || p.kind === 'shelf') ? 'wood'
         : (p.kind === 'stretcher' || p.kind === 'laundry' || p.kind === 'chair') ? 'cloth'
         : p.kind === 'pot' || p.kind === 'tank' ? 'stone'
         : 'metal';
+      if (key === 'lamp' || key === 'camera') { continue; }   // built with their own fixtures
       groups[key].push(box(p.w, p.h, p.d, p.x, p.y + p.h / 2, p.z));
     }
     const propMats: Record<string, THREE.Material> = {
-      bed: matBed, metal: matMetal, wood: matWood, lamp: matLamp,
+      bed: matBed, metal: matMetal, wood: matWood, lamp: matLamp, bench: matBench,
       screen: new THREE.MeshBasicMaterial({ color: 0x3fd9b0 }),
       siren: new THREE.MeshBasicMaterial({ color: 0xd8323a }),
-      cloth: new THREE.MeshStandardMaterial({ color: 0x5d6d78, roughness: 0.95 }),
-      stone: new THREE.MeshStandardMaterial({ color: 0x7b8286, roughness: 0.8, metalness: 0.25 }),
+      cloth: new THREE.MeshStandardMaterial({ color: 0x46545e, roughness: 0.95 }),
+      stone: new THREE.MeshStandardMaterial({ color: 0x5a6368, roughness: 0.8, metalness: 0.25 }),
     };
     for (const key of Object.keys(groups)) {
       if (!groups[key].length) continue;
       scene.add(new THREE.Mesh(mergeGeometries(groups[key])!, propMats[key]));
     }
 
-    // cell interiors: a painted floor patch + a bunk frame edge, one instanced mesh each
-    const patchGeo = new THREE.PlaneGeometry(CELL_W - 0.3, CELL_D - 0.3);
-    const patchMat = new THREE.MeshStandardMaterial({ color: 0x2a2f31, roughness: 0.95 });
-    const patches = new THREE.InstancedMesh(patchGeo, patchMat, sim.cells.length);
+    /* ---------------- cell fronts: frames, bars, locks ---------------- */
     const m4 = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const s3 = new THREE.Vector3(1, 1, 1);
+
+    const patchGeo = new THREE.PlaneGeometry(CELL_W - 0.3, CELL_D - 0.3);
+    const patchMat = new THREE.MeshStandardMaterial({ color: 0x22282b, roughness: 0.95 });
+    const patches = new THREE.InstancedMesh(patchGeo, patchMat, sim.cells.length);
     const flat = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
     sim.cells.forEach((c, i) => {
       m4.compose(new THREE.Vector3(c.x, 0.015, c.z), flat, s3);
@@ -192,60 +396,269 @@ export default function Prison3D({ mode, onExit }: Props) {
     });
     scene.add(patches);
 
-    // bars: 11 vertical rods + 2 rails per cell front
-    const BARS = 11;
-    const barGeo = new THREE.BoxGeometry(0.055, CELL_H - 0.35, 0.055);
+    // door frame: two jambs and a head, in near-black steel
+    const jambGeo = new THREE.BoxGeometry(0.16, CELL_H, 0.24);
+    const jambs = new THREE.InstancedMesh(jambGeo, matFrame, sim.cells.length * 2);
+    const headGeo = new THREE.BoxGeometry(CELL_W, 0.26, 0.24);
+    const heads = new THREE.InstancedMesh(headGeo, matFrame, sim.cells.length);
+    let ji = 0;
+    sim.cells.forEach((c, i) => {
+      const zf = c.z + c.face * (CELL_D / 2);
+      for (const sgn of [-1, 1]) {
+        m4.compose(new THREE.Vector3(c.x + sgn * CELL_W / 2, CELL_H / 2, zf), q.identity(), s3);
+        jambs.setMatrixAt(ji++, m4);
+      }
+      m4.compose(new THREE.Vector3(c.x, CELL_H - 0.13, zf), q.identity(), s3);
+      heads.setMatrixAt(i, m4);
+    });
+    scene.add(jambs, heads);
+    const fasciaGeos: THREE.BufferGeometry[] = [];
+    for (let w = 0; w < 4; w++) {
+      const z0 = wingZ(w);
+      for (const sgn of [-1, 1]) {
+        fasciaGeos.push(box(galleryLen, CEIL - CELL_H + 0.1, 0.22, 0, CELL_H - 0.03, z0 + sgn * (CORRIDOR_HALF - 0.11)));
+      }
+    }
+    scene.add(new THREE.Mesh(mergeGeometries(fasciaGeos)!, matConcrete));
+
+    // bars: 19 rods per front, plus four rails — dense, like a real cell block
+    const BARS = 19;
+    const barGeo = new THREE.BoxGeometry(0.05, CELL_H - 0.38, 0.05);
     const bars = new THREE.InstancedMesh(barGeo, matBars, sim.cells.length * BARS);
-    const railGeo = new THREE.BoxGeometry(CELL_W, 0.09, 0.09);
-    const rails = new THREE.InstancedMesh(railGeo, matBars, sim.cells.length * 3);
+    const railGeo = new THREE.BoxGeometry(CELL_W - 0.1, 0.075, 0.075);
+    const rails = new THREE.InstancedMesh(railGeo, matBars, sim.cells.length * 4);
     let bi = 0, ri = 0;
+    const barTint = new THREE.Color();
+    const barRnd = (n: number) => {
+      const v = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return v - Math.floor(v);
+    };
     for (const c of sim.cells) {
       const zf = c.z + c.face * (CELL_D / 2);
       for (let k = 0; k < BARS; k++) {
-        const x = c.x - CELL_W / 2 + (CELL_W / (BARS - 1)) * k;
-        m4.compose(new THREE.Vector3(x, CELL_H / 2 - 0.1, zf), q.identity(), s3);
+        const x = c.x - CELL_W / 2 + 0.12 + ((CELL_W - 0.24) / (BARS - 1)) * k;
+        m4.compose(new THREE.Vector3(x, CELL_H / 2 - 0.12, zf), q.identity(), s3);
+        const t = barRnd(bi);
+        // damp steel: darker where it is wet, warmer where it has started to rust
+        barTint.setRGB(0.62 + t * 0.6, 0.66 + t * 0.5, 0.7 + t * 0.45);
+        if (t > 0.93) barTint.setRGB(0.75, 0.5, 0.36);
+        bars.setColorAt(bi, barTint);
         bars.setMatrixAt(bi++, m4);
       }
-      for (const y of [0.55, CELL_H / 2, CELL_H - 0.3]) {
+      for (const y of [0.18, 1.02, 2.16, CELL_H - 0.28]) {
         m4.compose(new THREE.Vector3(c.x, y, zf), q.identity(), s3);
         rails.setMatrixAt(ri++, m4);
       }
     }
+    if (bars.instanceColor) bars.instanceColor.needsUpdate = true;
     scene.add(bars, rails);
 
-    // lock plates: one per cell, hidden when broken
-    const lockGeo = new THREE.BoxGeometry(0.34, 0.42, 0.12);
-    const lockMat = new THREE.MeshStandardMaterial({ color: 0xc9a227, roughness: 0.4, metalness: 0.8, emissive: 0x2a1f00 });
+    // yellow lock boxes over a dark steel back plate — the single most recognisable
+    // piece of colour in the reference, so it is chunky and it catches the light.
+    const lockPlateGeo = new THREE.BoxGeometry(0.74, 0.86, 0.06);
+    const lockPlates = new THREE.InstancedMesh(lockPlateGeo, matFrame, sim.cells.length);
+    const lockGeo = new THREE.BoxGeometry(0.44, 0.54, 0.2);
+    const lockMat = new THREE.MeshStandardMaterial({ color: 0xd0a92b, roughness: 0.42, metalness: 0.55, emissive: 0x140f00 });
     const locks = new THREE.InstancedMesh(lockGeo, lockMat, sim.cells.length);
+    const tagGeo = new THREE.BoxGeometry(0.26, 0.15, 0.02);
+    const tagMat = new THREE.MeshStandardMaterial({ color: 0x0d1114, roughness: 0.7 });
+    const tags = new THREE.InstancedMesh(tagGeo, tagMat, sim.cells.length);
     for (const c of sim.cells) {
-      m4.compose(new THREE.Vector3(c.x, 1.15, c.z + c.face * (CELL_D / 2) + c.face * 0.12), q.identity(), s3);
+      const zf = c.z + c.face * (CELL_D / 2);
+      m4.compose(new THREE.Vector3(c.x + CELL_W / 2 - 0.34, 1.2, zf + c.face * 0.05), q.identity(), s3);
+      lockPlates.setMatrixAt(c.id, m4);
+      m4.compose(new THREE.Vector3(c.x + CELL_W / 2 - 0.34, 1.2, zf + c.face * 0.16), q.identity(), s3);
       locks.setMatrixAt(c.id, m4);
+      m4.compose(new THREE.Vector3(c.x + CELL_W / 2 - 0.34, 1.42, zf + c.face * 0.28), q.identity(), s3);
+      tags.setMatrixAt(c.id, m4);
     }
-    scene.add(locks);
+    scene.add(lockPlates, locks, tags);
 
-    // lamps (emissive strips) + a moving pool of point lights around the player
-    const lampGeo = new THREE.BoxGeometry(2.2, 0.16, 0.5);
-    const lamps = new THREE.InstancedMesh(lampGeo, matLamp, sim.props.filter((p) => p.kind === 'lamp').length);
-    let li = 0;
-    for (const p of sim.props) if (p.kind === 'lamp') {
-      m4.compose(new THREE.Vector3(p.x, p.y, p.z), q.identity(), s3);
-      lamps.setMatrixAt(li++, m4);
+    /* ---------------- lights on the ceiling ---------------- */
+    const lampProps = sim.props.filter((p) => p.kind === 'lamp');
+    const lampHousing: THREE.BufferGeometry[] = [];
+    const lampTubes: THREE.BufferGeometry[] = [];
+    const lampSpots: THREE.Vector3[] = [];
+    for (const p of lampProps) {
+      lampHousing.push(box(1.72, 0.14, 0.46, p.x, p.y + 0.16, p.z));
+      for (const sgn of [-1, 1]) {
+        lampTubes.push(box(1.5, 0.055, 0.085, p.x, p.y + 0.055, p.z + sgn * 0.1));
+      }
+      lampHousing.push(box(0.06, 0.34, 0.06, p.x - 0.7, p.y + 0.34, p.z));
+      lampHousing.push(box(0.06, 0.34, 0.06, p.x + 0.7, p.y + 0.34, p.z));
+      lampSpots.push(new THREE.Vector3(p.x, p.y - 0.2, p.z));
     }
-    scene.add(lamps);
+    if (lampHousing.length) scene.add(new THREE.Mesh(mergeGeometries(lampHousing)!, matPipe));
+    if (lampTubes.length) scene.add(new THREE.Mesh(mergeGeometries(lampTubes)!, matLamp));
 
+    /* ---------------- red strobes above the cells ---------------- */
+    // One caged red lamp over the gallery every ~22 m, alternating sides, all pulsing
+    // with the siren. Four real point lights carry the pools under them.
+    const strobeSpots: { x: number; z: number; y: number; side: number }[] = [];
+    for (let w = 0; w < 4; w++) {
+      const z0 = wingZ(w);
+      for (let x = -galleryLen / 2 + 6, k = 0; x <= galleryLen / 2 - 6; x += 22, k++) {
+        const side = k % 2 === 0 ? -1 : 1;
+        strobeSpots.push({ x, z: z0 + side * (CORRIDOR_HALF - 0.08), y: CELL_H - 0.55, side });
+      }
+    }
+    const bulbGeo = new THREE.SphereGeometry(0.13, 10, 8);
+    const bulbMat = new THREE.MeshBasicMaterial({ color: 0xff3a2e });
+    const bulbs = new THREE.InstancedMesh(bulbGeo, bulbMat, strobeSpots.length);
+    const shadeGeos: THREE.BufferGeometry[] = [];
+    strobeSpots.forEach((s, i) => {
+      m4.compose(new THREE.Vector3(s.x, s.y, s.z), q.identity(), s3);
+      bulbs.setMatrixAt(i, m4);
+      // caged shade: a small dark cone and two guard rods
+      shadeGeos.push(box(0.34, 0.1, 0.34, s.x, s.y + 0.16, s.z));
+      shadeGeos.push(box(0.03, 0.34, 0.03, s.x - 0.14, s.y + 0.04, s.z - 0.14));
+      shadeGeos.push(box(0.03, 0.34, 0.03, s.x + 0.14, s.y + 0.04, s.z + 0.14));
+    });
+    scene.add(bulbs);
+    scene.add(new THREE.Mesh(mergeGeometries(shadeGeos)!, matPipe));
+
+    /* ---------------- wet-floor reflections ---------------- */
+    // Cheap and very effective: a soft additive smear lying on the floor under every
+    // light, long along the corridor. It reads exactly like gloss on wet concrete.
+    const streakMap = streakTexture();
+    const streakGeo = new THREE.PlaneGeometry(1, 1);
+    const streakMatWhite = new THREE.MeshBasicMaterial({
+      map: streakMap, color: 0xbcd8f0, transparent: true, opacity: 0.38,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const streakMatRed = new THREE.MeshBasicMaterial({
+      map: streakMap, color: 0xff2f22, transparent: true, opacity: 0.3,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const layStreaks = (entries: { x: number; z: number; w: number; l: number }[], mat: THREE.Material) => {
+      if (!entries.length) return;
+      const geos = entries.map((e) => {
+        const geo = streakGeo.clone();
+        geo.scale(e.l, e.w, 1);
+        geo.rotateX(-Math.PI / 2);
+        geo.translate(e.x, 0.018, e.z);
+        return geo;
+      });
+      const m = new THREE.Mesh(mergeGeometries(geos)!, mat);
+      m.frustumCulled = false;
+      m.renderOrder = 2;
+      scene.add(m);
+      for (const g2 of geos) g2.dispose();
+    };
+    layStreaks(lampProps.map((p) => ({ x: p.x, z: p.z, w: 1.35, l: 4.8 })), streakMatWhite);
+    layStreaks(strobeSpots.map((s) => ({ x: s.x, z: s.z + s.side * -1.0, w: 0.85, l: 3.2 })), streakMatRed);
+
+    /* ---------------- grime and skirting ---------------- */
+    const grimeMap = grimeTexture();
+    const grimeMat = new THREE.MeshBasicMaterial({
+      map: grimeMap, transparent: true, opacity: 0.62, depthWrite: false, color: 0x0a0e10,
+    });
+    const grimeGeo = new THREE.PlaneGeometry(1, 1);
+    type Decal = { x: number; y: number; z: number; rotY: number; w: number; h: number };
+    const decals: Decal[] = [];
+    for (let w = 0; w < 4; w++) {
+      const z0 = wingZ(w);
+      for (const sgn of [-1, 1]) {
+        const rotY = sgn > 0 ? Math.PI : 0;
+        // streaks down the steel door posts, every second cell
+        for (let k = 0; k < WING_ROWS; k += 2) {
+          const x = -galleryLen / 2 + CELL_W * (k + 0.5) + CELL_W / 2;
+          decals.push({ x, y: 1.92, z: z0 + sgn * (CORRIDOR_HALF - 0.145), rotY, w: 0.22, h: 3.36 });
+        }
+        // and inside the cells, where water runs down the back wall
+        for (let k = 1; k < WING_ROWS; k += 3) {
+          const c = -galleryLen / 2 + CELL_W * (k + 0.5);
+          decals.push({
+            x: c + (k % 2 ? 0.5 : -0.5), y: 1.7, z: z0 + sgn * (CORRIDOR_HALF + CELL_D - 0.24),
+            rotY, w: 1.1, h: 2.8,
+          });
+        }
+      }
+    }
+    const grimeInst = new THREE.InstancedMesh(grimeGeo, grimeMat, decals.length);
+    grimeInst.renderOrder = 1;
+    decals.forEach((d, i) => {
+      m4.compose(
+        new THREE.Vector3(d.x, d.y, d.z),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, d.rotY, 0)),
+        new THREE.Vector3(d.w, d.h, 1),
+      );
+      grimeInst.setMatrixAt(i, m4);
+    });
+    scene.add(grimeInst);
+
+    // worn concrete kerb under the cell doors: the floor edge takes the worst of it
+    const kerbGeos: THREE.BufferGeometry[] = [];
+    for (let w = 0; w < 4; w++) {
+      const z0 = wingZ(w);
+      for (const sgn of [-1, 1]) {
+        kerbGeos.push(box(galleryLen, 0.14, 0.16, 0, 0.07, z0 + sgn * (CORRIDOR_HALF - 0.06)));
+      }
+    }
+    scene.add(new THREE.Mesh(mergeGeometries(kerbGeos)!, matDado));
+
+    // every cell gets a low concrete ceiling, so the interior reads as a box
+    const cellCeilGeo = new THREE.PlaneGeometry(CELL_W - 0.1, CELL_D - 0.1);
+    const cellCeils = new THREE.InstancedMesh(cellCeilGeo, matCeiling, sim.cells.length);
+    const down = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0));
+    sim.cells.forEach((c, i) => {
+      m4.compose(new THREE.Vector3(c.x, CELL_H - 0.02, c.z), down, s3);
+      cellCeils.setMatrixAt(i, m4);
+    });
+    scene.add(cellCeils);
+
+    /* ---------------- CCTV ---------------- */
+    const camProps = sim.props.filter((p) => p.kind === 'camera');
+    if (camProps.length) {
+      const camBody = new THREE.InstancedMesh(new THREE.BoxGeometry(0.22, 0.18, 0.34), matFrame, camProps.length);
+      const camLens = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.075, 0.09, 0.12, 10), matBars, camProps.length);
+      const camLed = new THREE.InstancedMesh(new THREE.SphereGeometry(0.022, 6, 5), new THREE.MeshBasicMaterial({ color: 0xff3b30 }), camProps.length);
+      const lensQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0));
+      const tilt = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.4, 0, 0));
+      camProps.forEach((p, i) => {
+        m4.compose(new THREE.Vector3(p.x, p.y, p.z), tilt, s3);
+        camBody.setMatrixAt(i, m4);
+        m4.compose(new THREE.Vector3(p.x, p.y - 0.1, p.z + 0.26), lensQ, s3);
+        camLens.setMatrixAt(i, m4);
+        m4.compose(new THREE.Vector3(p.x + 0.09, p.y + 0.07, p.z - 0.1), q.identity(), s3);
+        camLed.setMatrixAt(i, m4);
+      });
+      scene.add(camBody, camLens, camLed);
+    }
+
+    /* ---------------- signage ---------------- */
+    const exitMat = new THREE.MeshBasicMaterial({ map: signTexture('EXIT', '#5ef08a'), transparent: true });
+    const makeSign = (x: number, y: number, z: number, rotY: number, w = 1.5, h = 0.56) => {
+      const face = new THREE.Mesh(new THREE.PlaneGeometry(w, h), exitMat);
+      face.position.set(x, y, z); face.rotation.y = rotY; scene.add(face);
+      const boxM = new THREE.Mesh(new THREE.BoxGeometry(w + 0.12, h + 0.1, 0.1), matFrame);
+      boxM.position.set(x - Math.sin(rotY) * 0.06, y, z - Math.cos(rotY) * 0.06);
+      boxM.rotation.y = rotY; scene.add(boxM);
+    };
+    makeSign(0, 3.15, 104.4, 0, 2.0, 0.75);
+    for (let w = 0; w < 4; w++) {
+      makeSign(-galleryLen / 2 - 0.6, 2.9, wingZ(w), Math.PI / 2, 1.3, 0.5);
+      makeSign(galleryLen / 2 + 0.6, 2.9, wingZ(w), -Math.PI / 2, 1.3, 0.5);
+    }
+
+    /* ---------------- dynamic lights ---------------- */
     const lights: THREE.PointLight[] = [];
-    for (let i = 0; i < 12; i++) {
-      const l = new THREE.PointLight(0xd6e9ff, 0, 30, 2);
+    for (let i = 0; i < 16; i++) {
+      const l = new THREE.PointLight(0xd8ecff, 0, 19, 2);
       scene.add(l); lights.push(l);
     }
-    // Alarm beacons: one red light over each wing, dead until the sirens start.
+    const redLights: THREE.PointLight[] = [];
+    for (let i = 0; i < 6; i++) {
+      const l = new THREE.PointLight(0xff3a24, 0, 13, 2);
+      scene.add(l); redLights.push(l);
+    }
     const beacons: THREE.PointLight[] = [];
-    for (const z of [-45, -15, 15, 45]) {
-      const b = new THREE.PointLight(0xff2b2b, 0, 46, 2);
-      b.position.set(0, 7.4, z);
+    for (let w = 0; w < 4; w++) {
+      const b = new THREE.PointLight(0xff2b2b, 0, 26, 2);
+      b.position.set(0, CELL_H - 0.2, wingZ(w));
       scene.add(b); beacons.push(b);
     }
-    const lampSpots = sim.props.filter((p) => p.kind === 'lamp').map((p) => new THREE.Vector3(p.x, p.y - 0.4, p.z));
+    void matGuard; void matGuardHead; void matInmate; void matInmateHead;
 
     /* ---------------- loose junk on every floor: paper, cups, cans, casings ---------------- */
     const debrisGeo = new THREE.BoxGeometry(1, 1, 1);
@@ -548,9 +961,16 @@ export default function Prison3D({ mode, onExit }: Props) {
         const lampMat = lv.lamp.material as THREE.MeshBasicMaterial;
         lampMat.color.setHex(st.pulled ? 0x53f08a : st.id === 'master' ? 0xffb347 : 0x62e0ff);
       }
-      // sirens: red beacons breathe with the alarm level
+      // sirens: red beacons breathe with the alarm level, and the bulbs answer them
       const pulse = 0.55 + 0.45 * Math.sin(sim.time * 7);
-      beacons.forEach((b) => { b.intensity = sim.siren * 38 * pulse; });
+      beacons.forEach((b) => { b.intensity = sim.siren * 26 * pulse; });
+      const hot = 0.5 + 0.5 * Math.sin(sim.time * 7);
+      const glow = 0.28 + 0.72 * hot;
+      bulbMat.color.setRGB(0.42 + 0.58 * glow, 0.05 + 0.16 * glow, 0.04 + 0.12 * glow);
+      // the wet floor carries the red light too, and the tubes go cold in a blackout
+      streakMatRed.opacity = (sim.siren > 0.05 ? 0.16 + 0.34 * sim.siren * hot : 0.05);
+      streakMatWhite.opacity = sim.lightsOut ? 0.05 : 0.5;
+      matLamp.color.setHex(sim.lightsOut ? 0x2b3136 : 0xe4f2ff);
 
       if (sim.phase === 'escaped' && !finished.current) {
         finished.current = true;
@@ -579,7 +999,18 @@ export default function Prison3D({ mode, onExit }: Props) {
         const s = near[i];
         if (!s) { l.intensity = 0; return; }
         l.position.copy(s.p);
-        l.intensity = sim.lightsOut ? 1.5 : 11;
+        l.intensity = sim.lightsOut ? 1.6 : 16;
+      });
+      // red fixtures: the nearest ones get real light, so the bars catch the glow
+      const nearStrobe = strobeSpots
+        .map((s) => ({ s, d: (s.x - sim.px) ** 2 + (s.z - sim.pz) ** 2 }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, redLights.length);
+      redLights.forEach((l, i) => {
+        const n2 = nearStrobe[i];
+        if (!n2) { l.intensity = 0; return; }
+        l.position.set(n2.s.x, n2.s.y, n2.s.z);
+        l.intensity = (0.9 + 7.5 * sim.siren) * (0.6 + 0.4 * hot);
       });
       flashLight.intensity = sim.flashlight ? 34 : 0;
       muzzle.intensity = sim.flash > 0 ? 26 : 0;
@@ -682,6 +1113,8 @@ export default function Prison3D({ mode, onExit }: Props) {
         if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
         else if (mat) (mat as THREE.Material).dispose();
       });
+      envRT.dispose();
+      pmrem.dispose();
       renderer.dispose();
       hostEl.removeChild(renderer.domElement);
     };
