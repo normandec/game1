@@ -1,7 +1,7 @@
 import { sfx } from './audio';
 import type { SectorDressing } from './sectorKits';
 import type { ArmyPlan } from './army';
-import { AIRFIELD, VAULT_ENTRY, ARENA_W, ARENA_H, GEN_H, HQ, PLAYER_START, SECTORS, SpatialGrid, generateWorld, type Rect, type Zone } from './world';
+import { AIRFIELD, VAULT_ENTRY, ARENA_W, ARENA_H, HQ, PLAYER_START, SECTORS, SpatialGrid, generateWorld, type Rect, type Zone } from './world';
 import { RoutePlanner, segmentBox, segmentCircle, type Point, type Block } from './navigation';
 import { makeGates, makeDetails, gateBlocks, drawGate, drawDetails, type HydraulicGate, type RoomDetail } from './installations';
 import { drawTransport, drawParkedAircraft } from './vehicleArt';
@@ -263,10 +263,20 @@ interface RoadCar {
   wait: number; dead: boolean; colour: string;
   /** Siren / indicator phase so lights blink instead of glowing flat. */
   light: number;
+  /** 0..1 brake lamps, and the wobble of a suspension taking a corner. */
+  brake: number; lean: number;
+  /** Seconds spent with an obstruction ahead, so a stuck car eventually backs off. */
+  jammed: number;
+  /** Hull integrity: traffic is scenery that burns, not an indestructible decal. */
+  hp: number; maxHp: number;
+  /** Seconds of smoke pouring off this wreck. */
+  burning: number;
+  /** Seconds of panic: gunfire nearby stops the car and turns its hazards on. */
+  panic: number;
 }
 /** A routine the garrison performs on a timer: PT, shift change, refuel, alarm test. */
 interface ArmyRoutine {
-  kind: 'pt' | 'shift' | 'siren' | 'drill' | 'crane' | 'colors';
+  kind: 'pt' | 'shift' | 'siren' | 'drill' | 'crane' | 'colors' | 'fuel' | 'muster' | 'wash' | 'k9';
   x: number; y: number; t: number; dur: number; label: string;
 }
 /** A heap of snow / dust / slurry beside a road. Ploughs grow it, weather slowly adds to it. */
@@ -954,33 +964,41 @@ export class Game {
     this.jetMissiles = []; this.jetTrail = [];
     this.bridgeHp = this.bridgeMaxHp; this.bridgeDown = false; this.bridgeWarn = 0;
     this.armyLaunchT = 0;
-    // Traffic. Army circuits in sector 6; the annex ring road everywhere else.
+    // Traffic. The circuits themselves are sampled from the painted road network in
+    // world.ts, so a car can only ever be sent down road that is genuinely open.
     this.roadCars = [];
-    const routes = world.army?.routes || [];
-    const fallback = [[
-      { x: 900, y: GEN_H + 2000 }, { x: 11200, y: GEN_H + 2000 },
-      { x: 11200, y: GEN_H + 2500 }, { x: 900, y: GEN_H + 2500 },
-    ]];
-    const useRoutes = routes.length ? routes : fallback;
+    const useRoutes = world.trafficRoutes.length ? world.trafficRoutes : (world.army?.routes || []);
     const carKinds: RoadCar['kind'][] = ['humvee', 'car', 'bus', 'tanker', 'ambulance', 'humvee', 'car'];
     const colours = ['#5a6349', '#8a8f7a', '#33474a', '#6a5f45', '#9a9f88', '#4e5743', '#7d7f6a'];
     for (let r = 0; r < useRoutes.length; r++) {
       const route = useRoutes[r];
       const n = route.length;
-      for (let i = 0; i < 2 + (r % 2); i++) {
-        const t = (i + 0.5) / 3;
+      if (n < 3) continue;
+      // A lap length decides the fleet: a long perimeter run carries more traffic than a
+      // short service road, and every car is spread out so the road never looks empty.
+      let lap = 0;
+      for (let i = 0; i < n; i++) {
+        const a = route[i], b = route[(i + 1) % n];
+        lap += Math.hypot(b.x - a.x, b.y - a.y);
+      }
+      const fleet = clamp(Math.round(lap / 900) + 1, 2, 4);
+      for (let i = 0; i < fleet; i++) {
+        const t = (i + 0.5) / fleet;
         const seg = t * n;
         const a = route[Math.floor(seg) % n], b = route[(Math.floor(seg) + 1) % n];
         const f = seg - Math.floor(seg);
         this.roadCars.push({
           x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f,
           ang: Math.atan2(b.y - a.y, b.x - a.x),
-          speed: 62 + rand(0, 46),
+          speed: 58 + rand(0, 44),
           kind: carKinds[(r * 3 + i) % carKinds.length],
           route, node: (Math.floor(seg) + 1) % n,
-          wait: i * 26 + rand(0, 20), dead: false,
+          wait: i * 24 + rand(0, 18), dead: false,
           colour: colours[(r * 3 + i) % colours.length],
-          light: rand(0, TAU),
+          light: rand(0, TAU), brake: 0, lean: 0, jammed: 0,
+          hp: carKinds[(r * 3 + i) % carKinds.length] === 'bus' || carKinds[(r * 3 + i) % carKinds.length] === 'tanker' ? 260 : 170,
+          maxHp: carKinds[(r * 3 + i) % carKinds.length] === 'bus' || carKinds[(r * 3 + i) % carKinds.length] === 'tanker' ? 260 : 170,
+          burning: 0, panic: 0,
         });
       }
     }
@@ -1019,9 +1037,12 @@ export class Game {
       const q = { x: src.x, y: src.y };
       for (let i = 0; i < 3; i++) this.collide(q, r);
       if (!stuck(q.x, q.y, r * 0.6)) return q;
-      for (const d of [46, 92, 140]) {
-        for (let k = 0; k < 8; k++) {
-          const a = (k / 8) * Math.PI * 2;
+      // Wider rings, and twelve directions on each: a cache welded into the corner of two
+      // buildings used to stay there, because the first three rings were still inside the
+      // same block. Nothing lootable is allowed to be unreachable.
+      for (const d of [46, 92, 140, 200, 280, 380, 500, 640]) {
+        for (let k = 0; k < 12; k++) {
+          const a = (k / 12) * Math.PI * 2;
           const p = { x: src.x + Math.cos(a) * d, y: src.y + Math.sin(a) * d };
           this.collide(p, r);
           if (!stuck(p.x, p.y, r * 0.6)) return p;
@@ -1128,7 +1149,75 @@ export class Game {
     this.objective = `SECTOR ${this.sector}/6 · ASSAULT ${SECTORS[this.sector - 1].name}`;
     this.buildPierceRects();
     this.populateHQ();
+    this.settleSpots();
     this.rebuildNavigation();
+    this.validateInsertion();
+  }
+
+  /**
+   * Authored props are placed against a plan, but the districts around them are scattered
+   * at random, so a server bank or a parked transport can end up buried inside a wall —
+   * unhackable, unenterable, or simply invisible behind a warehouse. Every interactive
+   * prop is routed through the same verified nudge the caches already use: rings outward,
+   * sixteen bearings, first dry and clear point wins. Nothing is ever moved into water.
+   */
+  private settleSpots() {
+    const clear = (x: number, y: number, r: number) => !this.obstacles.some(o => !o.dead
+      && x > o.x - r && x < o.x + o.w + r && y > o.y - r && y < o.y + o.h + r);
+    const free = (x: number, y: number, r: number, dry: boolean) =>
+      clear(x, y, r) && (!dry || !this.inWater(x, y));
+    const fix = (p: { x: number; y: number }, r: number, dry = false) => {
+      if (free(p.x, p.y, r, dry)) return;
+      for (const d of [40, 80, 130, 190, 270, 370, 500, 660, 840, 1040]) {
+        for (let k = 0; k < 16; k++) {
+          const a = (k / 16) * TAU;
+          const x = p.x + Math.cos(a) * d, y = p.y + Math.sin(a) * d;
+          if (free(x, y, r, dry)) { p.x = x; p.y = y; return; }
+        }
+      }
+    };
+    for (const s of this.servers) fix(s, 34);
+    for (const v of this.vans) fix(v, 42, true);
+    for (const s of this.satcoms) fix(s, 30, true);
+    for (const p of this.parkedHelis) fix(p, 46, true);
+    for (const m of this.megaCrates) fix(m, 30, true);
+    for (const c of this.coderSpots) fix(c, 22, true);
+    if (this.generalSpot) fix(this.generalSpot, 26, true);
+  }
+
+  /**
+   * A start is only good if the operative can walk out of it. Fixed insertions plus a
+   * randomly scattered district occasionally leave the spawn inside a sealed courtyard,
+   * which reads as a broken level rather than a hard one. So the insertion is tested the
+   * same way a soldier would: plan a route to the rest of the map, and if there is no
+   * route, step to the nearest road point that does have one.
+   */
+  private validateInsertion() {
+    const probe = { x: VAULT_ENTRY.x, y: VAULT_ENTRY.y };
+    const reaches = (p: Point) => {
+      const path = this.infantryRoutes.route(p, probe);
+      const last = path[path.length - 1];
+      return Math.hypot(last.x - probe.x, last.y - probe.y) < 520;
+    };
+    if (reaches({ x: this.px, y: this.py })) return;
+    const candidates: Point[] = [];
+    const roadZones = this.zones.filter((z) => z.kind === 'road');
+    for (const z of roadZones) {
+      const horizontal = z.w >= z.h;
+      for (let t = 0.05; t <= 0.95; t += 0.1) {
+        candidates.push(horizontal
+          ? { x: z.x + z.w * t, y: z.y + z.h / 2 }
+          : { x: z.x + z.w / 2, y: z.y + z.h * t });
+      }
+    }
+    candidates.sort((a, b) => Math.hypot(a.x - this.px, a.y - this.py) - Math.hypot(b.x - this.px, b.y - this.py));
+    for (const c of candidates.slice(0, 40)) {
+      if (!this.infantryRoutes.clear(c)) continue;
+      if (!reaches(c)) continue;
+      this.px = c.x; this.py = c.y; this.camX = c.x - this.w / 2; this.camY = c.y - this.h / 2;
+      this.addText(c.x, c.y - 60, 'INSERTION RE-ROUTED', '#9cdecd', 14);
+      return;
+    }
   }
 
   /** Index the housing blocks of every power cell and mega crate once per world build. */
@@ -1377,6 +1466,18 @@ export class Game {
     if (this.piloting && this.playerHeli) {
       if (k === '1' || k === '2' || k === '3') this.selectHeliStation(this.playerHeli, Number(k) - 1);
       else if (k === 'x') this.selectHeliStation(this.playerHeli, ((this.playerHeli.station || 0) + 1) % HELI_ORDNANCE.length);
+    }
+    // Number keys shoulder a carried weapon; the same key twice puts it away for the carbine.
+    if (!this.playerJet && !this.playerTank && !this.drivingVan && !this.flyingPlane && !this.piloting && !this.drivingBoat) {
+      const slot = Number(k);
+      if (slot >= 1 && slot <= 6) {
+        const list = this.carriedWeapons();
+        const target = list[slot - 1];
+        if (target) {
+          if (target.id === this.weapon && this.weapon !== 'rifle') this.selectWeapon('rifle');
+          else this.selectWeapon(target.id);
+        }
+      }
     }
     if (k === 'l') this.toggleGate();
     if (k === 'c') this.activateAegis();
@@ -2061,12 +2162,46 @@ export class Game {
    */
   private updateTraffic(dt: number) {
     for (const c of this.roadCars) {
-      if (c.dead) continue;
+      if (c.dead) {
+        // A burning wreck keeps smoking for a while, then just sits there.
+        if (c.burning > 0) {
+          c.burning -= dt;
+          if (Math.random() < 0.35) {
+            this.addParticle(c.x + rand(-16, 16), c.y + rand(-10, 10),
+              rand(-14, 14), rand(-46, -18), rand(1.1, 2.2), rand(3, 7), 'rgba(60,56,50,0.5)', true);
+          }
+          if (c.burning < 16 && Math.random() < 0.12) {
+            this.addParticle(c.x + rand(-10, 10), c.y + rand(-8, 8),
+              rand(-8, 8), rand(-30, -12), rand(0.4, 0.9), rand(2, 5), 'rgba(255,150,70,0.55)', true);
+          }
+        }
+        continue;
+      }
       c.light += dt;
+      if (c.panic > 0) c.panic = Math.max(0, c.panic - dt);
       const node = c.route[c.node % c.route.length];
       const dx = node.x - c.x, dy = node.y - c.y;
       const d = Math.hypot(dx, dy) || 1;
-      const want = Math.atan2(dy, dx);
+      let want = Math.atan2(dy, dx);
+      // Steer around whatever is standing in the carriageway: the operative, a wreck, a
+      // crate someone dragged onto the tarmac. Two probes, one each side, pick the freer wing.
+      const ahead = (dist: number, side: number) => {
+        const a = c.ang + side;
+        return { x: c.x + Math.cos(a) * dist, y: c.y + Math.sin(a) * dist };
+      };
+      let obstruction = 0;
+      for (const dist of [64, 108]) {
+        const p = ahead(dist, 0);
+        if (this.pointBlocked(p.x, p.y)) obstruction = Math.max(obstruction, dist);
+      }
+      if (obstruction) {
+        c.jammed += dt;
+        const leftClear = !this.pointBlocked(ahead(96, -0.65).x, ahead(96, -0.65).y);
+        const rightClear = !this.pointBlocked(ahead(96, 0.65).x, ahead(96, 0.65).y);
+        if (leftClear && !rightClear) want = c.ang - 0.75;
+        else if (rightClear && !leftClear) want = c.ang + 0.75;
+        else if (leftClear) want = c.ang - 0.45;
+      } else if (c.jammed > 0) c.jammed = Math.max(0, c.jammed - dt * 2);
       const turn = ((want - c.ang + Math.PI * 3) % TAU) - Math.PI;
       c.ang += clamp(turn, -1.6 * dt, 1.6 * dt);
       // spacing: never drive into the vehicle in front on the same circuit
@@ -2081,15 +2216,29 @@ export class Game {
       // and never drive through the operative
       const toPlayer = Math.cos(c.ang) * (this.px - c.x) + Math.sin(c.ang) * (this.py - c.y);
       if (toPlayer > 0 && toPlayer < 72 && Math.abs(Math.sin(c.ang) * (this.px - c.x) - Math.cos(c.ang) * (this.py - c.y)) < 46) blocked = true;
-      const speed = blocked ? 0 : c.speed * (1 - Math.min(0.6, Math.abs(turn)));
+      // Gunfire on the street empties it: drivers stand on the brakes with hazards on
+      // rather than cruising through a firefight as if nothing were happening.
+      const target = blocked || obstruction || c.panic > 0 ? 0 : c.speed * (1 - Math.min(0.6, Math.abs(turn)));
       if (c.wait > 0) c.wait -= dt;
+      c.brake = lerp(c.brake, target < c.speed * 0.5 ? 1 : 0, Math.min(1, dt * 6));
+      c.lean = lerp(c.lean, clamp(turn * 0.9, -0.4, 0.4), Math.min(1, dt * 5));
+      const speed = target;
       if (speed > 0) {
         c.x += Math.cos(c.ang) * speed * dt;
         c.y += Math.sin(c.ang) * speed * dt;
-        if (Math.random() < 0.25) {
-          this.addParticle(c.x - Math.cos(c.ang) * 26, c.y - Math.sin(c.ang) * 26,
-            rand(-8, 8), rand(-8, 8), 0.5, rand(2, 4), 'rgba(120,120,110,0.5)', true);
+        // dust off the shoulder: the district is gravel beside the tarmac
+        if (Math.random() < 0.3) {
+          this.addParticle(c.x - Math.cos(c.ang) * 30, c.y - Math.sin(c.ang) * 30,
+            rand(-10, 10) - Math.cos(c.ang) * 14, rand(-10, 10) - Math.sin(c.ang) * 14,
+            0.6, rand(2, 5), 'rgba(136,132,116,0.45)', true);
         }
+      }
+      // A car that has been jammed for a while backs up a little and takes the other lane.
+      if (c.jammed > 2.2) {
+        c.jammed = 0;
+        c.x -= Math.cos(c.ang) * 46;
+        c.y -= Math.sin(c.ang) * 46;
+        c.ang += (Math.random() < 0.5 ? -1 : 1) * 0.7;
       }
       if (d < 60) c.node = (c.node + 1) % c.route.length;
       // a hit base scatters the traffic
@@ -2112,25 +2261,48 @@ export class Game {
     this.routineT = rand(14, 24);
     const a = this.army;
     const kinds: ArmyRoutine['kind'][] = a
-      ? ['pt', 'shift', 'siren', 'drill', 'crane', 'colors']
-      : ['pt', 'shift', 'drill'];
+      ? ['pt', 'fuel', 'shift', 'muster', 'siren', 'drill', 'crane', 'wash', 'k9', 'colors']
+      : ['pt', 'shift', 'drill', 'muster', 'wash', 'k9'];
     const kind = kinds[this.routineSeq++ % kinds.length];
-    let x: number, y: number;
-    if (a) {
-      const sp = a.strongpoints[(this.routineSeq * 3) % a.strongpoints.length];
-      x = sp.x + sp.w / 2; y = sp.y + sp.h / 2;
-      // keep it on screen-adjacent ground, never inside the parade
-      if (Math.abs(x - this.px) > 2600) { x = this.px + rand(-900, 900); y = this.py + rand(-700, 700); }
-    } else {
-      x = this.px + rand(-900, 900); y = this.py + rand(-700, 700);
-    }
+    /* Routines happen in the open, not inside a building: pick a point on the nearest
+     * stretch of road to the operative, so the scene is always something he can walk up to
+     * and watch rather than a pantomime playing out inside a hangar wall. */
+    const spot = (): { x: number; y: number } => {
+      const roads = this.zones.filter((z) => z.kind === 'road' && Math.max(z.w, z.h) > 500);
+      let best: { x: number; y: number } | null = null, bestD = Infinity;
+      for (const z of roads) {
+        const horizontal = z.w >= z.h;
+        for (let t = 0.15; t <= 0.85; t += 0.14) {
+          const x = horizontal ? z.x + z.w * t : z.x + z.w / 2;
+          const y = horizontal ? z.y + z.h / 2 : z.y + z.h * t;
+          const d = Math.hypot(x - this.px, y - this.py);
+          if (d < 260 || d > 2200) continue;
+          if (d < bestD) { bestD = d; best = { x, y }; }
+        }
+      }
+      if (best) {
+        // step off the carriageway so the parade/drill never blocks the traffic lane
+        const jitter = rand(-80, 80);
+        return { x: best.x + jitter, y: best.y + rand(-70, 70) };
+      }
+      if (a) {
+        const sp = a.strongpoints[(this.routineSeq * 3) % a.strongpoints.length];
+        return { x: sp.x + sp.w / 2, y: sp.y + sp.h / 2 };
+      }
+      return { x: this.px + rand(-900, 900), y: this.py + rand(-700, 700) };
+    };
+    const { x, y } = spot();
     const label = kind === 'pt' ? 'MORNING PT'
       : kind === 'shift' ? 'SHIFT CHANGE'
         : kind === 'siren' ? 'AIR-RAID SIREN TEST'
           : kind === 'drill' ? 'CONVOY DRILL'
-            : kind === 'crane' ? 'LIFT OPERATION' : 'COLOURS';
+            : kind === 'crane' ? 'LIFT OPERATION'
+              : kind === 'fuel' ? 'REFUELLING'
+                : kind === 'muster' ? 'ROLL CALL'
+                  : kind === 'wash' ? 'WASH-DOWN'
+                    : kind === 'k9' ? 'K9 SWEEP' : 'COLOURS';
     this.routines.push({
-      kind, x, y, t: 0, dur: kind === 'siren' ? 7 : 22, label,
+      kind, x, y, t: 0, dur: kind === 'siren' ? 7 : kind === 'muster' ? 16 : 22, label,
     });
     if (kind === 'siren') {
       this.addText(x, y - 120, '⚠ SIREN TEST — STAND BY', '#ffd166', 15);
@@ -3971,7 +4143,9 @@ export class Game {
     this.py = (this.glacierSpot?.y ?? this.py) + 260;
     this.pvx = 0; this.pvy = 0;
     this.iFrames = 3;
-    const reward = 9000 + stats.kills * 260 + stats.escorts * 180 + (tookPlane ? 22000 : 0);
+    const kills = Number.isFinite(stats?.kills) ? stats.kills : 0;
+    const escorts = Number.isFinite(stats?.escorts) ? stats.escorts : 0;
+    const reward = 9000 + kills * 260 + escorts * 180 + (tookPlane ? 22000 : 0);
     this.score += reward;
     if (tookPlane && !this.frostwing) {
       this.frostwing = true;
@@ -4009,7 +4183,11 @@ export class Game {
 
   /** Back on the surface: the operative keeps the smuggled pistol and the score. */
   leavePrison(stats: PrisonStats, escaped: boolean) {
-    const reward = escaped ? 25000 + stats.freed * 400 + stats.guardsDown * 250 : 1500;
+    // Every number that reaches the score is sanitised: a missing stat must never turn the
+    // campaign score into NaN, which would silently break the run and the leaderboard.
+    const freed = Number.isFinite(stats?.freed) ? stats.freed : 0;
+    const down = Number.isFinite(stats?.guardsDown) ? stats.guardsDown : 0;
+    const reward = escaped ? 25000 + freed * 400 + down * 250 : 1500;
     this.score += reward;
     if (this.prisonFinale && escaped) {
       // The last level, cleared: the campaign ends on the far side of the sally port.
@@ -5390,6 +5568,57 @@ export class Game {
     }
   }
 
+  /** Everything the operative could shoulder right now, in kit order. */
+  private carriedWeapons(): { id: string; ammo: number }[] {
+    const order = ['rifle', 'shotgun', 'smg', 'rocket', 'gl'];
+    const out: { id: string; ammo: number }[] = [];
+    for (const id of order) {
+      if (!WEAPONS[id]) continue;
+      if (id === this.weapon) { out.push({ id, ammo: this.ammo }); continue; }
+      const banked = this.weaponAmmo.get(id);
+      const base = WEAPONS[id].ammo;
+      if (base === Infinity) { out.push({ id, ammo: Infinity }); continue; }
+      if (banked === undefined) continue;
+      if (banked > 0) out.push({ id, ammo: banked });
+    }
+    return out;
+  }
+
+  /**
+   * Number keys 1-6 shoulder a carried weapon. Pressing the same number again puts it away
+   * for the carbine. A dry tube falls through to the next weapon that still has rounds in
+   * it instead of dumping the operative straight back on the rifle.
+   */
+  selectWeapon(id: string): boolean {
+    if (this.status !== 'playing') return false;
+    if (this.playerJet || this.playerTank || this.drivingVan || this.flyingPlane || this.piloting || this.drivingBoat) return false;
+    if (!WEAPONS[id]) return false;
+    if (id !== 'rifle') {
+      const banked = id === this.weapon ? this.ammo : this.weaponAmmo.get(id);
+      if (banked !== undefined && banked <= 0) {
+        this.addText(this.px, this.py - 34, `${WEAPONS[id].short} — DRY`, '#9fb3c8', 14);
+        return false;
+      }
+    }
+    if (this.ammo !== Infinity) this.weaponAmmo.set(this.weapon, this.ammo);
+    this.weapon = id;
+    const base = WEAPONS[id].ammo;
+    const banked = this.weaponAmmo.get(id);
+    this.ammo = base === Infinity ? Infinity : (banked !== undefined ? Math.max(0, banked) : base);
+    this.fireCd = Math.min(this.fireCd, 0.12);
+    sfx.click();
+    this.addText(this.px, this.py - 40, WEAPONS[id].short, WEAPONS[id].color, 14);
+    return true;
+  }
+
+  /** The next weapon with rounds in it, or the carbine when everything is dry. */
+  private fallbackWeapon(): string {
+    const list = this.carriedWeapons().filter((w) => w.id !== this.weapon);
+    const stocked = list.filter((w) => w.ammo === Infinity || w.ammo > 0)
+      .sort((a, b) => (b.ammo === Infinity ? 1 : b.ammo) - (a.ammo === Infinity ? 1 : a.ammo));
+    return stocked.length ? stocked[0].id : 'rifle';
+  }
+
   private shoot() {
     const W = WEAPONS[this.weapon], M = this.mods;
     this.fireCd = W.rate * M.fireRateMul;
@@ -5397,6 +5626,12 @@ export class Game {
     const bx = this.px + Math.cos(this.pang) * muzzle;
     const by = this.py + Math.sin(this.pang) * muzzle;
     const dmg = W.dmg * M.damageMul, spread = W.spread * M.spreadMul;
+
+    // The street reacts: anything within earshot stops and puts its hazards on.
+    for (const c of this.roadCars) {
+      if (c.dead || c.panic > 0) continue;
+      if (Math.abs(c.x - this.px) < 900 && Math.abs(c.y - this.py) < 900) c.panic = 2.6 + rand(0, 1.4);
+    }
 
     // Grenade launcher — lobs a heavy arc shot instead of a bullet
     if (this.weapon === 'gl') {
@@ -5412,8 +5647,10 @@ export class Game {
       this.ammo -= 1;
       if (this.ammo <= 0) {
         this.weaponAmmo.set(this.weapon, 0);
-        this.weapon = 'rifle'; this.ammo = Infinity;
-        this.addText(this.px, this.py - 34, 'RELOAD → RIFLE', '#9fb3c8', 15);
+        const next = this.fallbackWeapon();
+        this.weapon = next;
+        this.ammo = WEAPONS[next].ammo === Infinity ? Infinity : Math.max(0, this.weaponAmmo.get(next) ?? WEAPONS[next].ammo);
+        this.addText(this.px, this.py - 34, `RELOAD → ${WEAPONS[next].short}`, '#9fb3c8', 15);
       }
       return;
     }
@@ -5444,8 +5681,10 @@ export class Game {
       this.ammo -= 1;
       if (this.ammo <= 0) {
         this.weaponAmmo.set(this.weapon, 0);
-        this.weapon = 'rifle'; this.ammo = Infinity;
-        this.addText(this.px, this.py - 34, 'RELOAD → RIFLE', '#9fb3c8', 15);
+        const next = this.fallbackWeapon();
+        this.weapon = next;
+        this.ammo = WEAPONS[next].ammo === Infinity ? Infinity : Math.max(0, this.weaponAmmo.get(next) ?? WEAPONS[next].ammo);
+        this.addText(this.px, this.py - 34, `RELOAD → ${WEAPONS[next].short}`, '#9fb3c8', 15);
       }
     }
   }
@@ -8061,7 +8300,7 @@ export class Game {
     this.addLight(e.x, e.y, 900, '255,220,140', 1.2);
     this.explode(e.x, e.y, 420, 90, false);
     if (this.sector >= SECTORS.length) {
-      // Five sectors down — and the last level is not a parade ground. HYDRA's command
+      // Six sectors down — and the last level is not a parade ground. HYDRA's command
       // staff is dead, but the man who ordered the arrest is behind the walls of THE CAGE.
       this.prisonFinale = true;
       this.destination = 'THE CAGE';
@@ -8103,7 +8342,7 @@ export class Game {
     this.tellStory({
       id: 'finale-cage', channel: 'S.H.I.E.L.D. / FINAL DIRECTIVE',
       title: 'The last door in the campaign is a prison door.',
-      text: 'Five command bunkers are ash. The officer who signed your arrest is behind the walls of THE CAGE, and every boat, gunship and custody officer on that island has been told you are coming. Take the sally port, find the master release and walk out of the last level alive.',
+      text: 'Six command bunkers are ash. The officer who signed your arrest is behind the walls of THE CAGE, and every boat, gunship and custody officer on that island has been told you are coming. Take the sally port, find the master release and walk out of the last level alive.',
     }, 16);
     sfx.siren();
     this.startIslandLanding();
@@ -8195,6 +8434,23 @@ export class Game {
       if (Math.hypot(mc.x - x, mc.y - y) < radius + Math.max(mc.w, mc.h) / 2) {
         mc.hp -= dmg * 1.5;
         if (mc.hp <= 0) this.breakMegaCrate(mc);
+      }
+    }
+    // Traffic burns. A grenade in the ring road leaves a wreck where the staff car was,
+    // and the road keeps being used around it.
+    for (const c of this.roadCars) {
+      if (c.dead) continue;
+      const d = Math.hypot(c.x - x, c.y - y);
+      if (d > radius + 46) continue;
+      c.hp -= dmg * (1.4 - Math.min(1, d / (radius + 46)));
+      if (c.hp <= 0) {
+        c.dead = true; c.burning = 26;
+        this.score += 120;
+        this.explode(c.x, c.y, 74, 0, true);
+        this.addText(c.x, c.y - 60, 'VEHICLE LOST', '#ffb08a', 13);
+      } else {
+        c.wait = Math.max(c.wait, 2.4);
+        c.panic = Math.max(c.panic, 3.2);
       }
     }
     if (dmg > 0) {
@@ -9096,6 +9352,73 @@ export class Game {
     if (theme.weather !== 'snow' && (this.sector === 2 || this.sector === 4)) {
       this.drawSnowfall(ctx, 82, 1);
     }
+    // The army district gets the one thing the other bases do not have: weather that
+    // moves across the ground in sheets, dust devils walking the parade ground, and the
+    // shimmer off four square kilometres of hot concrete.
+    if (this.army && theme.weather === 'dust') this.drawDustStorm(ctx);
+    ctx.restore();
+  }
+
+  /** Blowing dust, ground drift and dust devils: the district's own weather. */
+  private drawDustStorm(ctx: CanvasRenderingContext2D) {
+    const now = performance.now() * 0.001;
+    const gust = 0.55 + Math.sin(now * 0.23) * 0.45;
+    ctx.save();
+    // sheets of dust sliding across the viewport
+    for (let layer = 0; layer < 3; layer++) {
+      const speed = 34 + layer * 26;
+      const alpha = (0.05 + layer * 0.028) * (0.6 + gust * 0.6);
+      const grads = ctx.createLinearGradient(0, 0, this.w, 0);
+      grads.addColorStop(0, `rgba(196,178,138,0)`);
+      grads.addColorStop(0.45, `rgba(196,178,138,${alpha})`);
+      grads.addColorStop(1, `rgba(196,178,138,0)`);
+      ctx.fillStyle = grads;
+      const bandH = 60 + layer * 34;
+      for (let i = 0; i < 3; i++) {
+        const x = ((now * speed + i * (this.w / 3) + layer * 90) % (this.w + 400)) - 200;
+        const y = (this.h * (0.25 + layer * 0.22) + Math.sin(now * 0.5 + i) * 40) % this.h;
+        ctx.fillRect(x, y, 320, bandH);
+      }
+    }
+    // grit: fast, low, mostly horizontal
+    ctx.fillStyle = `rgba(220,204,164,${0.14 + gust * 0.1})`;
+    const grit = this.dpr > 1.5 ? 90 : 130;
+    for (let i = 0; i < grit; i++) {
+      const x = ((i * 211 + now * (240 + (i % 9) * 40) * gust) % (this.w + 120)) - 60;
+      const y = (i * 137) % this.h;
+      ctx.fillRect(x, y + Math.sin(now * 3 + i) * 6, 2 + (i % 3), 1);
+    }
+    // dust devils: two columns of spiralling air, only while the gust is up
+    if (gust > 0.5) {
+      for (let d = 0; d < 2; d++) {
+        const phase = now * 0.35 + d * 2.1;
+        const cx = (this.w * (0.3 + d * 0.42) + Math.sin(phase) * 120) % this.w;
+        const base = this.h * (0.62 + (d % 2) * 0.12);
+        const height = 130 + Math.sin(phase * 1.7) * 40;
+        ctx.strokeStyle = `rgba(214,196,152,${0.1 * (gust - 0.5) * 2})`;
+        ctx.lineWidth = 8;
+        for (let k = 0; k < 5; k++) {
+          const t = k / 5;
+          const y = base - height * t;
+          const spin = Math.sin(phase * 4 + t * 9) * (10 + t * 26);
+          ctx.beginPath();
+          ctx.ellipse(cx + spin, y, 12 + t * 30, 4 + t * 8, 0, 0, TAU);
+          ctx.stroke();
+        }
+      }
+    }
+    // heat shimmer along the bottom third: a few translucent vertical slices
+    ctx.globalAlpha = 0.06;
+    for (let i = 0; i < 7; i++) {
+      const x = ((i * 173 + now * 18) % this.w);
+      const h = 90 + (i % 3) * 60;
+      const grad = ctx.createLinearGradient(0, this.h - h, 0, this.h);
+      grad.addColorStop(0, 'rgba(255,240,200,0)');
+      grad.addColorStop(1, 'rgba(255,240,200,0.5)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(x, this.h - h, 40, h);
+    }
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
@@ -10512,6 +10835,80 @@ export class Game {
         ctx.restore();
         return true;
       }
+      case 'icegate': {
+        /* THE GLACIER GATE.
+         *
+         * The most important door in the sector was being drawn as a plain grey slab. It is
+         * a frozen bulkhead rammed into a mountain wall: two ice leaves with a lit seam,
+         * a drift of blown snow at the foot, frozen stencils and a lamp that pulses while
+         * the vault waits behind it.
+         */
+        const live = !(this.glacierVisits > 0);
+        const pulse = 0.55 + Math.sin(this.simulationTime * 2.2) * 0.35;
+        ctx.save();
+        // shadow and the bulk of the door
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(o.x + H * 0.4, o.y + H * 0.6, o.w, o.h);
+        ctx.fillStyle = '#20343c';
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        const face = ctx.createLinearGradient(o.x, o.y, o.x, o.y + o.h);
+        face.addColorStop(0, '#cfeefa');
+        face.addColorStop(0.45, '#9fd4e6');
+        face.addColorStop(1, '#6fa9bf');
+        ctx.fillStyle = face;
+        ctx.fillRect(o.x + 4, o.y + 4, o.w - 8, o.h - 8);
+        // two leaves meeting on a lit seam
+        const seamX = o.x + o.w / 2;
+        ctx.fillStyle = live ? `rgba(150,240,255,${pulse})` : 'rgba(120,170,190,0.35)';
+        ctx.fillRect(seamX - 3, o.y + 6, 6, o.h - 12);
+        ctx.strokeStyle = 'rgba(40,70,84,0.55)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(o.x + 10, o.y + 10, o.w / 2 - 14, o.h - 20);
+        ctx.strokeRect(seamX + 4, o.y + 10, o.w / 2 - 14, o.h - 20);
+        // hydraulic rams at both shoulders
+        ctx.fillStyle = '#3d5560';
+        ctx.fillRect(o.x + 4, o.y + o.h * 0.28, 10, o.h * 0.44);
+        ctx.fillRect(o.x + o.w - 14, o.y + o.h * 0.28, 10, o.h * 0.44);
+        // frost working out from the frame
+        ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+        ctx.lineWidth = 1.4;
+        for (let k = 0; k < 12; k++) {
+          const fx = o.x + 16 + (o.w - 32) * ((k * 37) % 100) / 100;
+          const fy = o.y + 6 + (o.h - 12) * ((k * 61) % 100) / 100;
+          const len = 5 + (k % 4) * 3;
+          ctx.beginPath();
+          ctx.moveTo(fx, fy);
+          ctx.lineTo(fx + Math.cos(k) * len, fy + Math.sin(k * 1.7) * len);
+          ctx.stroke();
+        }
+        // blown drift at the foot
+        ctx.fillStyle = 'rgba(240,252,255,0.7)';
+        ctx.beginPath();
+        ctx.ellipse(seamX, o.y + o.h - 4, o.w * 0.46, 13, 0, Math.PI, TAU);
+        ctx.fill();
+        // stencil and status lamp
+        ctx.fillStyle = 'rgba(28,60,74,0.65)';
+        ctx.font = 'bold 13px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('GLACIER', seamX, o.y + o.h * 0.36);
+        ctx.textAlign = 'left';
+        ctx.fillStyle = live ? `rgba(140,245,255,${pulse})` : 'rgba(120,140,150,0.5)';
+        ctx.beginPath();
+        ctx.arc(o.x + o.w - 22, o.y + 20, 5.5, 0, TAU);
+        ctx.fill();
+        // cold air spilling out of the seam
+        ctx.globalAlpha = 0.5;
+        for (let k = 0; k < 4; k++) {
+          const t = (this.simulationTime * 0.5 + k * 0.25) % 1;
+          ctx.fillStyle = `rgba(200,245,255,${0.22 * (1 - t)})`;
+          ctx.beginPath();
+          ctx.arc(seamX + Math.sin(this.simulationTime + k) * 16, o.y + o.h + t * 40, 6 + t * 14, 0, TAU);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
+        return true;
+      }
       case 'car': case 'humvee': case 'bus': case 'tanker': {
         this.drawVehicleProp(ctx, o);
         return true;
@@ -10540,37 +10937,186 @@ export class Game {
     }
   }
 
+  /** A burnt-out chassis: the road keeps its history. */
+  private drawRoadWreck(ctx: CanvasRenderingContext2D, c: RoadCar) {
+    const L = c.kind === 'bus' ? 58 : c.kind === 'tanker' ? 52 : 36;
+    const Wd = c.kind === 'bus' ? 19 : 16;
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.ang + 0.12);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath(); ctx.roundRect(-L + 4, -Wd + 6, L * 2, Wd * 2, 7); ctx.fill();
+    ctx.fillStyle = '#221f1b';
+    ctx.beginPath(); ctx.roundRect(-L, -Wd, L * 2, Wd * 2, 6); ctx.fill();
+    ctx.fillStyle = '#14120f';
+    ctx.beginPath(); ctx.roundRect(-L * 0.4, -Wd * 0.7, L * 0.9, Wd * 1.4, 4); ctx.fill();
+    // buckled panels and blown glass
+    ctx.strokeStyle = 'rgba(90,84,74,0.5)'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-L * 0.7, -Wd * 0.4); ctx.lineTo(-L * 0.3, Wd * 0.2); ctx.lineTo(L * 0.1, -Wd * 0.3);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(30,28,24,0.9)';
+    for (const [wx, wy] of [[-L * 0.55, -Wd - 1], [L * 0.5, -Wd - 1], [-L * 0.55, Wd - 3], [L * 0.5, Wd - 3]]) {
+      ctx.beginPath(); ctx.roundRect(wx - 8, wy, 16, 6, 2); ctx.fill();
+    }
+    if (c.burning > 0) {
+      const flick = 0.4 + Math.sin(c.light * 9) * 0.25;
+      ctx.fillStyle = `rgba(255,132,54,${flick})`;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, L * 0.4, Wd * 0.5, 0, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /**
+   * One road vehicle, drawn properly: wheels under the body, a glazed cabin, real lamps and
+   * a headlight cone that only matters when the district is dark. Every kind has its own
+   * silhouette so a fuel bowser never reads as a staff car from a distance.
+   */
+  private drawRoadCar(ctx: CanvasRenderingContext2D, c: RoadCar) {
+    const L = c.kind === 'bus' ? 62 : c.kind === 'tanker' ? 56 : c.kind === 'humvee' ? 44 : c.kind === 'ambulance' ? 46 : 38;
+    const Wd = c.kind === 'bus' ? 20 : c.kind === 'tanker' ? 18 : 17;
+    const dark = this.blackout.active || this.sector >= 5;
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.ang);
+    const bounce = Math.sin(c.light * 9 + c.x * 0.01) * Math.min(1.2, c.speed / 140);
+    ctx.translate(0, bounce);
+    ctx.transform(1, c.lean * 0.12, 0, 1, 0, 0);
+
+    // headlight cone, laid on the road ahead
+    if (c.speed > 6) {
+      const beamA = dark ? 0.2 : 0.075;
+      const grad = ctx.createLinearGradient(L, 0, L + 210, 0);
+      grad.addColorStop(0, `rgba(255,242,200,${beamA})`);
+      grad.addColorStop(1, 'rgba(255,242,200,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(L - 4, -Wd * 0.55); ctx.lineTo(L + 200, -Wd * 2.4);
+      ctx.lineTo(L + 200, Wd * 2.4); ctx.lineTo(L - 4, Wd * 0.55);
+      ctx.closePath(); ctx.fill();
+    }
+
+    // cast shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.42)';
+    ctx.beginPath(); ctx.roundRect(-L + 5, -Wd + 6, L * 2, Wd * 2, 7); ctx.fill();
+
+    // wheels first: the body sits over them
+    const wheelX = c.kind === 'bus' || c.kind === 'tanker' ? [-L * 0.62, L * 0.5] : [-L * 0.56, L * 0.52];
+    for (const wx of wheelX) for (const wy of [-Wd - 1, Wd - 5]) {
+      ctx.fillStyle = '#0b1013';
+      ctx.beginPath(); ctx.roundRect(wx - 9, wy, 18, 6, 2); ctx.fill();
+      ctx.fillStyle = 'rgba(120,130,130,0.5)';
+      ctx.fillRect(wx - 6, wy + 2, 3, 2);
+    }
+
+    // body
+    ctx.fillStyle = c.colour;
+    ctx.beginPath(); ctx.roundRect(-L, -Wd, L * 2, Wd * 2, c.kind === 'car' ? 9 : 5); ctx.fill();
+    // shading along the flanks and a highlight down the spine
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.beginPath(); ctx.roundRect(-L, Wd * 0.35, L * 2, Wd * 0.65, 5); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(-L + 6, -Wd + 2, L * 2 - 12, 2);
+
+    if (c.kind === 'bus') {
+      // glazing down both sides with a lit interior, and a door mid-body
+      ctx.fillStyle = 'rgba(24,36,40,0.85)';
+      ctx.beginPath(); ctx.roundRect(-L + 8, -Wd + 4, L * 2 - 16, Wd - 7, 3); ctx.fill();
+      ctx.beginPath(); ctx.roundRect(-L + 8, 3, L * 2 - 16, Wd - 7, 3); ctx.fill();
+      for (let i = 0; i < 7; i++) {
+        ctx.fillStyle = `rgba(226,240,208,${0.22 + (i % 3) * 0.1})`;
+        ctx.fillRect(-L + 12 + i * ((L * 2 - 26) / 7), -Wd + 6, (L * 2 - 26) / 7 - 3, Wd - 11);
+      }
+      ctx.fillStyle = '#1b2426';
+      ctx.fillRect(-L * 0.2, -Wd + 1, 2, Wd * 2 - 2);
+    } else if (c.kind === 'tanker') {
+      // cab forward, cylindrical drum behind with welded bands
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.beginPath(); ctx.roundRect(-L, -Wd + 1, L * 0.5, Wd * 2 - 2, 12); ctx.fill();
+      ctx.beginPath(); ctx.roundRect(-L + 5, -Wd + 3, L * 1.35, Wd * 2 - 6, 11); ctx.fill();
+      ctx.strokeStyle = 'rgba(20,26,24,0.55)'; ctx.lineWidth = 2;
+      for (const bx of [-L * 0.7, -L * 0.35, 0]) {
+        ctx.beginPath(); ctx.moveTo(bx, -Wd + 3); ctx.lineTo(bx, Wd - 3); ctx.stroke();
+      }
+      ctx.fillStyle = '#e8b34a';
+      ctx.fillRect(-L * 0.18, -Wd + 6, 9, 7);
+      ctx.fillStyle = '#12201d';
+      ctx.fillRect(-L * 0.18 + 2, -Wd + 8, 5, 3);
+    } else if (c.kind === 'ambulance') {
+      // box body with a red cross on the roof and a light bar
+      ctx.fillStyle = 'rgba(236,240,232,0.9)';
+      ctx.beginPath(); ctx.roundRect(-L, -Wd + 1, L * 1.5, Wd * 2 - 2, 4); ctx.fill();
+      ctx.fillStyle = '#c9352f';
+      ctx.fillRect(-L * 0.52, -Wd * 0.2, 20, 5);
+      ctx.fillRect(-L * 0.52 + 7, -Wd * 0.62, 6, 18);
+    } else if (c.kind === 'humvee') {
+      // sloped bonnet, armoured doors, roof ring
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.beginPath(); ctx.roundRect(L * 0.35, -Wd + 1, L * 0.6, Wd * 2 - 2, 6); ctx.fill();
+      ctx.fillStyle = 'rgba(150,160,142,0.4)';
+      ctx.fillRect(-L * 0.55, -Wd + 3, 2, Wd * 2 - 6);
+      ctx.fillRect(L * 0.1, -Wd + 3, 2, Wd * 2 - 6);
+      ctx.strokeStyle = 'rgba(20,26,22,0.7)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(-L * 0.05, 0, 9, 0, TAU); ctx.stroke();
+      ctx.fillStyle = '#2a332c';
+      ctx.fillRect(-L * 0.05 - 2, -2, 20, 4);
+    }
+
+    // cabin glazing and roof
+    if (c.kind !== 'tanker') {
+      ctx.fillStyle = 'rgba(18,30,36,0.8)';
+      ctx.beginPath(); ctx.roundRect(L * 0.02, -Wd + 4, L * 0.62, Wd * 2 - 8, 4); ctx.fill();
+      const glass = ctx.createLinearGradient(L * 0.05, -Wd + 4, L * 0.55, Wd - 4);
+      glass.addColorStop(0, '#9fd3e0'); glass.addColorStop(1, '#2b4b5c');
+      ctx.fillStyle = glass;
+      ctx.beginPath(); ctx.roundRect(L * 0.08, -Wd + 6, L * 0.5, Wd * 1.2 - 8, 3); ctx.fill();
+      ctx.fillStyle = 'rgba(10,18,22,0.55)';
+      ctx.fillRect(L * 0.08, -1, L * 0.5, 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      ctx.beginPath(); ctx.roundRect(-L * 0.42, -Wd + 4, L * 0.4, Wd * 2 - 8, 3); ctx.fill();
+    }
+
+    // lamps
+    const lampOn = 0.55 + Math.sin(c.light * 2.6) * 0.08;
+    ctx.fillStyle = `rgba(255,243,198,${lampOn})`;
+    ctx.beginPath(); ctx.arc(L - 1, -Wd * 0.62, 3.4, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(L - 1, Wd * 0.62, 3.4, 0, TAU); ctx.fill();
+    ctx.fillStyle = c.brake > 0.25 ? '#ff5340' : 'rgba(120,40,34,0.75)';
+    ctx.fillRect(-L + 1, -Wd * 0.78, 3, 5);
+    ctx.fillRect(-L + 1, Wd * 0.78 - 5, 3, 5);
+    if (c.kind === 'ambulance' || c.kind === 'humvee') {
+      const flash = Math.sin(c.light * 9) > 0;
+      ctx.fillStyle = flash ? '#ff5a5a' : '#3a6cff';
+      ctx.fillRect(c.kind === 'humvee' ? -L * 0.05 : -L * 0.5, -3, 10, 6);
+    }
+    // hazards on: the car has stopped because someone is shooting
+    if (c.panic > 0) {
+      const haz = Math.sin(c.light * 15) > 0;
+      ctx.fillStyle = haz ? '#ffae3c' : 'rgba(120,80,26,0.5)';
+      for (const hx of [-L + 2, L - 6]) for (const hy of [-Wd, Wd - 4]) ctx.fillRect(hx, hy, 4, 4);
+    }
+    // a turn indicator while the car is swinging round a corner
+    if (Math.abs(c.lean) > 0.12) {
+      const blink = Math.sin(c.light * 12) > 0;
+      if (blink) {
+        ctx.fillStyle = '#ffb347';
+        ctx.fillRect(L * 0.78, c.lean > 0 ? Wd - 5 : -Wd, 5, 5);
+      }
+    }
+    ctx.restore();
+  }
+
   /** Traffic and garrison routines, drawn under the structures so they read as passing. */
   private drawTrafficAndRoutines(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     const on = (x: number, y: number, pad = 160) =>
       x > camX - pad && x < camX + this.w + pad && y > camY - pad && y < camY + this.h + pad;
 
     for (const c of this.roadCars) {
-      if (c.dead || !on(c.x, c.y)) continue;
-      const L = c.kind === 'bus' ? 62 : c.kind === 'tanker' ? 54 : c.kind === 'humvee' ? 44 : 38;
-      const Wd = c.kind === 'bus' ? 20 : 17;
-      ctx.save();
-      ctx.translate(c.x, c.y);
-      ctx.rotate(c.ang);
-      ctx.fillStyle = 'rgba(0,0,0,0.4)';
-      ctx.beginPath(); ctx.roundRect(-L + 4, -Wd + 5, L * 2, Wd * 2, 6); ctx.fill();
-      ctx.fillStyle = c.colour;
-      ctx.beginPath(); ctx.roundRect(-L, -Wd, L * 2, Wd * 2, c.kind === 'car' ? 8 : 5); ctx.fill();
-      ctx.fillStyle = 'rgba(16,22,18,0.55)';
-      ctx.beginPath(); ctx.roundRect(-L * 0.3, -Wd * 0.7, L * 0.6, Wd * 1.4, 4); ctx.fill();
-      ctx.fillStyle = 'rgba(150,205,220,0.55)';
-      ctx.beginPath(); ctx.roundRect(-L * 0.12, -Wd * 0.55, L * 0.4, Wd * 1.1, 3); ctx.fill();
-      // headlights
-      const beam = 0.5 + Math.sin(c.light * 3) * 0.1;
-      ctx.fillStyle = `rgba(255,240,190,${beam})`;
-      ctx.beginPath(); ctx.arc(L, -Wd * 0.6, 3.4, 0, TAU); ctx.fill();
-      ctx.beginPath(); ctx.arc(L, Wd * 0.6, 3.4, 0, TAU); ctx.fill();
-      if (c.kind === 'ambulance' || c.kind === 'humvee') {
-        const on2 = Math.sin(c.light * 8) > 0;
-        ctx.fillStyle = on2 ? '#ff5a5a' : '#3a6cff';
-        ctx.fillRect(-L * 0.1, -Wd * 0.34, 10, 6);
-      }
-      ctx.restore();
+      if (!on(c.x, c.y)) continue;
+      if (c.dead) { this.drawRoadWreck(ctx, c); continue; }
+      this.drawRoadCar(ctx, c);
     }
 
     for (const r of this.routines) {
@@ -10638,6 +11184,110 @@ export class Game {
         ctx.strokeStyle = '#2b2418'; ctx.lineWidth = 2;
         ctx.strokeRect(-14, -10, 28, 20);
         ctx.restore();
+      } else if (r.kind === 'fuel') {
+        // a bowser beside a hull, hose out, a fitter on the step
+        const fill = Math.min(1, r.t / 8);
+        ctx.translate(r.x, r.y);
+        ctx.save();
+        ctx.translate(-70, 0); ctx.rotate(-0.2);
+        ctx.fillStyle = '#4f5a45';
+        ctx.beginPath(); ctx.roundRect(-46, -18, 92, 36, 6); ctx.fill();
+        ctx.fillStyle = 'rgba(20,26,20,0.55)';
+        ctx.beginPath(); ctx.roundRect(-40, -15, 56, 30, 9); ctx.fill();
+        ctx.fillStyle = '#8a8f70';
+        ctx.fillRect(20, -12, 22, 24);
+        ctx.restore();
+        // the hull being filled
+        ctx.save();
+        ctx.translate(60, 6); ctx.rotate(0.15);
+        ctx.fillStyle = '#3c4a34';
+        ctx.beginPath(); ctx.roundRect(-54, -26, 108, 52, 6); ctx.fill();
+        ctx.fillStyle = 'rgba(16,22,16,0.6)';
+        ctx.beginPath(); ctx.roundRect(-46, -20, 92, 40, 4); ctx.fill();
+        ctx.fillStyle = '#20261c';
+        ctx.fillRect(-54, -30, 108, 8); ctx.fillRect(-54, 22, 108, 8);
+        ctx.fillStyle = '#2b3324';
+        ctx.fillRect(-4, -40, 44, 8);
+        ctx.restore();
+        // hose and the fill spray
+        ctx.strokeStyle = 'rgba(60,66,48,0.9)'; ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(-24, -6);
+        ctx.quadraticCurveTo(6, -26 - Math.sin(r.t * 2) * 6, 34, -10);
+        ctx.stroke();
+        ctx.fillStyle = `rgba(200,205,150,${0.2 + fill * 0.35})`;
+        for (let i = 0; i < 5; i++) {
+          const t = (r.t * 1.6 + i * 0.2) % 1;
+          ctx.beginPath();
+          ctx.arc(34 + Math.sin(i + r.t) * 4, -10 + t * 18, 2.4 * (1 - t) + 1, 0, TAU);
+          ctx.fill();
+        }
+        ctx.fillStyle = '#4d5b33';
+        ctx.beginPath(); ctx.arc(12, 16, 7, 0, TAU); ctx.fill();
+      } else if (r.kind === 'muster') {
+        // roll call: two ranks, an NCO walking the line with a clipboard
+        ctx.strokeStyle = 'rgba(226,232,190,0.22)'; ctx.lineWidth = 2;
+        ctx.strokeRect(r.x - 130, r.y - 60, 260, 120);
+        for (let row = 0; row < 3; row++) {
+          for (let i = 0; i < 5; i++) {
+            const px = r.x - 100 + i * 50, py = r.y - 40 + row * 34;
+            const stand = Math.sin(r.t * 2 + i + row) * 1.2;
+            ctx.fillStyle = '#4d5b33';
+            ctx.beginPath(); ctx.arc(px, py + stand, 8, 0, TAU); ctx.fill();
+            ctx.fillStyle = 'rgba(230,232,190,0.45)';
+            ctx.fillRect(px - 4, py - 10 + stand, 8, 3);
+          }
+        }
+        const walk = Math.sin(r.t * 0.8) * 96;
+        ctx.fillStyle = '#6b7350';
+        ctx.beginPath(); ctx.arc(r.x + walk, r.y + 56, 9, 0, TAU); ctx.fill();
+        ctx.fillStyle = 'rgba(240,240,220,0.75)';
+        ctx.fillRect(r.x + walk + 8, r.y + 50, 11, 14);
+        ctx.fillStyle = 'rgba(200,205,170,0.5)';
+        ctx.fillRect(r.x + walk + 10, r.y + 53, 7, 2);
+      } else if (r.kind === 'wash') {
+        // a crew hosing down an engine block: water arc, steam, wet ground
+        ctx.fillStyle = 'rgba(30,38,30,0.35)';
+        ctx.beginPath(); ctx.ellipse(r.x + 26, r.y + 26, 78, 26, 0, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#46503c';
+        ctx.beginPath(); ctx.roundRect(r.x + 6, r.y - 12, 96, 30, 5); ctx.fill();
+        ctx.fillStyle = 'rgba(150,190,200,0.35)';
+        ctx.beginPath(); ctx.roundRect(r.x + 20, r.y - 6, 70, 18, 4); ctx.fill();
+        const spray = (r.t * 0.9) % 1;
+        ctx.strokeStyle = `rgba(190,235,255,${0.5 - spray * 0.3})`; ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(r.x - 70, r.y + 10);
+        ctx.quadraticCurveTo(r.x - 20, r.y - 40 - Math.sin(r.t * 2) * 8, r.x + 18, r.y + 2);
+        ctx.stroke();
+        for (let i = 0; i < 7; i++) {
+          const t = (r.t * 2 + i * 0.14) % 1;
+          ctx.fillStyle = `rgba(220,245,255,${0.5 * (1 - t)})`;
+          ctx.beginPath();
+          ctx.arc(r.x + 18 + Math.cos(i * 2.1) * 22 * t, r.y + 4 - Math.sin(i * 1.7) * 20 * t + 22 * t * t, 2.6, 0, TAU);
+          ctx.fill();
+        }
+        ctx.fillStyle = '#4d5b33';
+        ctx.beginPath(); ctx.arc(r.x - 78, r.y + 12, 7, 0, TAU); ctx.fill();
+      } else if (r.kind === 'k9') {
+        // handler and dog working a lane, nose down, tail going
+        const f = (r.t * 0.14) % 1;
+        const px = r.x - 150 + f * 300, py = r.y + Math.sin(f * 8) * 3;
+        ctx.fillStyle = '#4d5b33';
+        ctx.beginPath(); ctx.arc(px, py, 8, 0, TAU); ctx.fill();
+        ctx.fillStyle = 'rgba(230,232,190,0.45)';
+        ctx.fillRect(px - 4, py - 10, 8, 3);
+        // lead
+        ctx.strokeStyle = 'rgba(210,210,180,0.5)'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(px - 4, py + 2); ctx.lineTo(px - 34, py + 12); ctx.stroke();
+        // the dog
+        ctx.fillStyle = '#2f2a22';
+        ctx.beginPath(); ctx.ellipse(px - 40, py + 13, 12, 6, 0, 0, TAU); ctx.fill();
+        ctx.beginPath(); ctx.arc(px - 50, py + 9, 5, 0, TAU); ctx.fill();
+        ctx.strokeStyle = '#2f2a22'; ctx.lineWidth = 2;
+        const wag = Math.sin(r.t * 12) * 5;
+        ctx.beginPath(); ctx.moveTo(px - 29, py + 11); ctx.lineTo(px - 22, py + 4 + wag); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,120,90,0.5)';
+        ctx.fillRect(px - 40, py + 7, 4, 2);
       } else {
         // colours: the whole base stops while the flag goes up
         ctx.strokeStyle = 'rgba(220,226,180,0.55)'; ctx.lineWidth = 3;
@@ -10884,6 +11534,159 @@ export class Game {
           ctx.fillRect(o.x + 10, o.y + o.h - 8, 16, 5);                  // headlights
           ctx.fillRect(o.x + o.w - 26, o.y + o.h - 8, 16, 5);
         }
+      }
+
+      // ---- civic and industrial detailing ---------------------------------
+      // These kinds used to share one flat, unlabelled box, which made a warehouse, an
+      // armoury and a switch hall read identically from the air. Each now carries the
+      // roof furniture of what it actually is, so the base can be read while flying over it.
+      const cxS = o.x + o.w / 2, cyS = o.y + o.h / 2;
+      const smallW = Math.min(o.w, 120), smallH = Math.min(o.h, 120);
+      if (o.kind === 'warehouse') {
+        // skylight ribbons and painted bay numbers
+        ctx.fillStyle = 'rgba(190,215,225,0.20)';
+        for (let ry = o.y + 14; ry < o.y + o.h - 12; ry += 34) {
+          ctx.fillRect(o.x + 12, ry, Math.min(o.w - 24, 180), 7);
+        }
+        ctx.fillStyle = 'rgba(255,255,255,0.30)';
+        ctx.font = '900 11px ui-monospace, monospace';
+        ctx.fillText(`BAY ${String(Math.floor((o.x + o.y) / 97) % 9 + 1).padStart(2, '0')}`, o.x + 12, o.y + o.h - 12);
+        ctx.fillStyle = 'rgba(20,28,26,0.55)';
+        ctx.fillRect(o.x + o.w * 0.62, o.y + o.h - 8, Math.min(o.w * 0.3, 70), 8);
+      } else if (o.kind === 'armory') {
+        // crate stacks and a hazard ring around the magazine hatch
+        ctx.fillStyle = 'rgba(40,52,38,0.85)';
+        for (let i = 0; i < 3; i++) ctx.fillRect(o.x + 16 + i * 26, o.y + 16, 20, 20);
+        ctx.strokeStyle = 'rgba(255,196,96,0.7)'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(cxS, cyS + smallH * 0.18, Math.min(smallW, smallH) * 0.2, 0, TAU); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,196,96,0.8)';
+        ctx.beginPath();
+        ctx.moveTo(cxS, cyS + smallH * 0.18 - 9); ctx.lineTo(cxS + 8, cyS + smallH * 0.18 + 6);
+        ctx.lineTo(cxS - 8, cyS + smallH * 0.18 + 6); ctx.closePath(); ctx.fill();
+      } else if (o.kind === 'motorpool') {
+        // painted work bays, drain grates, oil
+        ctx.strokeStyle = 'rgba(240,235,190,0.30)'; ctx.lineWidth = 3;
+        for (let bx = o.x + 26; bx < o.x + o.w - 12; bx += 54) {
+          ctx.beginPath(); ctx.moveTo(bx, o.y + 10); ctx.lineTo(bx, o.y + o.h - 10); ctx.stroke();
+        }
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        for (let bx = o.x + 40; bx < o.x + o.w - 20; bx += 54) ctx.fillRect(bx, o.y + o.h * 0.62, 22, 8);
+        ctx.fillStyle = 'rgba(12,16,14,0.5)';
+        ctx.fillRect(o.x + 8, o.y + o.h - 14, Math.min(o.w - 16, 140), 6);
+      } else if (o.kind === 'library') {
+        // roof ribs, cupola and the archive extension tag
+        ctx.strokeStyle = 'rgba(60,48,36,0.55)'; ctx.lineWidth = 2;
+        for (let rx = o.x + 16; rx < o.x + o.w - 8; rx += 22) {
+          ctx.beginPath(); ctx.moveTo(rx, o.y + 6); ctx.lineTo(rx, o.y + o.h - 6); ctx.stroke();
+        }
+        ctx.fillStyle = 'rgba(46,38,28,0.9)';
+        ctx.beginPath(); ctx.arc(cxS, cyS, Math.min(smallW, smallH) * 0.17, 0, TAU); ctx.fill();
+        ctx.fillStyle = 'rgba(196,168,120,0.75)';
+        ctx.beginPath(); ctx.arc(cxS, cyS, Math.min(smallW, smallH) * 0.1, 0, TAU); ctx.fill();
+        ctx.fillStyle = 'rgba(214,186,133,0.6)';
+        ctx.font = '900 10px ui-monospace, monospace';
+        ctx.fillText('ARCHIVE', o.x + 10, o.y + o.h - 10);
+      } else if (o.kind === 'laboratory') {
+        // module pods, coolant stack and a containment ring
+        ctx.fillStyle = 'rgba(24,54,62,0.9)';
+        ctx.fillRect(o.x + 14, o.y + 14, Math.min(o.w * 0.42, 96), Math.min(o.h * 0.34, 62));
+        ctx.fillStyle = 'rgba(96,196,206,0.35)';
+        ctx.fillRect(o.x + 20, o.y + 20, Math.min(o.w * 0.36, 82), Math.min(o.h * 0.22, 36));
+        ctx.strokeStyle = 'rgba(140,240,225,0.45)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(o.x + o.w * 0.7, o.y + o.h * 0.6, Math.min(smallW, smallH) * 0.19, 0, TAU); ctx.stroke();
+        const pulse = 0.4 + Math.sin(performance.now() / 700 + o.x) * 0.3;
+        ctx.fillStyle = `rgba(150,255,225,${pulse})`;
+        ctx.fillRect(o.x + o.w * 0.7 - 4, o.y + o.h * 0.6 - 4, 8, 8);
+      } else if (o.kind === 'power') {
+        // transformer blocks with insulators and a switch mast
+        ctx.fillStyle = 'rgba(38,42,32,0.9)';
+        for (let i = 0; i < 3; i++) {
+          ctx.fillRect(o.x + 14 + i * (smallW * 0.26 + 8), o.y + o.h * 0.4, Math.min(smallW * 0.22, 30), Math.min(smallH * 0.34, 46));
+        }
+        ctx.strokeStyle = 'rgba(255,214,120,0.55)'; ctx.lineWidth = 2;
+        for (let i = 0; i < 3; i++) {
+          const bx = o.x + 14 + i * (smallW * 0.26 + 8);
+          ctx.beginPath(); ctx.arc(bx + 14, o.y + o.h * 0.36, 6, 0, TAU); ctx.stroke();
+        }
+        const arc = Math.sin(performance.now() / 90 + o.y) > 0.97;
+        if (arc) {
+          ctx.strokeStyle = 'rgba(200,240,255,0.9)'; ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.moveTo(o.x + o.w * 0.3, o.y + o.h * 0.3); ctx.lineTo(o.x + o.w * 0.52, o.y + o.h * 0.5); ctx.stroke();
+        }
+        ctx.fillStyle = 'rgba(255,214,120,0.7)';
+        ctx.font = '900 10px ui-monospace, monospace';
+        ctx.fillText('H.V. / 04', o.x + 10, o.y + o.h - 10);
+      } else if (o.kind === 'checkpoint') {
+        // booth, boom arm and stencilled lane number
+        ctx.fillStyle = 'rgba(226,214,180,0.85)';
+        ctx.fillRect(cxS - 16, cyS - 14, 32, 28);
+        ctx.fillStyle = 'rgba(40,50,44,0.9)';
+        ctx.fillRect(cxS - 10, cyS - 8, 20, 10);
+        ctx.fillStyle = 'rgba(255,170,80,0.85)';
+        ctx.fillRect(o.x + 6, cyS - 3, o.w - 12, 6);
+        ctx.fillStyle = 'rgba(30,38,32,0.8)';
+        for (let sx = o.x + 12; sx < o.x + o.w - 10; sx += 18) ctx.fillRect(sx, cyS - 3, 8, 6);
+      } else if (o.kind === 'radar') {
+        // pedestal, dish and a sweep that betrays the base's alertness
+        ctx.fillStyle = 'rgba(20,32,44,0.9)';
+        ctx.beginPath(); ctx.arc(cxS, cyS, Math.min(smallW, smallH) * 0.3, 0, TAU); ctx.fill();
+        ctx.strokeStyle = 'rgba(170,200,235,0.55)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(cxS, cyS, Math.min(smallW, smallH) * 0.42, 0, TAU); ctx.stroke();
+        const sweep = performance.now() / 1400 + o.x * 0.01;
+        const grd = ctx.createLinearGradient(cxS, cyS, cxS + Math.cos(sweep) * 90, cyS + Math.sin(sweep) * 90);
+        grd.addColorStop(0, 'rgba(150,230,255,0.5)'); grd.addColorStop(1, 'rgba(150,230,255,0)');
+        ctx.strokeStyle = grd; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(cxS, cyS); ctx.lineTo(cxS + Math.cos(sweep) * Math.min(smallW, smallH) * 0.4, cyS + Math.sin(sweep) * Math.min(smallW, smallH) * 0.4); ctx.stroke();
+      } else if (o.kind === 'gate') {
+        // two steel leaves, a central seam and hazard chevrons
+        ctx.fillStyle = 'rgba(24,18,12,0.85)';
+        ctx.fillRect(cxS - 2, o.y + 4, 4, o.h - 8);
+        ctx.strokeStyle = 'rgba(255,190,90,0.55)'; ctx.lineWidth = 2;
+        const horiz = o.w >= o.h;
+        if (horiz) {
+          for (let gx = o.x + 10; gx < o.x + o.w - 8; gx += 26) {
+            ctx.beginPath(); ctx.moveTo(gx, o.y + o.h * 0.7); ctx.lineTo(gx + 12, o.y + o.h * 0.32); ctx.stroke();
+          }
+        } else {
+          for (let gy = o.y + 10; gy < o.y + o.h - 8; gy += 26) {
+            ctx.beginPath(); ctx.moveTo(o.x + o.w * 0.7, gy); ctx.lineTo(o.x + o.w * 0.32, gy + 12); ctx.stroke();
+          }
+        }
+      } else if (o.kind === 'pillar') {
+        // load-bearing seams and a cap plate
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1.5;
+        for (let py = o.y + 10; py < o.y + o.h - 6; py += 18) {
+          ctx.beginPath(); ctx.moveTo(o.x + 4, py); ctx.lineTo(o.x + o.w - 4, py); ctx.stroke();
+        }
+        ctx.strokeStyle = 'rgba(255,225,170,0.28)';
+        ctx.strokeRect(o.x + 4, o.y + 4, Math.max(2, o.w - 8), Math.max(2, o.h - 8));
+      } else if (o.kind === 'server') {
+        // rack rows with live activity lamps
+        const rows = Math.max(1, Math.floor(o.h / 22));
+        for (let r = 0; r < rows; r++) {
+          ctx.fillStyle = 'rgba(18,34,32,0.9)';
+          ctx.fillRect(o.x + 8, o.y + 8 + r * 22, Math.max(6, o.w - 16), 12);
+          for (let l = 0; l < 4; l++) {
+            const on = Math.sin(performance.now() / 220 + r * 2 + l + o.x) > 0;
+            ctx.fillStyle = on ? 'rgba(130,255,200,0.9)' : 'rgba(60,110,96,0.5)';
+            ctx.fillRect(o.x + 12 + l * 9, o.y + 11 + r * 22, 4, 4);
+          }
+        }
+      } else if (o.kind === 'antenna') {
+        // lattice bracing and guy wires
+        ctx.strokeStyle = 'rgba(190,215,205,0.35)'; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let by = o.y + 6; by < o.y + o.h - 4; by += 16) {
+          ctx.moveTo(o.x + 4, by); ctx.lineTo(o.x + o.w - 4, by + 10);
+          ctx.moveTo(o.x + o.w - 4, by); ctx.lineTo(o.x + 4, by + 10);
+        }
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(190,215,205,0.18)';
+        ctx.beginPath();
+        ctx.moveTo(o.x + o.w / 2, o.y + o.h / 2); ctx.lineTo(o.x - 26, o.y + o.h + 14);
+        ctx.moveTo(o.x + o.w / 2, o.y + o.h / 2); ctx.lineTo(o.x + o.w + 26, o.y + o.h + 14);
+        ctx.moveTo(o.x + o.w / 2, o.y + o.h / 2); ctx.lineTo(o.x + o.w / 2, o.y - 30);
+        ctx.stroke();
       }
 
       ctx.strokeStyle = edge; ctx.lineWidth = 2;
@@ -12841,6 +13644,29 @@ export class Game {
     ctx.strokeStyle = 'rgba(120,230,200,0.45)'; ctx.lineWidth = 1.5;
     ctx.strokeRect(x, y, mw, mh);
     const sx = mw / ARENA_W, sy = mh / ARENA_H;
+    // THE ROAD NETWORK: on a map this size the roads are the only way to navigate by eye,
+    // so they are drawn first and faintly under everything else.
+    ctx.strokeStyle = 'rgba(150,200,190,0.16)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const z of this.zones) {
+      if (z.kind !== 'road' || Math.max(z.w, z.h) < 420) continue;
+      const horizontal = z.w >= z.h;
+      const cxr = x + (z.x + z.w / 2) * sx, cyr = y + (z.y + z.h / 2) * sy;
+      const half = (horizontal ? z.w : z.h) * sx * 0.5;
+      if (horizontal) { ctx.moveTo(cxr - half, cyr); ctx.lineTo(cxr + half, cyr); }
+      else { ctx.moveTo(cxr, cyr - half); ctx.lineTo(cxr, cyr + half); }
+    }
+    ctx.stroke();
+    // the army district reads as a single block on the map
+    if (this.army) {
+      ctx.strokeStyle = 'rgba(214,224,170,0.35)';
+      ctx.strokeRect(x + this.army.base.x * sx, y + this.army.base.y * sy,
+        this.army.base.w * sx, this.army.base.h * sy);
+      ctx.fillStyle = 'rgba(214,224,170,0.5)';
+      ctx.font = '6px monospace';
+      ctx.fillText('ARMY', x + (this.army.base.x + 60) * sx, y + (this.army.base.y + 90) * sy);
+    }
     // fortress
     ctx.fillStyle = 'rgba(255,209,102,0.22)';
     ctx.fillRect(x + (HQ.cx - HQ.w / 2) * sx, y + (HQ.cy - HQ.h / 2) * sy, HQ.w * sx, HQ.h * sy);
@@ -12875,6 +13701,35 @@ export class Game {
       ctx.font = '7px monospace'; ctx.textAlign = 'center';
       ctx.fillText('CAGE', px2, py2 - 8);
       ctx.textAlign = 'left';
+    }
+    /* THE SPECIAL SITES, marked so they can be found: the glacier gate behind its ice
+     * door, and the stockade inside the army district. Both are new features and neither
+     * should require walking the whole map to discover. */
+    if (this.glacierSpot) {
+      const gx2 = x + this.glacierSpot.x * sx, gy2 = y + this.glacierSpot.y * sy;
+      ctx.strokeStyle = this.glacierVisits ? 'rgba(150,175,185,0.7)' : '#8be8ff';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(gx2, gy2 - 5); ctx.lineTo(gx2 + 5, gy2); ctx.lineTo(gx2, gy2 + 5); ctx.lineTo(gx2 - 5, gy2);
+      ctx.closePath(); ctx.stroke();
+      ctx.fillStyle = 'rgba(139,232,255,0.85)';
+      ctx.fillRect(gx2 - 1, gy2 - 1, 2, 2);
+      ctx.font = '6px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('ICE', gx2, gy2 - 8);
+      ctx.textAlign = 'left';
+    }
+    if (this.stockadeSpot) {
+      const st = this.stockadeSpot;
+      ctx.strokeStyle = this.stockadeOpen ? 'rgba(150,170,140,0.55)' : '#e8c168';
+      ctx.setLineDash(this.stockadeOpen ? [] : [3, 2]);
+      ctx.strokeRect(x + st.x * sx, y + st.y * sy, st.w * sx, st.h * sy);
+      ctx.setLineDash([]);
+      if (!this.stockadeOpen) {
+        ctx.fillStyle = '#e8c168';
+        ctx.font = '6px monospace'; ctx.textAlign = 'center';
+        ctx.fillText('BRIG', x + (st.x + st.w / 2) * sx, y + st.y * sy - 2);
+        ctx.textAlign = 'left';
+      }
     }
     for (const hp of this.helipads) {
       ctx.fillStyle = '#57c8b8';

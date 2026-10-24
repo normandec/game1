@@ -1,6 +1,6 @@
 # PROTOCOL SOLAR ECLIPSE: Black Vault
 
-A five-sector, canvas-based tactical campaign with a separate Three.js S.H.I.E.L.D. sanctuary.
+A six-sector, canvas-based tactical campaign with a separate Three.js S.H.I.E.L.D. sanctuary and a Three.js glacier vault.
 
 ## Find The Vault
 

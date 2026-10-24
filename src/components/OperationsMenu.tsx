@@ -22,7 +22,7 @@ export default function OperationsMenu(p: Props) {
       <div className="operation-eyebrow"><span/> OPERATION BLACK VAULT</div>
       <h1>PROTOCOL<span>SOLAR ECLIPSE</span><i>TACTICAL CAMPAIGN</i></h1>
       <h2>They took our bases.<br/>Take them back.</h2>
-      <p>Five HYDRA strongholds. One S.H.I.E.L.D. operative.<br className="desktop-break"/> Reclaim the technology. Break the chain of command.</p>
+      <p>Six command strongholds. One S.H.I.E.L.D. operative.<br className="desktop-break"/> Reclaim the technology. Break the chain of command.</p>
       <div className="operation-cta"><button className="deploy-button" onClick={p.onStart}>DEPLOY OPERATIVE <span>&#8599;</span></button><button className="tour-button" onClick={p.onTour}>EXPLORE THE VAULT <span>3D TOUR</span></button></div>
       <div className="operation-keyhint"><kbd>ENTER</kbd> TO DEPLOY <span>/</span> {p.cls.toUpperCase()} + {p.support.toUpperCase()}</div>
     </main> : <section className="operation-panel">

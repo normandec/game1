@@ -205,6 +205,8 @@ export interface WorldData {
   dressing: SectorDressing;
   /** The IRON RESERVE ground, present only in sector 6. */
   army: ArmyPlan | null;
+  /** Drivable traffic circuits, sampled from the painted road network. */
+  trafficRoutes: { x: number; y: number }[][];
   /** Massed ranks (the army parade): position plus unit type. */
   ranks: { x: number; y: number; type: string }[];
   /** Soldiers holding named strongpoints, seeded as garrison enemies. */
@@ -214,6 +216,102 @@ export interface WorldData {
   /** Every defended generator/server yard on the map, biggest first. */
   powerSites: PowerSite[];
   powerCells: PowerCell[];
+}
+
+/**
+ * TRAFFIC FROM THE TARMAC.
+ *
+ * The circuits used to be authored by hand and then the district was built on top of
+ * them, so cars drove through hangars, ramparts and the parade. Instead the road network
+ * is sampled: every painted road is walked in 50 m steps, a step counts as drivable only
+ * when the whole width of the carriageway is clear of structures, and each clear run
+ * becomes a two-lane circuit (out on one lane, back on the other). Whatever the base
+ * grows afterwards, the traffic can only ever use road that is actually open.
+ */
+function trafficFromRoads(
+  roads: { x: number; y: number; w: number; h: number }[],
+  blocks: Rect[],
+): { x: number; y: number }[][] {
+  const circuits: { x: number; y: number }[][] = [];
+  const solid = (x: number, y: number, pad: number) => blocks.some((r) =>
+    x > r.x - pad && x < r.x + r.w + pad && y > r.y - pad && y < r.y + r.h + pad);
+  for (const road of roads) {
+    const horizontal = road.w >= road.h;
+    const long = horizontal ? road.w : road.h;
+    const wide = horizontal ? road.h : road.w;
+    if (long < 520 || wide < 96) continue;
+    const cx = road.x + road.w / 2, cy = road.y + road.h / 2;
+    const lane = Math.max(22, Math.min(34, wide / 2 - 22));
+    const step = 50;
+    const steps = Math.floor((long - 120) / step);
+    let runStart = -1;
+    const flush = (from: number, to: number) => {
+      if (from < 0 || (to - from) * step < 620) return;
+      const a = -long / 2 + 60 + from * step;
+      const b = -long / 2 + 60 + to * step;
+      // Two lanes: down one side of the carriageway, back up the other. The first point
+      // is where the cars enter, so a circuit never starts inside a junction box.
+      circuits.push(horizontal
+        ? [{ x: cx + a, y: cy - lane }, { x: cx + b, y: cy - lane },
+          { x: cx + b, y: cy + lane }, { x: cx + a, y: cy + lane }]
+        : [{ x: cx - lane, y: cy + a }, { x: cx - lane, y: cy + b },
+          { x: cx + lane, y: cy + b }, { x: cx + lane, y: cy + a }]);
+    };
+    for (let i = 0; i <= steps; i++) {
+      const along = -long / 2 + 60 + i * step;
+      const px = horizontal ? cx + along : cx;
+      const py = horizontal ? cy : cy + along;
+      // The full carriageway has to be clear, not just the centre line: a car is wide.
+      const clear = !solid(px, py - lane, 14) && !solid(px, py + lane, 14) && !solid(px, py, 14);
+      if (clear) { if (runStart < 0) runStart = i; }
+      else { flush(runStart, i); runStart = -1; }
+    }
+    flush(runStart, steps);
+  }
+  /* Every candidate circuit is then walked as a real polyline: a car is longer than a
+   * sample, so a lap is only kept when the whole loop, corners included, is open. Short
+   * blocked ends are trimmed back; a lap that cannot be cleaned is dropped. */
+  const polylineClear = (route: { x: number; y: number }[], pad: number) => {
+    for (let i = 0; i < route.length; i++) {
+      const a = route[i], b = route[(i + 1) % route.length];
+      const steps = Math.max(2, Math.round(Math.hypot(b.x - a.x, b.y - a.y) / 35));
+      for (let k = 0; k < steps; k++) {
+        if (solid(a.x + (b.x - a.x) * k / steps, a.y + (b.y - a.y) * k / steps, pad)) return false;
+      }
+    }
+    return true;
+  };
+  const cleaned: { x: number; y: number }[][] = [];
+  for (const route of circuits) {
+    let ok: { x: number; y: number }[] | null = null;
+    for (let trim = 0; trim <= 8 && !ok; trim++) {
+      const shrink = trim * 60;
+      const horizontal = Math.abs(route[1].x - route[0].x) > Math.abs(route[1].y - route[0].y);
+      const a = { ...route[0] }, b = { ...route[1] };
+      const a2 = { ...route[3] }, b2 = { ...route[2] };
+      if (horizontal) {
+        const dir = Math.sign(b.x - a.x) || 1;
+        if (Math.abs(b.x - a.x) - shrink * 2 < 500) break;
+        a.x += dir * shrink; a2.x += dir * shrink;
+        b.x -= dir * shrink; b2.x -= dir * shrink;
+      } else {
+        const dir = Math.sign(b.y - a.y) || 1;
+        if (Math.abs(b.y - a.y) - shrink * 2 < 500) break;
+        a.y += dir * shrink; a2.y += dir * shrink;
+        b.y -= dir * shrink; b2.y -= dir * shrink;
+      }
+      const candidate = [a, b, b2, a2];
+      if (polylineClear(candidate, 22)) ok = candidate;
+    }
+    if (ok) cleaned.push(ok);
+  }
+  // Longest and most useful first, and never more circuits than the base can fill.
+  cleaned.sort((a, b) => {
+    const len = (c: { x: number; y: number }[]) =>
+      Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y) + Math.hypot(c[3].x - c[2].x, c[3].y - c[2].y);
+    return len(b) - len(a);
+  });
+  return cleaned.slice(0, 9);
 }
 
 export function generateWorld(sector = 1): WorldData {
@@ -860,12 +958,34 @@ export function generateWorld(sector = 1): WorldData {
   // Terrain patches were removed on request: the random brown/green rectangles that
   // carpeted the whole theatre read as unfinished ground plates rather than terrain.
 
-  // Extra caches along the approach corridors
-  for (let i = 0; i < 22; i++) {
-    cacheSpots.push({
-      x: rnd(500, GEN_W - 500),
-      y: rnd(500, GEN_H - 500),
-    });
+  /* Loot on the shoulders.
+   *
+   * These used to be thrown at pure random coordinates, which is how a supply cache ends up
+   * welded into a hangar wall or sealed in a courtyard nobody can walk into. They are now
+   * placed on purpose: pick a road, pick a point along it, step off the tarmac onto the
+   * shoulder, and refuse the spot unless it is clear of every structure, clear of every
+   * reserved site and not sitting on top of another cache.
+   */
+  {
+    const shoulders = zones.filter((z) => z.kind === 'road');
+    let tries = 0, placed = 0;
+    while (placed < 24 && tries++ < 1400 && shoulders.length) {
+      const road = shoulders[Math.floor(Math.random() * shoulders.length)];
+      const horizontal = road.w >= road.h;
+      const along = horizontal ? road.x + rnd(140, Math.max(150, road.w - 140)) : road.y + rnd(140, Math.max(150, road.h - 140));
+      const across = horizontal ? road.y + road.h / 2 : road.x + road.w / 2;
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const off = (horizontal ? road.h : road.w) / 2 + rnd(54, 130);
+      const x = horizontal ? along : across + side * off;
+      const y = horizontal ? across + side * off : along;
+      if (x < 360 || y < 360 || x > GEN_W - 360 || y > GEN_H - 360) continue;
+      if (reservedSites.some((r) => x > r.x - 70 && x < r.x + r.w + 70 && y > r.y - 70 && y < r.y + r.h + 70)) continue;
+      if (rects.some((r) => x > r.x - 74 && x < r.x + r.w + 74 && y > r.y - 74 && y < r.y + r.h + 74)) continue;
+      if (cacheSpots.some((c) => Math.hypot(c.x - x, c.y - y) < 240)) continue;
+      if (barrelSpots.some((c) => Math.hypot(c.x - x, c.y - y) < 90)) continue;
+      cacheSpots.push({ x, y });
+      placed++;
+    }
   }
 
   /* --------- S.H.I.E.L.D.-GRADE INFRASTRUCTURE --------- */
@@ -1112,6 +1232,59 @@ export function generateWorld(sector = 1): WorldData {
     });
   }
 
+  /* ---------------------------------------------------------------- *
+   * THE INSERTION
+   *
+   * The six start coordinates are fixed, but the district around them is scattered at
+   * random: a compound or a warehouse can land on the insertion and leave the operative
+   * sealed in a courtyard whose only door faces away. Validate the ground under the
+   * insertion, and if it is not open ground with real space around it, walk out to the
+   * nearest clear point on a road instead. A start is never allowed to be a trap.
+   * ---------------------------------------------------------------- */
+  {
+    const clearAt = (x: number, y: number, pad: number) => !rects.some((r) =>
+      x > r.x - pad && x < r.x + r.w + pad && y > r.y - pad && y < r.y + r.h + pad);
+    const raysClear = (x: number, y: number, len: number) => {
+      let open = 0;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        let free = 0;
+        for (let d = 40; d <= len; d += 40) {
+          if (!clearAt(x + dx * d, y + dy * d, 26)) break;
+          free = d;
+        }
+        if (free >= len * 0.6) open++;
+      }
+      return open;
+    };
+    const good = (x: number, y: number) => clearAt(x, y, 56) && raysClear(x, y, 360) >= 2;
+    const start = dressing.start;
+    if (!good(start.x, start.y)) {
+      let best: { x: number; y: number } | null = null, bestD = Infinity;
+      const consider = (x: number, y: number) => {
+        if (x < 260 || y < 260 || x > GEN_W - 260 || y > ARENA_H - 260) return;
+        if (!good(x, y)) return;
+        const d = Math.hypot(x - start.x, y - start.y);
+        if (d < bestD) { bestD = d; best = { x, y }; }
+      };
+      // roads first: an insertion on tarmac reads correctly and is always reachable
+      for (const road of zones) {
+        if (road.kind !== 'road') continue;
+        const horizontal = road.w >= road.h;
+        for (let t = 0.02; t <= 0.98; t += 0.03) {
+          consider(horizontal ? road.x + (road.w - 60) * t + 30 : road.x + road.w / 2,
+            horizontal ? road.y + road.h / 2 : road.y + (road.h - 60) * t + 30);
+        }
+      }
+      for (const rad of [140, 260, 420, 620, 900, 1300]) {
+        for (let k = 0; k < 16; k++) {
+          const a = (k / 16) * Math.PI * 2;
+          consider(start.x + Math.cos(a) * rad, start.y + Math.sin(a) * rad);
+        }
+      }
+      if (best) dressing.start = best;
+    }
+  }
+
   return {
     rects, zones, serverSpots, generalSpot, coderSpots, garrisonSpots,
     cacheSpots, gateSpots, helipads, hangarSpot, beaconSpots, satcomSpots, barrelSpots, spotlightSpots,
@@ -1119,5 +1292,11 @@ export function generateWorld(sector = 1): WorldData {
     facilities, facilityGuards, campaignSites,
     powerSites: campaignSites.powerSites, powerCells: campaignSites.powerCells,
     dressing, army, ranks, armyGuards, glacier,
+    // Circuits are built last: every structure that could ever block a road already
+    // exists, so the traffic network can only contain road that is genuinely open.
+    trafficRoutes: trafficFromRoads(
+      zones.filter((z) => z.kind === 'road').map((z) => ({ x: z.x, y: z.y, w: z.w, h: z.h })),
+      rects,
+    ),
   };
 }

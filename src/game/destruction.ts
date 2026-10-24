@@ -34,6 +34,25 @@ export function structuralHealth(kind: StructKind) {
   if (kind === 'car') return 90;
   if (kind === 'humvee') return 180;
   if (kind === 'bus' || kind === 'tanker') return 160;
+  // Legacy Hydra base fabric. Every one of these used to fall through to the same silent
+  // 220 HP default, which made a wooden barrack as tough as a reinforced gate and a parked
+  // aircraft as tough as a warehouse. Materials now match what the art shows.
+  if (kind === 'barrack') return 150;      // timber and sheet steel hut
+  if (kind === 'truck') return 140;        // soft-skinned cargo lorry
+  if (kind === 'antenna') return 130;      // lattice mast, thin legs
+  if (kind === 'server') return 150;       // rack bank without the bunker around it
+  if (kind === 'checkpoint') return 190;   // prefab booth and boom
+  if (kind === 'gate') return 260;         // steel blast gate
+  if (kind === 'pillar') return 240;       // load-bearing concrete
+  if (kind === 'laboratory') return 200;
+  if (kind === 'library') return 200;
+  if (kind === 'warehouse') return 210;
+  if (kind === 'motorpool') return 200;
+  if (kind === 'radar') return 210;        // dish pedestal
+  if (kind === 'power') return 230;        // transformer hall
+  if (kind === 'armory') return 300;       // hardened magazine
+  if (kind === 'plane') return 320;        // parked airframe, not a hangar
+  if (kind === 'icegate') return 650;      // a hundred tonnes of ancient ice and steel
   return 220;
 }
 

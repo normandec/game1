@@ -3,7 +3,7 @@ export interface StoryEntry { id: string; channel: string; title: string; text: 
 
 export const PROLOGUE: StoryEntry = {
   id: 'prologue', channel: 'S.H.I.E.L.D. / LAST SECURE TRANSMISSION', title: 'The night the badges changed.',
-  text: 'At 03:17, five S.H.I.E.L.D. installations went silent. HYDRA did not break through the gates. They already had the keys. Our aircraft, archives and supply columns now answer to their command network. You are the last operative outside their registry. Enter the occupied territory, recover Carter\'s lost intelligence, and sever all five command nodes. The Black Vault is still ours. Trust the signal, not the uniform.',
+  text: 'At 03:17, five S.H.I.E.L.D. installations went silent. HYDRA did not break through the gates. They already had the keys. Our aircraft, archives and supply columns now answer to their command network. You are the last operative outside their registry. Enter the occupied territory, recover Carter\'s lost intelligence, and sever all six command nodes. Hydra\'s five, and the army group that was never sent. The Black Vault is still ours. Trust the signal, not the uniform.',
 };
 
 export const PHASE_STORY: Record<OperationPhase, StoryEntry> = {

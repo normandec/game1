@@ -511,13 +511,13 @@ export function MenuScreen({
             <span className="animate-sweep absolute inset-y-0 w-1/3 bg-amber-300/80" />
           </div>
           <p className="font-tech mt-3 max-w-xl text-xs tracking-widest text-teal-100/60 md:text-sm">
-            ONE S.H.I.E.L.D. OPERATIVE · FIVE 98 KM² WARZONES · TAKE BACK THE NETWORK
+            ONE S.H.I.E.L.D. OPERATIVE · SIX 98 KM² WARZONES · TAKE BACK THE NETWORK
           </p>
         </div>
 
         <div className="w-full max-w-4xl">
-          <div className="mb-2 text-center text-[10px] uppercase tracking-[0.4em] text-amber-300/70">Campaign · Five Hydra Worlds</div>
-          <div className="relative grid grid-cols-5 gap-1">
+          <div className="mb-2 text-center text-[10px] uppercase tracking-[0.4em] text-amber-300/70">Campaign · Six Command Worlds</div>
+          <div className="relative grid grid-cols-6 gap-1">
             <div className="absolute top-5 right-[8%] left-[8%] h-px bg-gradient-to-r from-teal-400/40 via-amber-300/50 to-rose-500/50" />
             {[
               ['01', 'FALLEN HUB', 'text-teal-300'],
@@ -525,6 +525,7 @@ export function MenuScreen({
               ['03', 'ARCTIC RELAY', 'text-sky-300'],
               ['04', 'VENOM MARSH', 'text-lime-300'],
               ['05', 'HYDRA NEXUS', 'text-rose-300'],
+              ['06', 'IRON RESERVE', 'text-lime-200'],
             ].map(([id, label, color]) => (
               <div key={id} className="relative text-center">
                 <div className={`font-tech relative z-10 mx-auto flex h-10 w-10 items-center justify-center rounded-full border border-current bg-[#071011] text-[11px] ${color}`}>{id}</div>
@@ -551,6 +552,9 @@ export function MenuScreen({
                   <li>◈ MOUSE — aim · HOLD LMB — fire</li>
                   <li>◈ SPACE / SHIFT — combat dash (invuln)</li>
                   <li>◈ G or RMB — frag grenade</li>
+                  <li>◈ F — interact · seize a vehicle · break the stockade</li>
+                  <li>◈ I / TAB — the kit (loadout, cipher keys, airframes)</li>
+                  <li>◈ L — hydraulic gate · C — AEGIS cell · V — vault guide</li>
                   <li>◈ ESC / P — pause</li>
                 </>
               )}
@@ -884,7 +888,7 @@ export function VictoryScreen({
             COMMAND ELIMINATED
           </h2>
           <p className="font-tech mt-2 text-xs tracking-[0.3em] text-teal-100/60 md:text-sm">
-            FIVE HYDRA COMMAND BASES DESTROYED · S.H.I.E.L.D. HAS RECLAIMED THE NETWORK
+            SIX COMMAND BASES DESTROYED · S.H.I.E.L.D. HAS RECLAIMED THE NETWORK
           </p>
         </div>
 

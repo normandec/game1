@@ -311,8 +311,13 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
     r.armyWall = true;
     return r;
   };
-  rampart(base.x, base.y, (base.w - outerGateW) / 2, T);
-  rampart(base.x + base.w / 2 + outerGateW / 2, base.y, (base.w - outerGateW) / 2, T);
+  // The wall is cut around the gate itself. The old arithmetic centred the opening on the
+  // base, while the gate was drawn on the core axis, which buried the gate under 420 px of
+  // rampart and left an unguarded hole 800 px to the east. The perimeter now has exactly
+  // one opening: the gate.
+  const gx = CX - outerGateW / 2;
+  rampart(base.x, base.y, gx - base.x, T);
+  rampart(gx + outerGateW, base.y, base.x + base.w - (gx + outerGateW), T);
   rampart(base.x, base.y + base.h - T, base.w, T);
   rampart(base.x, base.y + T, T, base.h - T * 2);
   rampart(base.x + base.w - T, base.y + T, T, base.h - T * 2);
@@ -475,8 +480,9 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
     r.armyWall = true;
     return r;
   };
-  blast(inner.x, inner.y, (inner.w - innerGateW) / 2, IT);
-  blast(inner.x + inner.w / 2 + innerGateW / 2, inner.y, (inner.w - innerGateW) / 2, IT);
+  const gix = CX - innerGateW / 2;
+  blast(inner.x, inner.y, gix - inner.x, IT);
+  blast(gix + innerGateW, inner.y, inner.x + inner.w - (gix + innerGateW), IT);
   blast(inner.x, inner.y + inner.h - IT, inner.w, IT);
   blast(inner.x, inner.y + IT, IT, inner.h - IT * 2);
   blast(inner.x + inner.w - IT, inner.y + IT, IT, inner.h - IT * 2);
@@ -528,11 +534,15 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
   /* ---------------- CORE: the command bunker ---------------- */
   zone(core.x - 60, core.y - 60, core.w + 120, core.h + 120, 'concrete');
   const CT = 80;
-  add(core.x, core.y, core.w, CT, 'keep', 120, '#3f443c');
+  // The north wall is cut for the command gate: a gate painted on top of an unbroken wall
+  // is a lie, and it left the core reachable only from the air even after the shutter fell.
+  const coreGateW = 220;
+  add(core.x, core.y, (core.w - coreGateW) / 2, CT, 'keep', 120, '#3f443c');
+  add(core.x + core.w / 2 + coreGateW / 2, core.y, (core.w - coreGateW) / 2, CT, 'keep', 120, '#3f443c');
   add(core.x, core.y + core.h - CT, core.w, CT, 'keep', 120, '#3f443c');
   add(core.x, core.y + CT, CT, core.h - CT * 2, 'keep', 120, '#3f443c');
   add(core.x + core.w - CT, core.y + CT, CT, core.h - CT * 2, 'keep', 120, '#3f443c');
-  gate(core.x + core.w / 2 - 110, core.y - 10, 220, CT + 20, true, 3200);
+  gate(core.x + core.w / 2 - coreGateW / 2, core.y - 10, coreGateW, CT + 20, true, 3200);
   add(core.x + 260, core.y + 240, 320, 130, 'server', 44, '#3b5560');
   add(core.x + core.w - 580, core.y + 240, 320, 130, 'server', 44, '#3b5560');
   add(core.x + core.w / 2 - 220, core.y + 470, 440, 110, 'console', 40, '#4a5650');
