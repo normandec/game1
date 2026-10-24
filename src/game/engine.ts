@@ -3,6 +3,7 @@ import { AIRFIELD, VAULT_ENTRY, ARENA_W, ARENA_H, HQ, PLAYER_START, SECTORS, Spa
 import { RoutePlanner, segmentBox, segmentCircle, type Point, type Block } from './navigation';
 import { makeGates, makeDetails, gateBlocks, drawGate, drawDetails, type HydraulicGate, type RoomDetail } from './installations';
 import { drawTransport, drawParkedAircraft } from './vehicleArt';
+import { makeBoat, drawBoat, LANDING_BEACHES, MOORINGS, BOAT, type Boat } from './navy';
 import { FACILITY_TYPES, type FacilityGuard, type FacilityState, type PostRole } from './facilities';
 import { FacilityPainter } from './facilityArt';
 import { PROLOGUE, PHASE_STORY, PHASE_TACTICS, LIBRARY_VOLUMES, type StoryEntry } from './campaign';
@@ -453,6 +454,17 @@ export class Game {
   // installations
   hangars: HangarState[] = [];
   vans: Van[] = [];
+  /** Everything that floats: landing craft, patrol boats and the skiffs you can take. */
+  boats: Boat[] = [];
+  drivingBoat: Boat | null = null;
+  /** Island defence: the alarm that calls the landing waves in. */
+  islandAlarmT = 0;
+  /** Reefs in the approaches: hit one at speed and the hull goes up. */
+  reefs: { x: number; y: number; r: number; seen: boolean }[] = [];
+  islandWaves = 0;
+  islandLanded = false;
+  /** The campaign's last level is the prison itself: sector 5 ends at THE CAGE. */
+  prisonFinale = false;
   lasers: Laser[] = [];
   allies: Ally[] = [];
   pois: PoiState[] = [];
@@ -804,6 +816,22 @@ export class Game {
       x: v.x, y: v.y, ang: v.ang, speed: 0, lean: 0,
       hp: 276, maxHp: 276, dead: false, driving: false, boost: 0,
     }));
+    // The sea wakes up with the world: three moored skiffs and two patrols on station.
+    this.drivingBoat = null;
+    this.islandAlarmT = 0; this.islandWaves = 0; this.islandLanded = false;
+    this.prisonFinale = false;
+    // Reefs: the shallow approaches around the island are mined by nature, not by Hydra.
+    this.reefs = [
+      { x: 13240, y: 4620, r: 74 }, { x: 13560, y: 4860, r: 58 }, { x: 13880, y: 3180, r: 66 },
+      { x: 12980, y: 3260, r: 62 }, { x: 14620, y: 6180, r: 88 }, { x: 15960, y: 6620, r: 76 },
+      { x: 16740, y: 4620, r: 84 }, { x: 16980, y: 3140, r: 66 }, { x: 15640, y: 1720, r: 92 },
+      { x: 14740, y: 1980, r: 70 }, { x: 12860, y: 5860, r: 80 }, { x: 16240, y: 5460, r: 72 },
+    ].map((r) => ({ ...r, seen: false }));
+    this.boats = MOORINGS.map((m) => makeBoat('skiff', 'player', m.x, m.y, m.ang, { crewed: true }));
+    this.boats.push(
+      makeBoat('patrol', 'enemy', 16680, 2780, 2.2, { state: 'cruise', tx: 15400, ty: 2900, homeX: 16680, homeY: 2780 }),
+      makeBoat('patrol', 'enemy', 13420, 6280, -0.9, { state: 'cruise', tx: 14800, ty: 6700, homeX: 13420, homeY: 6280 }),
+    );
     this.lasers = world.laserSpots.map((l) => ({
       x: l.x, y: l.y, ang: 0, hp: 420 + this.sector * 60, maxHp: 420 + this.sector * 60,
       charge: 0, cool: rand(2, 5), beam: 0, captured: false, targetX: l.x, targetY: l.y,
@@ -942,11 +970,11 @@ export class Game {
       const ring = Array.from({ length: 3 }, (_, k) => {
         const a = a0 + (k / 3) * Math.PI * 2;
         return { x: stand.x + Math.cos(a) * r, y: stand.y + Math.sin(a) * r };
-      }).filter((q) => this.onDryGround(q.x, q.y));
+      }).filter((q) => this.onDryGround(q.x, q.y, 44));
       // Bridge and causeway posts can only walk their lane, not a full circle over the sea.
       const lane = [
         { x: stand.x - 150, y: stand.y }, { x: stand.x + 150, y: stand.y },
-      ].filter((q) => this.onDryGround(q.x, q.y));
+      ].filter((q) => this.onDryGround(q.x, q.y, 44));
       e.patrol = (ring.length >= 2 ? ring : lane).map((q) => this.infantryRoutesReadyPoint(q.x, q.y));
       e.patrolNode = 0;
       this.collide(e, e.def.r);
@@ -1153,7 +1181,7 @@ export class Game {
   /* ---------------- actions ---------------- */
 
   doDash() {
-    if (this.status !== 'playing' || this.piloting || this.flyingPlane || this.drivingVan) return;
+    if (this.status !== 'playing' || this.piloting || this.flyingPlane || this.drivingVan || this.drivingBoat) return;
     if (this.dashCd > 0 || this.dashT > 0) return;
     const m = this.moveVector();
     const ang = m.len > 0.15 ? Math.atan2(m.y, m.x) : this.pang;
@@ -1170,7 +1198,7 @@ export class Game {
     if (this.status !== 'playing') return;
     if (this.flyingPlane) { this.dropBombs(); return; }
     if (this.piloting && this.playerHeli) { if (this.playerHeli.rocketCd <= 0) this.fireHeliRocket(this.playerHeli); return; }
-    if (this.drivingVan) return;
+    if (this.drivingVan || this.drivingBoat) return;
     if (this.grenades <= 0 || this.grenadeCd > 0) return;
     this.grenades--; this.grenadeCd = 0.38;
     const a = this.pang;
@@ -1224,15 +1252,17 @@ export class Game {
   };
 
   private updateTransit(dt: number) {
+    if (this.status !== 'transit') return;
     this.transitT -= dt;
     if (this.playerHeli) this.playerHeli.rotor += dt * 36;
-    if (this.transitT <= 0) this.enterNextSector();
+    if (this.transitT <= 0) { if (this.prisonFinale) this.startPrisonLevel(); else this.enterNextSector(); }
   }
 
   /** Context prompt shown on the HUD for whatever the operative can interact with. */
   private nearPrompt(): string {
     if (this.flyingPlane) return 'F · LAND BOMBER';
     if (this.playerTank) return 'F · EXIT TANK';
+    if (this.drivingBoat) return 'F · EXIT BOAT';
     if (this.drivingVan) return 'F · EXIT TRANSPORT';
     if (this.piloting) return 'F · LAND GUNSHIP';
     const mcNear = this.megaCrates.find((c) => !c.dead && Math.hypot(this.px - c.x, this.py - c.y) < 100);
@@ -1262,6 +1292,8 @@ export class Game {
     if (p) return 'F · SEIZE GUNSHIP';
     const ownTank = this.tanks.find((q) => !q.dead && q.captured && !q.driven && Math.hypot(q.x - this.px, q.y - this.py) < 170);
     if (ownTank) return 'F · BOARD TANK';
+    const boatNear = this.boats.find((b) => b.state !== 'sunk' && Math.hypot(b.x - this.px, b.y - this.py) < 160);
+    if (boatNear) return boatNear.faction === 'enemy' ? 'F · SEIZE HYDRA BOAT' : 'F · BOARD BOAT';
     const nearTank = this.tanks.find((q) => !q.dead && !q.captured && Math.hypot(q.x - this.px, q.y - this.py) < 170);
     if (nearTank) return 'F · SEIZE TANK';
     const v = this.vans.find((q) => !q.dead && !q.reserved && !q.disabled && Math.hypot(q.x - this.px, q.y - this.py) < 110);
@@ -1326,7 +1358,7 @@ export class Game {
       sectorName: SECTORS[this.sector - 1]?.name || 'UNKNOWN SECTOR',
       destination: this.destination,
       transitPct: this.status === 'transit' ? clamp(1 - this.transitT / this.transitDuration, 0, 1) : 0,
-      driving: !!(this.drivingVan || this.playerTank),
+      driving: !!(this.drivingVan || this.playerTank || this.drivingBoat),
       tank: !!this.playerTank,
       flyingPlane: this.flyingPlane,
       allies: this.allies.length,
@@ -1416,6 +1448,8 @@ export class Game {
     if (this.status !== 'playing') return;
     this.updateSquads(dt);
     this.updateEnemies(dt);
+    this.updateBoats(dt);
+    this.updateIslandDefence(dt);
     if (this.status !== 'playing') return;
     this.updateSupport(dt);
     this.updateHangars(dt);
@@ -2063,6 +2097,7 @@ export class Game {
     this.updatePrisonDoor(dt);
     if (this.status !== 'playing') return;
     if (this.flyingPlane) { this.updatePlane(dt); return; }
+    if (this.drivingBoat) { this.updateDrivenBoat(dt); return; }
     if (this.drivingVan) { this.updateDrivenVan(dt); return; }
     if (this.playerTank) { this.updateDrivenTank(dt); return; }
     if (this.piloting) {
@@ -2083,8 +2118,15 @@ export class Game {
       this.pvx = lerp(this.pvx, m.x * speed, 1 - Math.pow(0.0009, dt));
       this.pvy = lerp(this.pvy, m.y * speed, 1 - Math.pow(0.0009, dt));
     }
+    const wasX = this.px, wasY = this.py;
     this.px = clamp(this.px + this.pvx * dt, 80, ARENA_W - 80);
     this.py = clamp(this.py + this.pvy * dt, 80, ARENA_H - 80);
+    // The operative does not swim. Step along the shoreline instead of into the sea.
+    if (this.inWater(this.px, this.py)) {
+      if (!this.inWater(this.px, wasY)) { this.py = wasY; this.pvy = 0; }
+      else if (!this.inWater(wasX, this.py)) { this.px = wasX; this.pvx = 0; }
+      else { this.px = wasX; this.py = wasY; this.pvx = 0; this.pvy = 0; }
+    }
     const body = { x: this.px, y: this.py };
     this.collide(body, 15);
     this.collideBarriers(body, 15);
@@ -2167,6 +2209,7 @@ export class Game {
     // exit whatever we are piloting first
     if (this.flyingPlane && this.plane) { this.exitPlane(); return; }
     if (this.playerTank) { this.exitTank(); return; }
+    if (this.drivingBoat) { this.exitBoat(); return; }
     if (this.drivingVan) { this.exitVan(); return; }
     if (this.piloting) { this.boardGunship(); return; }
     const mc = this.megaCrates.find((c) => !c.dead && Math.hypot(this.px - c.x, this.py - c.y) < 100);
@@ -2251,6 +2294,11 @@ export class Game {
     if (ownTank) { this.boardTank(ownTank, true); return; }
     const tank = this.tanks.find((q) => !q.dead && !q.captured && Math.hypot(q.x - this.px, q.y - this.py) < 170);
     if (tank) { this.boardTank(tank); return; }
+    // 5c) take a boat — Hydra's or one of the moored skiffs
+    const boat = this.boats
+      .filter((b) => b.state !== 'sunk')
+      .sort((a, b) => Math.hypot(a.x - this.px, a.y - this.py) - Math.hypot(b.x - this.px, b.y - this.py))[0];
+    if (boat && Math.hypot(boat.x - this.px, boat.y - this.py) < 160) { this.enterBoat(boat); return; }
     // 6) drive a van
     const van = this.vans.find((v) => !v.dead && !v.reserved && !v.disabled && Math.hypot(v.x - this.px, v.y - this.py) < 110);
     if (van) { this.enterVan(van); return; }
@@ -2722,6 +2770,18 @@ export class Game {
   leavePrison(stats: PrisonStats, escaped: boolean) {
     const reward = escaped ? 25000 + stats.freed * 400 + stats.guardsDown * 250 : 1500;
     this.score += reward;
+    if (this.prisonFinale && escaped) {
+      // The last level, cleared: the campaign ends on the far side of the sally port.
+      this.score += 40000;
+      this.status = 'victory';
+      this.timeScale = 0.25;
+      this.prisonFinale = false;
+      this.setBanner('CAMPAIGN COMPLETE', `THE CAGE BROKEN · ${stats.freed} INMATES RELEASED`);
+      sfx.wave();
+      this.pushHud();
+      this.onVictory(Math.floor(this.score), this.wave);
+      return;
+    }
     this.status = 'playing';
     // Step out of the gate onto the forecourt: never straight back into the trigger.
     this.px = PRISON_DOOR.x - 210;
@@ -3013,7 +3073,8 @@ export class Game {
     v.lean = lerp(v.lean, steer * grip * 0.4, 1 - Math.pow(0.01, dt));
 
     const probe = { x: v.x + Math.cos(v.ang) * v.speed * dt, y: v.y + Math.sin(v.ang) * v.speed * dt };
-    let hit = this.collide(probe, 48);
+    // A van is not a boat: the shoreline is a wall.
+    let hit = this.inWater(probe.x, probe.y) ? { nx: -Math.cos(v.ang), ny: -Math.sin(v.ang) } : this.collide(probe, 48);
     if (!hit) for (const off of [-66, 66]) {
       const axle = { x: probe.x + Math.cos(v.ang) * off, y: probe.y + Math.sin(v.ang) * off };
       const n = this.collide(axle, 32);
@@ -3442,6 +3503,304 @@ export class Game {
     return state.path[state.node];
   }
 
+  /* ------------------------------------------------------------------ */
+  /*  NAVY                                                              */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * The island is Hydra's crown jewel: the moment the operative sets foot on it the
+   * sirens go and everything that floats or flies comes in. Waves keep coming.
+   */
+  private updateIslandDefence(dt: number) {
+    const onIsland = this.px > 13980 && Math.hypot(this.px - ISLAND.x, this.py - ISLAND.y) < 2100;
+    if (onIsland && !this.islandLanded) this.startIslandLanding();
+    if (onIsland) {
+      this.islandAlarmT = Math.max(0, this.islandAlarmT - dt);
+      if (this.islandLanded && this.islandAlarmT <= 0 && this.islandWaves < 6) {
+        this.islandAlarmT = 24;
+        this.startIslandLanding();
+      }
+    } else if (!onIsland && this.islandLanded) {
+      this.islandAlarmT = 0;
+    }
+  }
+
+  /** One tick of the sea: landing runs, patrols, ramming and the reefs. */
+  private updateBoats(dt: number) {
+    const spec = (b: Boat) => BOAT[b.kind];
+    for (let i = this.boats.length - 1; i >= 0; i--) {
+      const b = this.boats[i];
+      if (!b) continue;
+      b.t += dt;
+      b.wake = lerp(b.wake, Math.min(1, Math.abs(b.speed) / 150), 1 - Math.exp(-4 * dt));
+      if (b.state === 'sunk') {
+        if (b.t > 9) this.boats.splice(i, 1);
+        continue;
+      }
+      if (b === this.drivingBoat) continue;               // the operative is at the wheel
+      const sp = spec(b);
+
+      // ---- landing run ----
+      if (b.state === 'transit' || b.state === 'retreat') {
+        const gx = b.state === 'transit' ? b.tx : b.homeX;
+        const gy = b.state === 'transit' ? b.ty : b.homeY;
+        const dx = gx - b.x, dy = gy - b.y, d = Math.hypot(dx, dy) || 1;
+        const goalA = Math.atan2(dy, dx);
+        b.ang = lerpAngle(b.ang, goalA, 1 - Math.pow(0.12, dt));
+        const want = b.state === 'transit' ? sp.speed : sp.speed * 1.15;
+        b.speed = lerp(b.speed, want, 1 - Math.exp(-2 * dt));
+        const step = Math.min(d, b.speed * dt);
+        b.x += Math.cos(b.ang) * step; b.y += Math.sin(b.ang) * step;
+        if (b.state === 'retreat') b.ramp = Math.max(0, b.ramp - dt * 1.6);
+        // Close enough: put the bow on the sand before the sea guard pushes us back out.
+        if (b.state === 'transit' && b.kind === 'landing' && d < 150) {
+          b.state = 'beach'; b.t = 0; b.speed = 0;
+          this.addText(b.x, b.y - 70, `${b.manifest} HOSTILES ASHORE`, '#ffb9a4', 13);
+          continue;
+        }
+        if (d < 70) {
+          if (b.state === 'retreat') {
+            // home water: the craft turns and is gone over the horizon, no fireworks
+            this.boats.splice(i, 1);
+            continue;
+          }
+          if (b.kind !== 'landing') { b.state = 'cruise'; b.t = 0; continue; }
+          b.state = 'beach'; b.t = 0; b.speed = 0;
+          this.addText(b.x, b.y - 70, `${b.manifest} HOSTILES ASHORE`, '#ffb9a4', 13);
+          if (this.inWater(b.x + Math.cos(b.ang) * 60, b.y + Math.sin(b.ang) * 60) === false) {
+            /* the ramp already points at sand */
+          }
+        }
+      } else if (b.state === 'beach') {
+        b.speed = Math.max(0, b.speed - 120 * dt);
+        b.ramp = Math.min(1, b.ramp + dt * 0.9);
+        // settle against the sand
+        b.x += Math.cos(b.ang) * 22 * dt; b.y += Math.sin(b.ang) * 22 * dt;
+        if (b.ramp >= 1) { b.state = 'unload'; b.t = 0; }
+      } else if (b.state === 'unload') {
+        if (b.troops > 0 && b.t > 0.42) {
+          b.t = 0;
+          b.troops--;
+          b.landed++;
+          const a = b.ang;
+          const sx = b.x + Math.cos(a) * (spec(b).len * 0.5 + 26);
+          const sy = b.y + Math.sin(a) * (spec(b).len * 0.5 + 26);
+          const squadId = -820000 - b.id;
+          this.spawnEnemy(b.troops % 3 === 0 ? 'gunner' : 'grunt', squadId, b.landed,
+            sx + rand(-14, 14), sy + rand(-14, 14));
+          const fresh = this.enemies[this.enemies.length - 1];
+          if (fresh) { fresh.alert = true; fresh.homeX = sx; fresh.homeY = sy; }
+          this.addParticle(sx, sy, rand(-20, 20), rand(-20, 20), 0.4, 3, '#cfd8d2', false);
+          if (b.landed % 2 === 0) sfx.click();
+        }
+        if (b.troops <= 0 && b.t > 1.2) { b.state = 'retreat'; b.t = 0; b.tx = b.homeX; b.ty = b.homeY; }
+      } else {
+        // ---- patrol / chase ----
+        const pdx = this.px - b.x, pdy = this.py - b.y;
+        const pd = Math.hypot(pdx, pdy) || 1;
+        const huntable = this.drivingBoat !== null || (!this.inWater(this.px, this.py) && pd < 900);
+        if (huntable && pd < 1500 && b.faction === 'enemy') {
+          if (b.state !== 'chase') { b.state = 'chase'; b.t = 0; this.addText(b.x, b.y - 60, 'PATROL BOAT / INTERCEPT', '#ffb9a4', 13); }
+        } else if (b.state === 'chase') b.state = 'cruise';
+        if (b.state === 'chase') {
+          b.ang = lerpAngle(b.ang, Math.atan2(pdy, pdx), 1 - Math.exp(-1.6 * dt));
+          b.speed = lerp(b.speed, BOAT[b.kind].speed * 1.25, 1 - Math.exp(-1.5 * dt));
+          b.fireCd = (b.fireCd ?? 0) - dt;
+          if (pd < 620 && b.fireCd <= 0) {
+            b.fireCd = rand(0.7, 1.2);
+            const a = Math.atan2(pdy, pdx) + rand(-0.06, 0.06);
+            this.bullets.push({
+              x: b.x + Math.cos(a) * 70, y: b.y + Math.sin(a) * 70, px: b.x, py: b.y,
+              vx: Math.cos(a) * 900, vy: Math.sin(a) * 900,
+              dmg: 9, life: 2, friendly: false, color: '#ffb27a', r: 3,
+            });
+            sfx.shoot('smg');
+          }
+        } else {
+          const dx = b.tx - b.x, dy = b.ty - b.y, d = Math.hypot(dx, dy) || 1;
+          if (d < 120) {
+            // pick the next stretch of open water
+            const be = LANDING_BEACHES[(b.id + Math.floor(b.t)) % LANDING_BEACHES.length];
+            b.tx = clamp(be.ax + rand(-700, 700), SEA.x + 120, ARENA_W - 160);
+            b.ty = clamp(be.ay + rand(-900, 900), 120, ARENA_H - 120);
+            if (!this.inWater(b.tx, b.ty)) { b.tx = be.ax; b.ty = be.ay; }
+          }
+          b.ang = lerpAngle(b.ang, Math.atan2(dy, dx), 1 - Math.exp(-1.2 * dt));
+          b.speed = lerp(b.speed, BOAT[b.kind].speed * 0.7, 1 - Math.exp(-1.2 * dt));
+        }
+        const step = b.speed * dt;
+        const nx = b.x + Math.cos(b.ang) * step, ny = b.y + Math.sin(b.ang) * step;
+        if (this.inWater(nx, ny)) { b.x = nx; b.y = ny; }
+        else { b.speed *= 0.4; b.ang += 1.4 * dt; }      // never beach a patrol boat
+      }
+
+      // ---- reefs: a hull that runs aground is a hull that burns ----
+      this.checkReefs(b, false);
+
+      // ---- patrol hulls never leave the sea (a landing craft is meant to hit the sand) ----
+      if (b.kind !== 'landing' && b.state !== 'beach' && b.state !== 'unload' && !this.inWater(b.x, b.y)) {
+        const back = Math.atan2(b.homeY - b.y, b.homeX - b.x);
+        b.ang = lerpAngle(b.ang, back, 1 - Math.exp(-3 * dt));
+        b.speed = Math.max(b.speed, 60);
+      }
+    }
+
+    // ---- boat against boat: ramming is fatal for both ----
+    for (let i = 0; i < this.boats.length; i++) {
+      const a = this.boats[i];
+      if (a.state === 'sunk') continue;
+      for (let k = i + 1; k < this.boats.length; k++) {
+        const b = this.boats[k];
+        if (b.state === 'sunk') continue;
+        // Only an operative at the wheel sinks a hull by ramming it: Hydra's own
+        // landing waves run in column and touch each other all the time.
+        if (a !== this.drivingBoat && b !== this.drivingBoat) continue;
+        const settled = (x: Boat) => x.state === 'beach' || x.state === 'unload' || x.t < 3;
+        if (settled(a) || settled(b)) continue;
+        const reach = (BOAT[a.kind].len + BOAT[b.kind].len) * 0.34;
+        if (Math.hypot(a.x - b.x, a.y - b.y) > reach) continue;
+        const closing = Math.abs(a.speed) + Math.abs(b.speed);
+        if (closing < 120) continue;
+        this.sinkBoat(a); this.sinkBoat(b);
+      }
+    }
+  }
+
+  /** Reef strike: the hull is holed, and the operative aboard dies with it. */
+  private checkReefs(b: Boat, driving: boolean) {
+    for (const r of this.reefs) {
+      if (Math.hypot(b.x - r.x, b.y - r.y) > r.r + 26) continue;
+      if (!r.seen) { r.seen = true; this.addText(r.x, r.y - 60, 'REEF', '#ffd9a0', 12); }
+      if (driving) {
+        this.sinkBoat(b);
+        this.damagePlayer(9999, b.x, b.y);
+        this.setBanner('HULL BREACHED ON A REEF', 'THE BOAT IS GONE — AND SO ARE YOU');
+        return;
+      }
+      if (b.kind === 'patrol' || b.state === 'chase') { this.sinkBoat(b); return; }
+      b.ang += Math.PI * 0.6; b.speed *= 0.2;
+    }
+  }
+
+  /** Blow a hull apart, with a splash of burning fuel. */
+  private sinkBoat(b: Boat) {
+    if (b.state === 'sunk') return;
+    b.state = 'sunk'; b.t = 0; b.speed = 0;
+    this.explode(b.x, b.y, 150, 0, false);
+    this.sparks(b.x, b.y, '#ffb066', 22);
+    this.addLight(b.x, b.y, 420, '255,170,90', 0.6);
+    if (b === this.drivingBoat) {
+      this.drivingBoat = null;
+      // thrown clear, but the water is not survivable for long
+      this.hp = Math.max(0, this.hp - 40);
+      this.damagePlayer(9999, b.x, b.y);
+      this.iFrames = 0;
+    }
+  }
+
+  /** Throttle / helm for a boat the operative is driving. */
+  private updateDrivenBoat(dt: number) {
+    const b = this.drivingBoat;
+    if (!b || b.state === 'sunk') { this.drivingBoat = null; return; }
+    const k = this.keys;
+    const joystick = this.moveVector();
+    const fwd = this.isTouch ? -joystick.y : (k['w'] || k['arrowup'] ? 1 : 0) - (k['s'] || k['arrowdown'] ? 1 : 0);
+    const steer = this.isTouch ? joystick.x : (k['d'] || k['arrowright'] ? 1 : 0) - (k['a'] || k['arrowleft'] ? 1 : 0);
+    const top = BOAT[b.kind].speed * 1.9;
+    b.speed = lerp(b.speed, fwd > 0 ? top : fwd < 0 ? -top * 0.35 : 0, 1 - Math.pow(0.1, dt));
+    const grip = clamp(Math.abs(b.speed) / 120, 0, 1);
+    b.ang += steer * 1.15 * grip * dt * Math.sign(b.speed || 1);
+    const nx = b.x + Math.cos(b.ang) * b.speed * dt;
+    const ny = b.y + Math.sin(b.ang) * b.speed * dt;
+    if (this.inWater(nx, ny)) { b.x = nx; b.y = ny; }
+    else {
+      // ground: kill the way on and swing the bow back to open water
+      b.speed *= -0.25;
+      b.ang += 1.1 * dt;
+      this.addText(b.x, b.y - 56, 'SHALLOW — BACK OFF', '#ffd9a0', 12);
+    }
+    this.px = b.x; this.py = b.y;
+    this.pvx = 0; this.pvy = 0;
+    if (b.wake > 0.25 && Math.random() < 0.6)
+      this.addParticle(b.x - Math.cos(b.ang) * 70 + rand(-16, 16), b.y - Math.sin(b.ang) * 70 + rand(-16, 16),
+        rand(-18, 18), rand(-18, 18), 0.6, rand(3, 7), '#cfeff2', true);
+    this.checkReefs(b, true);
+    for (const o of this.boats) {
+      if (o === b || o.state === 'sunk' || o.faction === 'player') continue;
+      const reach = (BOAT[b.kind].len + BOAT[o.kind].len) * 0.42;
+      if (Math.hypot(b.x - o.x, b.y - o.y) < reach && Math.abs(b.speed) > 210) {
+        this.sinkBoat(o);
+        this.sinkBoat(b);
+        this.setBanner('RAMMED A HYDRA HULL', 'THE BOAT IS GONE — AND SO ARE YOU');
+        return;
+      }
+    }
+  }
+
+  private enterBoat(b: Boat) {
+    this.drivingBoat = b;
+    b.faction = 'player';
+    b.crewed = true;
+    this.px = b.x; this.py = b.y;
+    this.pvx = 0; this.pvy = 0;
+    this.setBanner('BOAT SEIZED', 'W/S THROTTLE · A/D HELM · F DISEMBARK');
+    sfx.click();
+  }
+
+  private exitBoat() {
+    const b = this.drivingBoat;
+    if (!b) return;
+    if (Math.abs(b.speed) > 90) { this.addText(b.x, b.y - 56, 'CUT THE THROTTLE', '#ffcf7a', 13); return; }
+    // step off onto the nearest dry ground
+    for (const a of [0, 0.6, -0.6, 1.2, -1.2, Math.PI]) {
+      const x = b.x + Math.cos(b.ang + a) * 78, y = b.y + Math.sin(b.ang + a) * 78;
+      if (!this.inWater(x, y)) { this.px = x; this.py = y; this.drivingBoat = null; sfx.click(); return; }
+    }
+    this.addText(b.x, b.y - 56, 'NO LANDING HERE', '#ffcf7a', 13);
+  }
+
+  /** The island defence: everything floating and flying that Hydra can call in. */
+  private startIslandLanding() {
+    // Never let a stuck frame call the whole navy in twice.
+    if (this.boats.filter((b) => b.kind === 'landing').length > 36) return;
+    if (this.islandWaves >= 6) return;
+    this.islandLanded = true;
+    this.islandWaves++;
+    const scale = Math.min(4, this.islandWaves);
+    const runs = 3 + scale * 2;
+    for (let i = 0; i < runs; i++) {
+      const be = LANDING_BEACHES[(this.islandWaves + i) % LANDING_BEACHES.length];
+      const spread = (i - runs / 2) * 300;
+      const ax = clamp(be.ax + spread * 0.55, SEA.x + 140, ARENA_W - 180);
+      const ay = clamp(be.ay + spread * 0.42, 140, ARENA_H - 140);
+      const boat = makeBoat('landing', 'enemy', ax, ay,
+        Math.atan2(be.by - ay, be.bx - ax),
+        { tx: be.bx + rand(-120, 120), ty: be.by + rand(-120, 120), troops: 8 + scale * 2, manifest: 8 + scale * 2,
+          homeX: ax, homeY: ay, state: 'transit' });
+      this.boats.push(boat);
+    }
+    for (let i = 0; i < 2 + scale; i++) {
+      const be = LANDING_BEACHES[(this.islandWaves + i + 1) % LANDING_BEACHES.length];
+      this.helis.push({
+        x: be.bx + rand(-260, 260), y: be.by + rand(-260, 260), tx: 14800 + rand(-300, 300), ty: 4075 + rand(-260, 260),
+        ang: 0, rotor: 0, state: 'ingress',
+        hp: 460 + this.sector * 30, maxHp: 460 + this.sector * 30,
+        cool: rand(0.5, 2), rocketCd: rand(2, 5), t: 0,
+        orbitA: rand(0, TAU), medevac: false, carrying: 0, announced: false, bank: 0,
+      });
+    }
+    sfx.siren();
+    this.setBanner(
+      this.islandWaves === 1 ? 'THE CAGE — LANDING ALARM' : `THE CAGE — WAVE ${this.islandWaves}`,
+      `${runs} LANDING CRAFT · ${1 + scale} GUNSHIPS · EVERY COP ON THE ISLAND`,
+    );
+    // and the garrison on the island itself turns out
+    for (const e of this.enemies) {
+      if (e.hp <= 0) continue;
+      if (Math.hypot(e.x - 15180, e.y - 4100) < 1700) e.alert = true;
+    }
+  }
+
   /** Where the column should steer next, following roads around the city blocks. */
   private teamWaypoint(team: { x: number; y: number }, goal: Point): Point {
     let st = this.teamNav.get(team);
@@ -3466,13 +3825,19 @@ export class Game {
     return this.px > PRISON_DOOR.x - 60 && dist < 420 && this.hasLine(e.x, e.y, this.px, this.py);
   }
 
+  /** Open water: anything off the bridge, the beaches and the island plateau. */
+  private inWater(x: number, y: number) {
+    if (x < SEA.x - 30) return false;          // the legacy mainland is dry everywhere
+    return !this.onDryGround(x, y);
+  }
+
   /** Walkable ground: keeps beat nodes off the open sea and off the beach waterline. */
-  private onDryGround(x: number, y: number) {
+  private onDryGround(x: number, y: number, margin = 0) {
     if (x < SEA.x) return true;
     if (x > COAST.x && x < COAST.x + COAST.w && y > COAST.y && y < COAST.y + COAST.h) return true;
     if (x > BRIDGEHEAD.x && x < BRIDGEHEAD.x + BRIDGEHEAD.w && y > BRIDGEHEAD.y && y < BRIDGEHEAD.y + BRIDGEHEAD.h) return true;
     // keep a parapet's width clear so a beat never clips the railing
-    if (x > BRIDGE.x - 8 && x < BRIDGE.x + BRIDGE.w + 8 && y > BRIDGE.y + 44 && y < BRIDGE.y + BRIDGE.h - 44) return true;
+    if (x > BRIDGE.x - 8 && x < BRIDGE.x + BRIDGE.w + 8 && y > BRIDGE.y + margin && y < BRIDGE.y + BRIDGE.h - margin) return true;
     const cx = LAND.x + LAND.w / 2, cy = LAND.y + LAND.h / 2;
     const ex = (x - cx) / (LAND.w / 2), ey = (y - cy) / (LAND.h / 2);
     return ex * ex + ey * ey <= 0.93;
@@ -4039,7 +4404,7 @@ export class Game {
     }
     t.speed += clamp(targetSpeed - t.speed, -dt * 290, dt * 95);
     const next = { x: t.x + Math.cos(t.ang) * t.speed * dt, y: t.y + Math.sin(t.ang) * t.speed * dt };
-    let blocked = !this.routes.line(t, next);
+    let blocked = !this.routes.line(t, next) || this.inWater(next.x, next.y);
     if (!blocked) for (const off of [-48, 0, 48]) {
       const center = { x: next.x + Math.cos(t.ang) * off, y: next.y + Math.sin(t.ang) * off };
       const original = { ...center }; this.collide(center, 33);
@@ -6157,11 +6522,21 @@ export class Game {
     this.addLight(e.x, e.y, 900, '255,220,140', 1.2);
     this.explode(e.x, e.y, 420, 90, false);
     if (this.sector >= SECTORS.length) {
-      this.status = 'victory';
-      this.timeScale = 0.2;
-      sfx.gameover();
-      this.pushHud();
-      this.onVictory(Math.floor(this.score), this.wave);
+      // Five sectors down — and the last level is not a parade ground. HYDRA's command
+      // staff is dead, but the man who ordered the arrest is behind the walls of THE CAGE.
+      this.prisonFinale = true;
+      this.destination = 'THE CAGE';
+      this.transitT = this.transitDuration;
+      this.status = 'transit';
+      this.piloting = true;
+      this.firing = false;
+      this.playerHeli = {
+        x: e.x, y: e.y, vx: 0, vy: -700, ang: -Math.PI / 2,
+        rotor: 0, bank: 0.28, hp: 900, maxHp: 900, fuel: 100, fireCd: 0, rocketCd: 0, landed: false,
+      };
+      this.setBanner('LEVEL 6 · THE CAGE', 'FIVE SECTORS DOWN — ONE PRISON LEFT');
+      this.onTransit(6);
+      sfx.rotor();
       return;
     }
 
@@ -6177,6 +6552,28 @@ export class Game {
     };
     this.onTransit(this.sector + 1);
     sfx.rotor();
+  }
+
+  /** LEVEL 6: the operative is set down at the causeway and has to take THE CAGE. */
+  private startPrisonLevel() {
+    this.status = 'playing';
+    this.piloting = false;
+    this.playerHeli = null;
+    this.px = 14180; this.py = 4075;
+    this.pvx = 0; this.pvy = 0;
+    this.hp = this.maxHp; this.iFrames = 3;
+    this.prisonReentry = 0;
+    this.destination = '';
+    this.intermission = 1.1;
+    this.objective = 'LEVEL 6 · THE CAGE — FORCE THE SALLY PORT';
+    this.setBanner('LEVEL 6 · THE CAGE', 'THE LAST LEVEL IS BEHIND THESE WALLS');
+    this.tellStory({
+      id: 'finale-cage', channel: 'S.H.I.E.L.D. / FINAL DIRECTIVE',
+      title: 'The last door in the campaign is a prison door.',
+      text: 'Five command bunkers are ash. The officer who signed your arrest is behind the walls of THE CAGE, and every boat, gunship and custody officer on that island has been told you are coming. Take the sally port, find the master release and walk out of the last level alive.',
+    }, 16);
+    sfx.siren();
+    this.startIslandLanding();
   }
 
   private enterNextSector() {
@@ -6491,6 +6888,13 @@ export class Game {
       }
       return;
     }
+    if (this.drivingBoat) {
+      const b = this.drivingBoat;
+      b.hp = Math.max(0, b.hp - dmg);
+      this.sparks(b.x, b.y, '#9fe6ef', 6);
+      if (b.hp <= 0) { this.sinkBoat(b); }
+      return;
+    }
     if (this.drivingVan) {
       const v = this.drivingVan; v.hp = Math.max(0, v.hp - dmg);
       if (v.hp <= 0) {
@@ -6713,6 +7117,7 @@ export class Game {
     if (this.playerHeli) this.drawPlayerHeli(ctx, camX, camY);
     this.drawTanks(ctx, camX, camY);
     this.drawVans(ctx, camX, camY);
+    this.drawBoats(ctx, camX, camY);
     this.drawLasers(ctx, camX, camY);
     this.drawAllies(ctx);
     this.drawPlane(ctx);
@@ -8111,6 +8516,37 @@ export class Game {
           ctx.fill();
         }
       }
+    }
+  }
+
+  /** The sea traffic: landing craft, patrols, the skiffs you can take and the reefs. */
+  private drawBoats(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    // reefs first, so a hull drawn later sits on top of the rock
+    for (const r of this.reefs) {
+      if (r.x < camX - 200 || r.x > camX + this.w + 200 || r.y < camY - 200 || r.y > camY + this.h + 200) continue;
+      ctx.save();
+      ctx.fillStyle = 'rgba(120,168,160,0.22)';
+      ctx.beginPath(); ctx.ellipse(r.x, r.y + 8, r.r * 1.5, r.r * 0.8, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#2b3a3c';
+      ctx.beginPath();
+      ctx.moveTo(r.x - r.r, r.y + r.r * 0.3);
+      ctx.lineTo(r.x - r.r * 0.5, r.y - r.r * 0.75);
+      ctx.lineTo(r.x + r.r * 0.15, r.y - r.r * 0.35);
+      ctx.lineTo(r.x + r.r * 0.55, r.y - r.r * 0.95);
+      ctx.lineTo(r.x + r.r, r.y + r.r * 0.35);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(206,232,228,0.5)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(r.x, r.y + 10, r.r * 1.15, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke();
+      ctx.restore();
+    }
+    for (const b of this.boats) {
+      if (b.x < camX - 320 || b.x > camX + this.w + 320 || b.y < camY - 320 || b.y > camY + this.h + 320) continue;
+      const near = b === this.drivingBoat ? false
+        : Math.hypot(b.x - this.px, b.y - this.py) < 160 && !this.piloting && !this.flyingPlane && !this.drivingVan && !this.playerTank;
+      const label = near ? (b.faction === 'enemy' ? '[F] SEIZE BOAT' : '[F] BOARD BOAT') : '';
+      drawBoat(ctx, b, this.simulationTime, label);
     }
   }
 

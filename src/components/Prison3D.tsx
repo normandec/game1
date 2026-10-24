@@ -247,6 +247,35 @@ export default function Prison3D({ mode, onExit }: Props) {
     }
     const lampSpots = sim.props.filter((p) => p.kind === 'lamp').map((p) => new THREE.Vector3(p.x, p.y - 0.4, p.z));
 
+    /* ---------------- loose junk on every floor: paper, cups, cans, casings ---------------- */
+    const debrisGeo = new THREE.BoxGeometry(1, 1, 1);
+    const debrisMat = new THREE.MeshStandardMaterial({ roughness: 0.92, metalness: 0.05 });
+    const debrisMesh = new THREE.InstancedMesh(debrisGeo, debrisMat, sim.debris.length);
+    debrisMesh.frustumCulled = false;
+    const debrisColor = [
+      0xd8d2c0, // paper
+      0x9fb3a8, // plastic cup
+      0x8f9aa2, // can
+      0xc9a227, // brass casing
+      0x7a5a3a, // splinter
+      0xa9cfd6, // glass shard
+    ];
+    const debrisTint = new THREE.Color();
+    sim.debris.forEach((d, i) => {
+      debrisTint.setHex(debrisColor[d.kind] ?? 0xcccccc);
+      debrisMesh.setColorAt(i, debrisTint);
+    });
+    if (debrisMesh.instanceColor) debrisMesh.instanceColor.needsUpdate = true;
+    scene.add(debrisMesh);
+    const debrisQ = new THREE.Quaternion();
+    const debrisE = new THREE.Euler();
+    const debrisP = new THREE.Vector3();
+    const debrisS = new THREE.Vector3();
+    const hideM = new THREE.Matrix4().makeScale(0, 0, 0);
+    const debrisPose = new Float32Array(sim.debris.length * 4).fill(Number.NaN);
+    const debrisShown = new Uint8Array(sim.debris.length);
+    let debrisDirty = true;
+
     /* ---------------- levers: physical handles, pulled with the mouse ---------------- */
     const leverHandles: { id: string; handle: THREE.Object3D; lamp: THREE.Mesh }[] = [];
     const matLeverBase = new THREE.MeshStandardMaterial({ color: 0x39424a, roughness: 0.55, metalness: 0.7 });
@@ -572,6 +601,26 @@ export default function Prison3D({ mode, onExit }: Props) {
       for (const part of [iBody.torso, iBody.hips, iBody.head, iBody.armL, iBody.armR, iBody.legL, iBody.legR]) {
         part.instanceMatrix.needsUpdate = true;
       }
+
+      // loose junk: only pieces that moved are re-posed, and only near ones are drawn
+      sim.debris.forEach((d, i) => {
+        const key = i * 4;
+        const near = Math.abs(d.x - sim.px) <= 46 && Math.abs(d.z - sim.pz) <= 46;
+        if (debrisPose[key] === d.x && debrisPose[key + 1] === d.z && debrisPose[key + 2] === d.y
+          && debrisPose[key + 3] === d.rot && debrisShown[i] === (near ? 1 : 0)) return;
+        debrisPose[key] = d.x; debrisPose[key + 1] = d.z; debrisPose[key + 2] = d.y; debrisPose[key + 3] = d.rot;
+        debrisShown[i] = near ? 1 : 0;
+        if (!near) { debrisMesh.setMatrixAt(i, hideM); return; }
+        debrisE.set(d.tilt, d.rot, d.tilt * 0.6);
+        debrisQ.setFromEuler(debrisE);
+        const sc = d.size;
+        debrisS.set(sc, d.kind === 3 ? sc * 0.45 : d.kind === 0 ? sc * 0.12 : sc * 0.6, sc);
+        debrisP.set(d.x, d.y + sc * 0.5, d.z);
+        m4.compose(debrisP, debrisQ, debrisS);
+        debrisMesh.setMatrixAt(i, m4);
+        debrisDirty = true;
+      });
+      if (debrisDirty) { debrisMesh.instanceMatrix.needsUpdate = true; debrisDirty = false; }
 
       // locks vanish when their cell opens; bars stay but the doorway is passable
       sim.cells.forEach((c) => {

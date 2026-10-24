@@ -92,6 +92,20 @@ export interface PrisonLever {
 
 export interface PrisonPickup { x: number; z: number; y: number; kind: 'ammo' | 'medkit' | 'armor' | 'keys'; taken: boolean }
 
+/**
+ * Loose junk with its own physics: paper, cups, cans, shell casings and splinters.
+ * Kicked by boots, thrown by gunfire, and settling on the floor.
+ */
+export interface PrisonDebris {
+  x: number; z: number; y: number;
+  vx: number; vz: number; vy: number;
+  rot: number; tilt: number; spin: number;
+  size: number;
+  /** 0 paper · 1 cup · 2 can · 3 casing · 4 splinter · 5 shard */
+  kind: number;
+  rest: boolean;
+}
+
 export interface PrisonEvent { kind: 'shot' | 'hit' | 'break' | 'open-all' | 'sally' | 'shout' | 'down' | 'pickup' | 'exit' | 'alarm' | 'armory'; x: number; z: number; y: number }
 
 export interface PrisonStats { freed: number; guardsDown: number; inmatesDown: number; shots: number; hits: number; looted: number }
@@ -99,6 +113,7 @@ export interface PrisonStats { freed: number; guardsDown: number; inmatesDown: n
 const TAU = Math.PI * 2;
 const rnd = (a: number, b: number) => a + Math.random() * (b - a);
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
+const lerpTo = (v: number, target: number, k: number) => v + (target - v) * clamp(k, 0, 1);
 
 /** Wing origins: four parallel galleried cell houses. */
 export const wingZ = (wing: number) => (wing - 1.5) * 30;
@@ -116,6 +131,8 @@ export class PrisonSim {
   /** 0..1 how loud the sirens are right now (rises when the alarm is tripped). */
   siren = 0;
   props: PrisonProp[] = [];
+  /** Loose, physical junk covering every floor in the prison. */
+  debris: PrisonDebris[] = [];
   pickups: PrisonPickup[] = [];
   events: PrisonEvent[] = [];
 
@@ -512,6 +529,72 @@ export class PrisonSim {
     this.props.push({ x: 80, z: 84, y: 0, w: 4, d: 1.0, h: 1.8, kind: 'locker', solid: true });
     this.props.push({ x: -78, z: -80, y: 0, w: 3, d: 0.9, h: 1.2, kind: 'desk', solid: true });
     this.props.push({ x: -78, z: -76, y: 0, w: 0.6, d: 0.6, h: 1.1, kind: 'medkit', solid: false });
+
+    /* ---------------- clutter: the prison lives in, it is not a showroom ---------------- */
+    // Chairs, trays, buckets, mops and cable coils along every gallery and room.
+    for (const wing of [1, 2, 3, 4]) {
+      const z = wingZ(wing);
+      for (let k = -6; k <= 6; k++) {
+        const x = k * 11.4 + rnd(-1.6, 1.6);
+        const near = Math.abs(x) < 6 ? 1.9 : 0;
+        this.props.push({ x, z: z + (k % 2 ? 1 : -1) * (CORRIDOR_HALF + 0.7), y: 0, w: 0.62, d: 0.62, h: 0.92, kind: 'chair', solid: false });
+        if (k % 2 === 0) this.props.push({ x: x + 2.1, z: z + near, y: 0, w: 0.5, d: 0.5, h: 0.4, kind: 'pot', solid: false });
+        if (k % 3 === 0) this.props.push({ x: x - 2.4, z: z - near, y: 0, w: 0.7, d: 0.7, h: 0.5, kind: 'crate', solid: false });
+        if (k % 4 === 0) this.props.push({ x: x + 3.4, z: z - (CORRIDOR_HALF + 0.6), y: 0, w: 1.1, d: 0.6, h: 0.34, kind: 'laundry', solid: false });
+      }
+      // pipe runs and cable trays overhead, floor drains at the gallery ends
+      for (let k = -9; k <= 9; k++) {
+        this.props.push({ x: k * 8.2, z: z + CORRIDOR_HALF + 0.12, y: 2.9, w: 0.16, d: 0.16, h: 0.16, kind: 'pipe', solid: false });
+        if (k % 2 === 0) this.props.push({ x: k * 8.2, z: z - CORRIDOR_HALF - 0.12, y: 3.1, w: 0.12, d: 0.12, h: 0.12, kind: 'pipe', solid: false });
+      }
+    }
+    for (let i = 0; i < 42; i++) {
+      const a = rnd(0, TAU), r = rnd(16, 92);
+      this.props.push({ x: Math.cos(a) * r, z: Math.sin(a) * r, y: 0, w: 0.4, d: 0.4, h: 0.34, kind: 'pot', solid: false });
+    }
+    for (const spot of [[-72, -92], [72, -92], [95, 40], [95, -10], [-95, 30], [-95, -10]]) {
+      for (let i = 0; i < 6; i++) {
+        this.props.push({
+          x: spot[0] + rnd(-9, 9), z: spot[1] + rnd(-9, 9), y: 0,
+          w: rnd(0.5, 1.1), d: rnd(0.5, 1.1), h: rnd(0.3, 0.9),
+          kind: (['crate', 'chair', 'tray', 'shelf', 'pot'] as const)[i % 5], solid: false,
+        });
+      }
+    }
+
+    /* ---------------- loose junk with real physics ---------------- */
+    this.debris = [];
+    const drop = (x: number, z: number, y: number, kind: number, size: number) => {
+      this.debris.push({
+        x, z, y, vx: 0, vz: 0, vy: 0,
+        rot: rnd(0, TAU), tilt: rnd(-0.2, 0.2), spin: 0,
+        size, kind, rest: true,
+      });
+    };
+    // six pieces per cell, scattered on the floor and under the bunk
+    for (const c of this.cells) {
+      const n = 8 + (c.index % 4);
+      for (let i = 0; i < n; i++) {
+        const kind = [0, 0, 1, 3, 2, 4][i % 6];
+        drop(c.x + rnd(-CELL_W * 0.42, CELL_W * 0.42), c.z + rnd(-CELL_D * 0.42, CELL_D * 0.42),
+          0.01 + (kind === 3 ? 0.005 : 0), kind, kind === 0 ? rnd(0.1, 0.18) : rnd(0.05, 0.11));
+      }
+    }
+    // galleries: papers and casings blown down the corridor
+    for (const wing of [1, 2, 3, 4]) {
+      const z = wingZ(wing);
+      for (let i = 0; i < 420; i++) {
+        const kind = i % 5 === 0 ? 1 : i % 7 === 0 ? 2 : i % 3 === 0 ? 3 : 0;
+        drop(rnd(-72, 72), z + rnd(-CORRIDOR_HALF + 0.2, CORRIDOR_HALF - 0.2), 0.01, kind, rnd(0.05, 0.16));
+      }
+    }
+    // rooms, the yard and the workshop floor
+    for (const [rx, rz] of [[-56, 84], [56, 84], [-72, -92], [72, -92], [95, 40], [95, -10], [-95, 30], [-95, -10], [0, 96], [0, -96]]) {
+      for (let i = 0; i < 110; i++) {
+        const kind = i % 9 === 0 ? 5 : i % 4 === 0 ? 2 : i % 3 === 0 ? 3 : 0;
+        drop(rx + rnd(-16, 16), rz + rnd(-16, 16), 0.01, kind, rnd(0.05, 0.15));
+      }
+    }
   }
 
   private addPickups() {
@@ -768,6 +851,8 @@ export class PrisonSim {
       const c = this.cells[target.ref];
       if (c) this.damageLock(c, 34);
     }
+    // the round kicks dust and junk off whatever it hits
+    this.throwDebris(out.x, out.z, 2.6, 3.4);
     this.events.push({ kind: 'shot', x: this.px, z: this.pz, y: this.py });
     return out;
   }
@@ -784,6 +869,7 @@ export class PrisonSim {
     cell.opened = true; cell.lock = 'broken'; cell.lockHp = 0; cell.openedAt = this.time;
     const n = this.inmates[cell.occupant];
     if (n && n.state === 'cell') { n.state = 'free'; this.stats.freed++; }
+    this.throwDebris(cell.x, cell.z + cell.face * CELL_D / 2, 4.5, 6);
     this.events.push({ kind: 'break', x: cell.x, z: cell.z + cell.face * CELL_D / 2, y: 1.2 });
   }
 
@@ -830,12 +916,16 @@ export class PrisonSim {
     // ---- player movement (yaw relative) ----
     const speed = (input.sprint ? 5.4 : 3.3) * (this.lightsOut ? 0.9 : 1);
     const len = Math.hypot(input.fwd, input.strafe);
+    let kickX = 0, kickZ = 0;
     if (len > 0.01) {
       const f = input.fwd / Math.max(1, len), s = input.strafe / Math.max(1, len);
       const dx = (Math.cos(this.yaw) * f - Math.sin(this.yaw) * s) * speed * dt;
       const dz = (Math.sin(this.yaw) * f + Math.cos(this.yaw) * s) * speed * dt;
+      kickX = dx / Math.max(dt, 0.001) * 0.6;
+      kickZ = dz / Math.max(dt, 0.001) * 0.6;
       this.move(dx, dz);
     }
+    this.updateDebris(dt, kickX, kickZ);
 
     // ---- guards ----
     for (const g of this.guards) {
@@ -1002,6 +1092,66 @@ export class PrisonSim {
    * the 0.22 m cell bars — guards could "see" straight through a locked cell and shoot
    * the operative on his bunk. A slab test cannot miss, however thin the wall.
    */
+  /**
+   * Loose junk physics. Nothing here is heavy: it is kicked, it skids, it settles.
+   * Only the pieces near the operative are simulated in full, so a thousand items on
+   * the floor cost nothing until you walk through them.
+   */
+  private updateDebris(dt: number, kickX: number, kickZ: number) {
+    const far = 60;
+    for (const d of this.debris) {
+      const dx = d.x - this.px, dz = d.z - this.pz;
+      const dist2 = dx * dx + dz * dz;
+      if (dist2 > far * far) { d.rest = true; continue; }
+      // a boot through a pile of paper
+      if (dist2 < 1.35 * 1.35) {
+        const push = Math.hypot(kickX, kickZ);
+        if (push > 0.35) {
+          const a = Math.atan2(dz, dx) + rnd(-0.5, 0.5);
+          d.vx += Math.cos(a) * push * rnd(0.5, 1.1) + kickX * 0.5;
+          d.vz += Math.sin(a) * push * rnd(0.5, 1.1) + kickZ * 0.5;
+          d.vy = Math.max(d.vy, rnd(0.6, 2.4));
+          d.spin = rnd(-9, 9);
+          d.rest = false;
+        }
+      }
+      if (d.rest) continue;
+      // gravity + floor
+      d.vy -= 16 * dt;
+      d.y += d.vy * dt;
+      if (d.y <= 0.02) {
+        d.y = 0.02;
+        if (Math.abs(d.vy) > 0.8) { d.vy = -d.vy * 0.32; d.spin *= 0.6; }
+        else { d.vy = 0; d.tilt = lerpTo(d.tilt, 0, dt * 6); }
+        d.vx *= 1 - Math.min(0.9, dt * 5.5);
+        d.vz *= 1 - Math.min(0.9, dt * 5.5);
+      }
+      // slide, bouncing off walls instead of passing through them
+      const nx = d.x + d.vx * dt, nz = d.z + d.vz * dt;
+      if (!this.staticBlocked(nx, d.z, 0.05)) d.x = nx; else d.vx *= -0.45;
+      if (!this.staticBlocked(d.x, nz, 0.05)) d.z = nz; else d.vz *= -0.45;
+      d.rot += d.spin * dt;
+      d.tilt = lerpTo(d.tilt, d.spin * 0.02, dt * 3);
+      if (Math.abs(d.vx) + Math.abs(d.vz) < 0.12 && d.y <= 0.03 && Math.abs(d.vy) < 0.2) {
+        d.vx = 0; d.vz = 0; d.vy = 0; d.spin = 0; d.rest = true;
+      }
+    }
+  }
+
+  /** Shove every loose item away from a point (a gunshot, a slammed door, a breach). */
+  throwDebris(x: number, z: number, radius: number, power: number) {
+    for (const d of this.debris) {
+      const dx = d.x - x, dz = d.z - z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > radius || dist < 0.001) continue;
+      const k = (1 - dist / radius) * power;
+      d.vx += (dx / dist) * k; d.vz += (dz / dist) * k;
+      d.vy = Math.max(d.vy, k * 0.45);
+      d.spin = rnd(-11, 11);
+      d.rest = false;
+    }
+  }
+
   private segmentHitsWall(x0: number, z0: number, x1: number, z1: number) {
     const dx = x1 - x0, dz = z1 - z0;
     for (const w of this.walls) {
