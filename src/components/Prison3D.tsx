@@ -881,6 +881,59 @@ export default function Prison3D({ mode, onExit }: Props) {
     unitCyl.dispose();
     void built;
 
+    /* ---------------- contact shadows ----------------
+     * Nothing casts a real shadow (twenty shadow maps would cost more than the whole
+     * scene), so each floor-standing prop gets a soft occlusion decal: it plants the
+     * bunks, lockers and crates on the concrete instead of letting them float.
+     */
+    const aoTex = (() => {
+      const { c, g } = cv(128);
+      const grd = g.createRadialGradient(64, 64, 4, 64, 64, 62);
+      grd.addColorStop(0, 'rgba(0,0,0,0.72)');
+      grd.addColorStop(0.55, 'rgba(0,0,0,0.4)');
+      grd.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = grd; g.fillRect(0, 0, 128, 128);
+      return tex(c, false);
+    })();
+    const aoMat = new THREE.MeshBasicMaterial({
+      map: aoTex, transparent: true, opacity: 0.85, depthWrite: false,
+      blending: THREE.NormalBlending, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    });
+    const floorProps = sim.props.filter((p) => p.y < 0.06 && p.kind !== 'lamp' && p.kind !== 'camera');
+    const aoGeo = new THREE.PlaneGeometry(1, 1);
+    const aoQuads = new THREE.InstancedMesh(aoGeo, aoMat, floorProps.length);
+    const aoQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+    const aoM = new THREE.Matrix4();
+    floorProps.forEach((p, i) => {
+      const sx = p.w * 1.22 + 0.3, sz = p.d * 1.22 + 0.3;
+      aoM.compose(new THREE.Vector3(p.x, 0.0195, p.z), aoQ, new THREE.Vector3(sx, sz, 1));
+      aoQuads.setMatrixAt(i, aoM);
+    });
+    aoQuads.renderOrder = 1;
+    scene.add(aoQuads);
+
+    /* ---------------- dust in the light ---------------- */
+    const MOTES = 900;
+    const motePos = new Float32Array(MOTES * 3);
+    const moteSeed = new Float32Array(MOTES * 3);
+    for (let i = 0; i < MOTES; i++) {
+      motePos[i * 3] = (Math.random() - 0.5) * 34;
+      motePos[i * 3 + 1] = Math.random() * 3.6 + 0.2;
+      motePos[i * 3 + 2] = (Math.random() - 0.5) * 34;
+      moteSeed[i * 3] = Math.random() * Math.PI * 2;
+      moteSeed[i * 3 + 1] = 0.02 + Math.random() * 0.06;
+      moteSeed[i * 3 + 2] = Math.random() * Math.PI * 2;
+    }
+    const moteGeo = new THREE.BufferGeometry();
+    moteGeo.setAttribute('position', new THREE.BufferAttribute(motePos, 3));
+    const moteMat = new THREE.PointsMaterial({
+      color: 0xd8e6ee, size: 0.026, sizeAttenuation: true, transparent: true,
+      opacity: 0.34, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const motePts = new THREE.Points(moteGeo, moteMat);
+    motePts.frustumCulled = false;
+    scene.add(motePts);
+
     /* ---------------- cell fronts: frames, bars, locks ---------------- */
     const m4 = new THREE.Matrix4();
     const q = new THREE.Quaternion();
@@ -1869,6 +1922,24 @@ export default function Prison3D({ mode, onExit }: Props) {
         tracers[i].life -= dt;
         if (tracers[i].life <= 0) { scene.remove(tracers[i].line); tracers[i].line.geometry.dispose(); tracers.splice(i, 1); }
       }
+
+      // dust drifts and wraps inside a box that follows the player
+      const mp = moteGeo.getAttribute('position') as THREE.BufferAttribute;
+      const arr = mp.array as Float32Array;
+      const t = sim.time;
+      for (let i = 0; i < MOTES; i++) {
+        const j = i * 3;
+        arr[j] += Math.sin(t * moteSeed[j + 1] + moteSeed[j]) * 0.0018;
+        arr[j + 1] += Math.cos(t * 0.35 + moteSeed[j + 2]) * 0.0011 - 0.0016;
+        arr[j + 2] += Math.cos(t * moteSeed[j + 1] * 1.3 + moteSeed[j + 2]) * 0.0018;
+        // wrap relative to the camera so the field is always around the player
+        const dx = arr[j] - camera.position.x;
+        const dz = arr[j + 2] - camera.position.z;
+        if (dx > 17) arr[j] -= 34; else if (dx < -17) arr[j] += 34;
+        if (dz > 17) arr[j + 2] -= 34; else if (dz < -17) arr[j + 2] += 34;
+        if (arr[j + 1] < 0.15) arr[j + 1] = 3.7;
+      }
+      mp.needsUpdate = true;
 
       renderer.render(scene, camera);
 
