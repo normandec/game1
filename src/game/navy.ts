@@ -66,9 +66,9 @@ export const LANDING_BEACHES = [
 
 /** Moored skiffs, so the operative always has a boat to take. */
 export const MOORINGS = [
-  { x: 12620, y: 4540, ang: -0.4 },
-  { x: 13320, y: 4360, ang: -0.2 },
-  { x: 15460, y: 6060, ang: -1.2 },
+  { x: 12566, y: 4560, ang: -0.4 },   // off the harbour pier — reachable from the quay
+  { x: 12662, y: 4306, ang: -0.2 },   // south of the causeway head
+  { x: 15180, y: 2506, ang: 1.4 },    // off the island's north beach
 ] as const;
 
 let seq = 1;

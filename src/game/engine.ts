@@ -3538,6 +3538,8 @@ export class Game {
         continue;
       }
       if (b === this.drivingBoat) continue;               // the operative is at the wheel
+      // A moored or abandoned skiff sits still until someone takes the helm.
+      if (b.faction === 'player' && b.kind === 'skiff') { b.speed = 0; continue; }
       const sp = spec(b);
 
       // ---- landing run ----
