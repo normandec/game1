@@ -808,14 +808,8 @@ export function generateWorld(sector = 1): WorldData {
     built++;
   }
 
-  // Terrain patches for visual variety
-  for (let i = 0; i < 70 + sectorPressure * 8; i++) {
-    const w = rnd(400, 1400), h = rnd(350, 1200);
-    zones.push({
-      x: rnd(100, GEN_W - 100 - w), y: rnd(100, GEN_H - 100 - h),
-      w, h, kind: sectorPressure === 2 ? 'sand' : sectorPressure === 3 ? 'concrete' : Math.random() < 0.55 ? 'sand' : 'grass',
-    });
-  }
+  // Terrain patches were removed on request: the random brown/green rectangles that
+  // carpeted the whole theatre read as unfinished ground plates rather than terrain.
 
   // Extra caches along the approach corridors
   for (let i = 0; i < 22; i++) {

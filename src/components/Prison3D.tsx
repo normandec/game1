@@ -71,17 +71,32 @@ export default function Prison3D({ mode, onExit }: Props) {
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     renderer.setSize(W, H);
-    renderer.setClearColor(0x05070a, 1);
+    renderer.setClearColor(0x070b0e, 1);
+    // Brighter, filmic response: the first visit used to be almost unreadable.
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.28;
     hostEl.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x05080b, 0.018);
+    scene.fog = new THREE.FogExp2(0x0a1216, 0.0105);
     const camera = new THREE.PerspectiveCamera(74, W / H, 0.08, 420);
 
-    scene.add(new THREE.HemisphereLight(0x4a6070, 0x080a0c, 0.75));
-    const moon = new THREE.DirectionalLight(0x8fb4d6, 0.5);
+    // Three light layers: a true ambient floor, a soft sky bounce, and cold moonlight
+    // through the skylights. Nobody walks into a pitch-black room any more.
+    scene.add(new THREE.AmbientLight(0x8fa4b4, 0.62));
+    scene.add(new THREE.HemisphereLight(0x6d8ea6, 0x1a2226, 0.85));
+    const moon = new THREE.DirectionalLight(0xa8c6e0, 0.85);
     moon.position.set(-60, 120, -40);
+    moon.castShadow = false;
     scene.add(moon);
+    // Wall washers down the two main galleries: cheap, static, and they read as strip lights.
+    for (const z of [-45, -15, 15, 45]) {
+      for (const x of [-52, -18, 18, 52]) {
+        const strip = new THREE.PointLight(0xbcd6e8, 9, 34, 2);
+        strip.position.set(x, 6.2, z);
+        scene.add(strip);
+      }
+    }
 
     /* ---------------- materials ---------------- */
     const concreteMap = concreteTexture(512, '#31383a');
@@ -137,12 +152,27 @@ export default function Prison3D({ mode, onExit }: Props) {
     if (gateMesh) scene.add(gateMesh);
 
     // props grouped by material
-    const groups: Record<string, THREE.BufferGeometry[]> = { bed: [], metal: [], wood: [], lamp: [] };
+    const groups: Record<string, THREE.BufferGeometry[]> = {
+      bed: [], metal: [], wood: [], lamp: [], screen: [], siren: [], cloth: [], stone: [],
+    };
     for (const p of sim.props) {
-      const key = p.kind === 'bed' ? 'bed' : p.kind === 'lamp' ? 'lamp' : (p.kind === 'bench' || p.kind === 'table' || p.kind === 'desk' || p.kind === 'crate') ? 'wood' : 'metal';
+      const key = p.kind === 'bed' ? 'bed'
+        : p.kind === 'lamp' ? 'lamp'
+        : p.kind === 'monitor' ? 'screen'
+        : p.kind === 'siren' ? 'siren'
+        : (p.kind === 'bench' || p.kind === 'table' || p.kind === 'desk' || p.kind === 'crate' || p.kind === 'workbench' || p.kind === 'shelf') ? 'wood'
+        : (p.kind === 'stretcher' || p.kind === 'laundry' || p.kind === 'chair') ? 'cloth'
+        : p.kind === 'pot' || p.kind === 'tank' ? 'stone'
+        : 'metal';
       groups[key].push(box(p.w, p.h, p.d, p.x, p.y + p.h / 2, p.z));
     }
-    const propMats: Record<string, THREE.Material> = { bed: matBed, metal: matMetal, wood: matWood, lamp: matLamp };
+    const propMats: Record<string, THREE.Material> = {
+      bed: matBed, metal: matMetal, wood: matWood, lamp: matLamp,
+      screen: new THREE.MeshBasicMaterial({ color: 0x3fd9b0 }),
+      siren: new THREE.MeshBasicMaterial({ color: 0xd8323a }),
+      cloth: new THREE.MeshStandardMaterial({ color: 0x5d6d78, roughness: 0.95 }),
+      stone: new THREE.MeshStandardMaterial({ color: 0x7b8286, roughness: 0.8, metalness: 0.25 }),
+    };
     for (const key of Object.keys(groups)) {
       if (!groups[key].length) continue;
       scene.add(new THREE.Mesh(mergeGeometries(groups[key])!, propMats[key]));
@@ -204,21 +234,147 @@ export default function Prison3D({ mode, onExit }: Props) {
     scene.add(lamps);
 
     const lights: THREE.PointLight[] = [];
-    for (let i = 0; i < 8; i++) {
-      const l = new THREE.PointLight(0xcfe4ff, 0, 26, 2);
+    for (let i = 0; i < 12; i++) {
+      const l = new THREE.PointLight(0xd6e9ff, 0, 30, 2);
       scene.add(l); lights.push(l);
+    }
+    // Alarm beacons: one red light over each wing, dead until the sirens start.
+    const beacons: THREE.PointLight[] = [];
+    for (const z of [-45, -15, 15, 45]) {
+      const b = new THREE.PointLight(0xff2b2b, 0, 46, 2);
+      b.position.set(0, 7.4, z);
+      scene.add(b); beacons.push(b);
     }
     const lampSpots = sim.props.filter((p) => p.kind === 'lamp').map((p) => new THREE.Vector3(p.x, p.y - 0.4, p.z));
 
-    /* ---------------- bodies ---------------- */
-    const guardBody = new THREE.InstancedMesh(new THREE.BoxGeometry(0.52, 1.15, 0.34), matGuard, sim.guards.length);
-    const guardHead = new THREE.InstancedMesh(new THREE.SphereGeometry(0.17, 10, 8), matGuardHead, sim.guards.length);
-    const guardGun = new THREE.InstancedMesh(new THREE.BoxGeometry(0.08, 0.08, 0.7), matMetal, sim.guards.length);
-    scene.add(guardBody, guardHead, guardGun);
+    /* ---------------- levers: physical handles, pulled with the mouse ---------------- */
+    const leverHandles: { id: string; handle: THREE.Object3D; lamp: THREE.Mesh }[] = [];
+    const matLeverBase = new THREE.MeshStandardMaterial({ color: 0x39424a, roughness: 0.55, metalness: 0.7 });
+    const matLeverHandle = new THREE.MeshStandardMaterial({ color: 0xb8452f, roughness: 0.42, metalness: 0.4 });
+    for (const l of sim.levers) {
+      const group = new THREE.Group();
+      group.position.set(l.x, l.y - 0.42, l.z);
+      const plate = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.0, 0.16), matLeverBase);
+      plate.position.set(0, 0, -0.1);
+      group.add(plate);
+      const pivot = new THREE.Group();
+      pivot.position.set(0, 0.34, 0);
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 0.72), matLeverHandle);
+      arm.position.set(0, 0, 0.3);
+      const knob = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), matLeverHandle);
+      knob.position.set(0, 0, 0.66);
+      pivot.add(arm, knob);
+      pivot.rotation.x = -0.55;
+      group.add(pivot);
+      const lamp = new THREE.Mesh(
+        new THREE.BoxGeometry(0.34, 0.14, 0.05),
+        new THREE.MeshBasicMaterial({ color: l.id === 'master' ? 0xffb347 : 0x62e0ff }),
+      );
+      lamp.position.set(0, 0.44, 0.02);
+      group.add(lamp);
+      scene.add(group);
+      leverHandles.push({ id: l.id, handle: pivot, lamp });
+    }
 
-    const inmateBody = new THREE.InstancedMesh(new THREE.BoxGeometry(0.48, 1.1, 0.32), matInmate, sim.inmates.length);
-    const inmateHead = new THREE.InstancedMesh(new THREE.SphereGeometry(0.16, 8, 6), matInmateHead, sim.inmates.length);
-    scene.add(inmateBody, inmateHead);
+    /* ---------------- bodies ----------------
+     * People, not boxes: hips, chest, head, two arms, two legs. Every limb is an
+     * instanced mesh so four hundred figures still cost one draw call per part, and the
+     * pose is driven by the simulation's walk cycle and ragdoll tilt.
+     */
+    const matGuardArmor = new THREE.MeshStandardMaterial({ color: 0x3b4f66, roughness: 0.58, metalness: 0.34 });
+    const matGuardLeg = new THREE.MeshStandardMaterial({ color: 0x22303e, roughness: 0.85 });
+    const matHelmet = new THREE.MeshStandardMaterial({ color: 0x5f7d99, roughness: 0.35, metalness: 0.65 });
+    const matSkin = new THREE.MeshStandardMaterial({ color: 0xc39a7c, roughness: 0.86 });
+    const matInmateCloth = new THREE.MeshStandardMaterial({ color: 0xa8702c, roughness: 0.96 });
+    const matInmateLeg = new THREE.MeshStandardMaterial({ color: 0x84561f, roughness: 0.96 });
+
+    const mkParts = (count: number, body: THREE.Material, legs: THREE.Material, head: THREE.Material) => {
+      const mk = (geo: THREE.BufferGeometry, mat: THREE.Material) => {
+        const m = new THREE.InstancedMesh(geo, mat, count);
+        m.frustumCulled = false;
+        scene.add(m);
+        return m;
+      };
+      return {
+        torso: mk(new THREE.BoxGeometry(0.44, 0.6, 0.26), body),
+        hips: mk(new THREE.BoxGeometry(0.4, 0.22, 0.24), legs),
+        head: mk(new THREE.SphereGeometry(0.142, 12, 9), head),
+        armL: mk(new THREE.BoxGeometry(0.115, 0.56, 0.125), body),
+        armR: mk(new THREE.BoxGeometry(0.115, 0.56, 0.125), body),
+        legL: mk(new THREE.BoxGeometry(0.155, 0.6, 0.165), legs),
+        legR: mk(new THREE.BoxGeometry(0.155, 0.6, 0.165), legs),
+      };
+    };
+    const gBody = mkParts(sim.guards.length, matGuardArmor, matGuardLeg, matSkin);
+    const gHelmet = new THREE.InstancedMesh(new THREE.BoxGeometry(0.31, 0.11, 0.31), matHelmet, sim.guards.length);
+    const gGun = new THREE.InstancedMesh(new THREE.BoxGeometry(0.07, 0.07, 0.62), matMetal, sim.guards.length);
+    const gVisor = new THREE.InstancedMesh(new THREE.BoxGeometry(0.26, 0.055, 0.03), new THREE.MeshStandardMaterial({ color: 0x0e1a22, roughness: 0.2, metalness: 0.9 }), sim.guards.length);
+    for (const m of [gHelmet, gGun, gVisor]) { m.frustumCulled = false; scene.add(m); }
+    sim.guards.forEach((g, i) => {
+      if (!g.elite) return;
+      // the control-room detachments wear darker armour with a red shoulder
+      gBody.torso.setColorAt(i, new THREE.Color(0x2b3550));
+      gBody.armL.setColorAt(i, new THREE.Color(0x2b3550));
+      gBody.armR.setColorAt(i, new THREE.Color(0x2b3550));
+    });
+
+    const iBody = mkParts(sim.inmates.length, matInmateCloth, matInmateLeg, matSkin);
+    void matGuard; void matGuardHead; void matInmate; void matInmateHead;
+
+    // pose one limb of one figure, honouring yaw, ragdoll tilt and limb swing
+    const qYaw = new THREE.Quaternion();
+    const qTilt = new THREE.Quaternion();
+    const qSwing = new THREE.Quaternion();
+    const qOut = new THREE.Quaternion();
+    const axisRight = new THREE.Vector3(1, 0, 0);
+    const vTmp = new THREE.Vector3();
+    const pose = (
+      mesh: THREE.InstancedMesh, i: number,
+      ax: number, az: number, baseY: number, ang: number, tilt: number,
+      lx: number, ly: number, lz: number, swing: number,
+    ) => {
+      const rX = -Math.sin(ang), rZ = Math.cos(ang);   // actor right
+      const fX = Math.cos(ang), fZ = Math.sin(ang);    // actor forward
+      const ct = Math.cos(tilt), st = Math.sin(tilt);
+      const ly2 = ly * ct - lz * st;
+      const lz2 = ly * st + lz * ct;
+      qYaw.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -ang);
+      qTilt.setFromAxisAngle(axisRight, tilt);
+      qSwing.setFromAxisAngle(axisRight, swing);
+      qOut.copy(qYaw).multiply(qTilt).multiply(qSwing);
+      vTmp.set(ax + rX * lx + fX * lz2, baseY + ly2, az + rZ * lx + fZ * lz2);
+      m4.compose(vTmp, qOut, s3);
+      mesh.setMatrixAt(i, m4);
+    };
+    const poseGuard = (i: number, g: (typeof sim.guards)[number]) => {
+      const down = g.state === 'down';
+      const tilt = down ? (g.tilt || 1.4) : 0;
+      const sw = Math.sin(g.limb || 0) * 0.5;
+      const base = g.y;
+      pose(gBody.torso, i, g.x, g.z, base, g.ang, tilt, 0, 1.16, 0, 0);
+      pose(gBody.hips, i, g.x, g.z, base, g.ang, tilt, 0, 0.8, 0, 0);
+      pose(gBody.head, i, g.x, g.z, base, g.ang, tilt, 0, 1.63, 0, 0);
+      pose(gHelmet, i, g.x, g.z, base, g.ang, tilt, 0, 1.71, 0, 0);
+      pose(gVisor, i, g.x, g.z, base, g.ang, tilt, 0, 1.63, 0.12, 0);
+      pose(gBody.armL, i, g.x, g.z, base, g.ang, tilt, -0.29, 1.28, 0, sw);
+      pose(gBody.armR, i, g.x, g.z, base, g.ang, tilt, 0.29, 1.28, 0, -sw * (down ? 0 : 0.8) - (down ? 0 : 0.35));
+      pose(gBody.legL, i, g.x, g.z, base, g.ang, tilt, -0.12, 0.5, 0, -sw * 0.9);
+      pose(gBody.legR, i, g.x, g.z, base, g.ang, tilt, 0.12, 0.5, 0, sw * 0.9);
+      pose(gGun, i, g.x, g.z, base, g.ang, tilt, 0.3, 1.06, 0.36, 0);
+    };
+    const poseInmate = (i: number, n: (typeof sim.inmates)[number]) => {
+      const down = n.state === 'down';
+      const tilt = down ? (n.tilt || 1.4) : 0;
+      const sw = Math.sin(n.limb || 0) * 0.55;
+      const base = n.y;
+      pose(iBody.torso, i, n.x, n.z, base, n.ang, tilt, 0, 1.14, 0, 0);
+      pose(iBody.hips, i, n.x, n.z, base, n.ang, tilt, 0, 0.78, 0, 0);
+      pose(iBody.head, i, n.x, n.z, base, n.ang, tilt, 0, 1.6, 0, 0);
+      pose(iBody.armL, i, n.x, n.z, base, n.ang, tilt, -0.27, 1.26, 0, sw);
+      pose(iBody.armR, i, n.x, n.z, base, n.ang, tilt, 0.27, 1.26, 0, -sw);
+      pose(iBody.legL, i, n.x, n.z, base, n.ang, tilt, -0.11, 0.48, 0, -sw * 0.9);
+      pose(iBody.legR, i, n.x, n.z, base, n.ang, tilt, 0.11, 0.48, 0, sw * 0.9);
+    };
 
     /* ---------------- player weapon ---------------- */
     const weapon = new THREE.Group();
@@ -256,6 +412,25 @@ export default function Prison3D({ mode, onExit }: Props) {
       tracers.push({ line, life: 0.09 });
     };
 
+    /* ---------------- reaching for a lever ---------------- */
+    const aimV = new THREE.Vector3();
+    const aimDir = new THREE.Vector3();
+    const aimedLever = () => {
+      camera.getWorldDirection(aimDir);
+      let best: (typeof sim.levers)[number] | null = null;
+      let bestDot = 0.972;
+      for (const l of sim.levers) {
+        if (l.pulled) continue;
+        aimV.set(l.x - camera.position.x, l.y - camera.position.y, l.z - camera.position.z);
+        const d = aimV.length();
+        if (d > 4.2) continue;
+        aimV.multiplyScalar(1 / d);
+        const dot = aimV.dot(aimDir);
+        if (dot > bestDot) { bestDot = dot; best = l; }
+      }
+      return best;
+    };
+
     /* ---------------- input ---------------- */
     const keys: Record<string, boolean> = {};
     let firing = false;
@@ -287,7 +462,9 @@ export default function Prison3D({ mode, onExit }: Props) {
         try { void renderer.domElement.requestPointerLock(); } catch { /* ignore */ }
       }
       firing = true;
-      shoot();
+      // Clicking a lever throws it; clicking anything else is a shot. The lever wins,
+      // so the master release cannot be triggered by accident while shooting at guards.
+      if (!aimedLever()) shoot();
     };
     const onMouseUp = () => { firing = false; dragging = false; };
     const shoot = () => {
@@ -314,12 +491,6 @@ export default function Prison3D({ mode, onExit }: Props) {
     let hudT = 0;
     let autoFireT = 0;
 
-    const compose = (mesh: THREE.InstancedMesh, i: number, x: number, y: number, z: number, rot: number, scaleY = 1) => {
-      const quat = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -rot, 0));
-      m4.compose(new THREE.Vector3(x, y, z), quat, new THREE.Vector3(1, scaleY, 1));
-      mesh.setMatrixAt(i, m4);
-    };
-
     const tick = (now: number) => {
       raf = requestAnimationFrame(tick);
       const dt = Math.min(0.05, (now - last) / 1000);
@@ -331,11 +502,26 @@ export default function Prison3D({ mode, onExit }: Props) {
       const strafe = (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0);
       sim.update(dt, { fwd, strafe, sprint: !!keys['shift'] });
 
-      // automatic fire while the trigger is held (pistol cadence)
-      if (firing) {
+      // levers first: holding the button on a handle throws it, and nothing is fired
+      const aimed = aimedLever();
+      if (aimed) {
+        sim.pullLever(aimed.id, dt, firing);
+      } else if (firing) {
         autoFireT -= dt;
         if (autoFireT <= 0) { autoFireT = 0.16; if (sim.cool <= 0) shoot(); }
       }
+      // handles swing with their progress, lamps go green when thrown
+      for (const lv of leverHandles) {
+        const st = sim.levers.find((q) => q.id === lv.id);
+        if (!st) continue;
+        const target = st.pulled ? -1.35 : -0.55 - st.progress * 0.8;
+        lv.handle.rotation.x += (target - lv.handle.rotation.x) * Math.min(1, dt * 8);
+        const lampMat = lv.lamp.material as THREE.MeshBasicMaterial;
+        lampMat.color.setHex(st.pulled ? 0x53f08a : st.id === 'master' ? 0xffb347 : 0x62e0ff);
+      }
+      // sirens: red beacons breathe with the alarm level
+      const pulse = 0.55 + 0.45 * Math.sin(sim.time * 7);
+      beacons.forEach((b) => { b.intensity = sim.siren * 38 * pulse; });
 
       if (sim.phase === 'escaped' && !finished.current) {
         finished.current = true;
@@ -369,24 +555,23 @@ export default function Prison3D({ mode, onExit }: Props) {
       flashLight.intensity = sim.flashlight ? 34 : 0;
       muzzle.intensity = sim.flash > 0 ? 26 : 0;
 
-      // bodies
-      sim.guards.forEach((g, i) => {
-        const down = g.state === 'down';
-        compose(guardBody, i, g.x, g.y + (down ? 0.28 : 0.62), g.z, g.ang, down ? 0.5 : 1);
-        compose(guardHead, i, g.x, g.y + (down ? 0.42 : 1.32), g.z, g.ang);
-        compose(guardGun, i, g.x + Math.cos(g.ang) * 0.42, g.y + (down ? 0.3 : 0.95), g.z + Math.sin(g.ang) * 0.42, g.ang);
-      });
-      guardBody.instanceMatrix.needsUpdate = true;
-      guardHead.instanceMatrix.needsUpdate = true;
-      guardGun.instanceMatrix.needsUpdate = true;
-
+      // bodies: full figures, walk cycles, ragdolls
+      sim.guards.forEach((g, i) => poseGuard(i, g));
       sim.inmates.forEach((n, i) => {
-        const down = n.state === 'down';
-        compose(inmateBody, i, n.x, n.y + (down ? 0.26 : 0.6), n.z, n.ang, down ? 0.5 : 1);
-        compose(inmateHead, i, n.x, n.y + (down ? 0.4 : 1.28), n.z, n.ang);
+        // only pose bodies near the camera: three hundred cells are not worth the matrices
+        if (Math.abs(n.x - sim.px) > 62 || Math.abs(n.z - sim.pz) > 62) {
+          m4.makeScale(0, 0, 0);
+          for (const part of [iBody.torso, iBody.hips, iBody.head, iBody.armL, iBody.armR, iBody.legL, iBody.legR]) part.setMatrixAt(i, m4);
+          return;
+        }
+        poseInmate(i, n);
       });
-      inmateBody.instanceMatrix.needsUpdate = true;
-      inmateHead.instanceMatrix.needsUpdate = true;
+      for (const part of [gBody.torso, gBody.hips, gBody.head, gBody.armL, gBody.armR, gBody.legL, gBody.legR, gHelmet, gGun, gVisor]) {
+        part.instanceMatrix.needsUpdate = true;
+      }
+      for (const part of [iBody.torso, iBody.hips, iBody.head, iBody.armL, iBody.armR, iBody.legL, iBody.legR]) {
+        part.instanceMatrix.needsUpdate = true;
+      }
 
       // locks vanish when their cell opens; bars stay but the doorway is passable
       sim.cells.forEach((c) => {
@@ -410,13 +595,19 @@ export default function Prison3D({ mode, onExit }: Props) {
         const sum = sim.summary;
         const compass = [
           ...(sum.opened === 0 ? [{ label: 'BARS', ang: Math.atan2(sim.cells[sim.homeCell].z - sim.pz, sim.cells[sim.homeCell].x - sim.px) }] : []),
-          ...sim.buttons.filter((b) => !b.used).map((b) => ({ label: b.kind === 'open-all' ? 'MASTER' : b.kind.toUpperCase(), ang: Math.atan2(b.z - sim.pz, b.x - sim.px) })),
+          ...sim.levers.filter((l) => !l.pulled).map((l) => ({ label: l.id === 'master' ? 'MASTER' : l.id.toUpperCase(), ang: Math.atan2(l.z - sim.pz, l.x - sim.px) })),
           { label: 'SALLY', ang: Math.atan2(108 - sim.pz, 0 - sim.px) },
         ].map((m) => ({ label: m.label, angle: m.ang - sim.yaw, dist: 0 }));
         setScreen({
           hp: Math.max(0, Math.round(sim.hp)), armor: Math.round(sim.armor),
           mag: sim.mag, magSize: sim.magSize, reserve: sim.reserve, reloading: sim.reloading > 0,
-          alarm: sim.alarm, prompt: sim.buttonNear ? `E · ${sim.buttonNear.label}` : sim.lockNear ? 'SHOOT THE LOCK' : '',
+          alarm: Math.max(sim.alarm, sim.siren),
+          prompt: (() => {
+            const l = sim.leverNear;
+            if (l) return l.pulled ? '' : `HOLD LEFT MOUSE · ${l.label}${l.progress > 0.01 ? `  ${Math.round(l.progress * 100)}%` : ''}`;
+            if (sim.inControlRoom) return 'CONTROL ROOM · FIND THE MASTER HANDLE';
+            return sim.lockNear ? 'SHOOT THE LOCK' : '';
+          })(),
           message: sim.message, messageT: sim.messageT,
           cells: sum.opened, free: sum.free, guards: sum.guards, sally: sum.sallyOpen,
           lights: sim.lightsOut, compass, stats: { ...sim.stats }, flashlight: sim.flashlight,
@@ -454,7 +645,17 @@ export default function Prison3D({ mode, onExit }: Props) {
       <div ref={host} className="absolute inset-0" />
       <div className="pointer-events-none absolute inset-0 select-none font-mono text-[#d6e6e6]">
         {/* vignette */}
-        <div className="absolute inset-0" style={{ boxShadow: 'inset 0 0 200px 70px rgba(0,0,0,0.85)' }} />
+        <div className="absolute inset-0" style={{ boxShadow: 'inset 0 0 200px 70px rgba(0,0,0,0.72)' }} />
+        {/* siren wash: the whole frame reddens with the alarm */}
+        {screen.alarm > 0.15 && (
+          <div
+            className="absolute inset-0"
+            style={{
+              background: 'radial-gradient(circle at 50% 50%, rgba(255,40,40,0) 35%, rgba(255,30,30,0.30) 100%)',
+              opacity: 0.35 + screen.alarm * 0.5,
+            }}
+          />
+        )}
 
         {/* wake-up cinematic */}
         {intro > 0 && (
@@ -467,7 +668,8 @@ export default function Prison3D({ mode, onExit }: Props) {
                   ? 'You wake on a steel bunk with a split lip. Somewhere in the processing they missed the sidearm — it is still in your waistband.'
                   : 'You came in through the sally port with a stolen pass and a smuggled pistol. Nobody has noticed yet.'}
               </p>
-              <p className="mt-4 text-[11px] tracking-[0.3em] text-[#d8b45a]">SHOOT THE LOCK · FIND THE CONTROL ROOM · OPEN EVERY DOOR</p>
+              <p className="mt-4 text-[11px] tracking-[0.3em] text-[#d8b45a]">SHOOT THE LOCK · FIGHT INTO CONTROL A · HOLD THE MASTER HANDLE</p>
+              <p className="mt-1 text-[10px] tracking-[0.2em] text-[#7f9aa0]">THE MASTER RELEASE IS A LEVER, NOT A BUTTON — AIM AT IT AND HOLD LEFT MOUSE</p>
             </div>
           </div>
         )}
@@ -497,7 +699,7 @@ export default function Prison3D({ mode, onExit }: Props) {
         {/* alarm */}
         {screen.alarm > 0.2 && (
           <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded border border-[#ff6b6b55] bg-[#2a0b0bbb] px-4 py-1 text-[11px] tracking-[0.3em] text-[#ff9a9a]">
-            ALARM {Math.round(screen.alarm * 100)}%
+            SIRENS · ALARM {Math.round(screen.alarm * 100)}%
           </div>
         )}
 
