@@ -77,7 +77,8 @@ export interface PrisonProp {
   kind: 'bed' | 'toilet' | 'sink' | 'table' | 'bench' | 'locker' | 'desk' | 'crate' | 'console' | 'pipe' | 'medkit' | 'lamp' | 'camera'
     | 'monitor' | 'chair' | 'tray' | 'pot' | 'rack' | 'shelf' | 'cabinet' | 'workbench' | 'laundry' | 'stretcher'
     | 'siren' | 'vent' | 'fridge' | 'tank' | 'weaponrack'
-    | 'mattress' | 'celllamp' | 'stove' | 'cooker' | 'bin' | 'board' | 'extinguisher';
+    | 'mattress' | 'celllamp' | 'stove' | 'cooker' | 'bin' | 'board' | 'extinguisher'
+    | 'column';
   solid: boolean;
 }
 
@@ -327,14 +328,17 @@ export class PrisonSim {
       const zb = wingZ(wing + 1) - CORRIDOR_HALF - CELL_D;
       const z = (za + zb) / 2;
       const len = WING_ROWS * CELL_W + 12;
-      W(-len / 2, z, len, 2.2, 0, 6);            // spine wall with gangway gaps
+      /* The spine wall runs down the middle of the cross corridor, centred on the hall,
+       * with a gangway every 22 m. It used to be built from x = -78, which laid a
+       * 156 m slab across the west side of the block and sealed off half the prison. */
+      let cur = -len / 2;
       for (let k = -3; k <= 3; k++) {
-        // gangway openings: cut the wall into segments so the player can pass
         const gapX = k * 22;
-        this.walls.pop();
-        W(-len / 2, z, gapX - 3 + len / 2, 2.2, 0, 6);
-        W(gapX + 3, z, len / 2 - gapX - 3, 2.2, 0, 6);
+        const g0 = gapX - 3, g1 = gapX + 3;
+        if (g0 > cur + 0.2) W((cur + g0) / 2, z, g0 - cur, 2.2, 0, 6);
+        cur = Math.max(cur, g1);
       }
+      if (len / 2 > cur + 0.2) W((cur + len / 2) / 2, z, len / 2 - cur, 2.2, 0, 6);
     }
   }
 
@@ -691,6 +695,39 @@ export class PrisonSim {
     for (let i = 0; i < 3; i++) P(-100 + i * 4.4, 36.5, 3.6, 1.1, 0.85, 'workbench');
     P(-103, 44, 1.0, 1.0, 1.6, 'shelf');
     P(-88, 22.5, 0.9, 0.9, 0.9, 'bin', false);
+
+    /* ---- STRUCTURE: concrete piers across the hall, so it reads as a cell house ---- */
+    // The ring corridor between the cell block and the outer rooms, plus the cross
+    // corridors between the wings: piers every 13 m, and tube lights between them.
+    const ringX = 77, ringZ = 61;
+    for (let x = -78; x <= 78; x += 13) {
+      P(x, ringZ, 0.9, 0.9, 6.0, 'column');
+      P(x, -ringZ, 0.9, 0.9, 6.0, 'column');
+    }
+    for (let z = -58; z <= 58; z += 13) {
+      P(ringX, z, 0.9, 0.9, 6.0, 'column');
+      P(-ringX, z, 0.9, 0.9, 6.0, 'column');
+    }
+    // piers down the cross corridors between the wings, clear of the spine walls
+    for (let x = -66; x <= 66; x += 13) {
+      for (const z of [-34.5, -25.5, -4.5, 4.5, 25.5, 34.5]) P(x, z, 0.8, 0.8, 5.4, 'column');
+    }
+    // ceiling fixtures over every hall corridor, on the same 13 m grid as the piers
+    for (let x = -78; x <= 78; x += 6.5) {
+      P(x, ringZ, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+      P(x, -ringZ, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+    }
+    for (let z = -58; z <= 58; z += 6.5) {
+      P(ringX, z, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+      P(-ringX, z, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+    }
+    for (let x = -66; x <= 66; x += 6.5) {
+      for (const z of [-30, 0, 30]) P(x, z, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+    }
+    // and one over each cross-corridor bay
+    for (let x = -69.25; x <= 69.25; x += 13) {
+      for (const z of [-34.5, -25.5, -4.5, 4.5, 25.5, 34.5]) P(x, z, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+    }
 
     /* ---- the service ring and the yard: notices, extinguishers, bins ---- */
     for (const [x, z] of [[-70, 60], [70, 60], [-70, -60], [70, -60], [0, 84], [0, -84]] as [number, number][]) {

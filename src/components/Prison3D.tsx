@@ -64,12 +64,12 @@ export default function Prison3D({ mode, onExit }: Props) {
     renderer.setClearColor(0x05080a, 1);
     // Filmic response, a touch of bloom-feel through exposure. Bright enough to read.
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.12;
+    renderer.toneMappingExposure = 1.2;
     hostEl.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
     // Tight, damp air: the gallery fades out well before its far end.
-    scene.fog = new THREE.FogExp2(0x0a1014, 0.019);
+    scene.fog = new THREE.FogExp2(0x0c1316, 0.0155);
     const camera = new THREE.PerspectiveCamera(72, W / H, 0.06, 320);
     // 1.66 m eye height, slightly wide: the corridor has to feel narrow and long.
 
@@ -80,9 +80,9 @@ export default function Prison3D({ mode, onExit }: Props) {
     const envRT = pmrem.fromScene(new RoomEnvironment(), 0.06);
     scene.environment = envRT.texture;
 
-    scene.add(new THREE.AmbientLight(0x7d95a8, 0.4));
-    scene.add(new THREE.HemisphereLight(0x54748c, 0x0b1013, 0.55));
-    const moon = new THREE.DirectionalLight(0x9dc0dc, 0.28);
+    scene.add(new THREE.AmbientLight(0x8199ad, 0.55));
+    scene.add(new THREE.HemisphereLight(0x60809a, 0x111a1e, 0.62));
+    const moon = new THREE.DirectionalLight(0x9dc0dc, 0.34);
     moon.position.set(-60, 120, -40);
     moon.castShadow = false;
     scene.add(moon);
@@ -175,6 +175,31 @@ export default function Prison3D({ mode, onExit }: Props) {
       return tex(c, true, 1);
     }
 
+    /** Height (grayscale) map: poured concrete, trowel swirls, form lines. */
+    function bumpTexture(size = 256, joints = true): THREE.CanvasTexture {
+      const { c, g } = cv(size);
+      g.fillStyle = '#808080'; g.fillRect(0, 0, size, size);
+      for (let i = 0; i < 5200; i++) {
+        const v = 96 + Math.random() * 96;
+        g.fillStyle = `rgba(${v},${v},${v},${0.1 + Math.random() * 0.5})`;
+        const r = 1 + Math.random() * 3;
+        g.beginPath(); g.arc(Math.random() * size, Math.random() * size, r, 0, Math.PI * 2); g.fill();
+      }
+      // trowel swirls
+      g.strokeStyle = 'rgba(150,150,150,0.22)'; g.lineWidth = 2;
+      for (let i = 0; i < 26; i++) {
+        const x = Math.random() * size, y = Math.random() * size, r = 8 + Math.random() * 34;
+        g.beginPath(); g.arc(x, y, r, 0, Math.PI * (0.4 + Math.random() * 1.2)); g.stroke();
+      }
+      if (joints) {
+        g.strokeStyle = 'rgba(20,20,20,1)'; g.lineWidth = 3;
+        g.beginPath(); g.moveTo(0, size / 2); g.lineTo(size, size / 2); g.stroke();
+        g.beginPath(); g.moveTo(size / 2, 0); g.lineTo(size / 2, size); g.stroke();
+      }
+      const t = tex(c, false, 1);
+      return t;
+    }
+
     /** Roughness map for the floor: black = mirror-wet puddle, white = dry concrete. */
     function floorRoughness(): THREE.CanvasTexture {
       const { c, g } = cv(512);
@@ -250,24 +275,28 @@ export default function Prison3D({ mode, onExit }: Props) {
     }
 
     /* ---------------- materials ---------------- */
-    const wallMap = wallTexture(); wallMap.repeat.set(6, 3);
-    const floorMap = floorTexture(); floorMap.repeat.set(14, 14);
-    const roughMap = floorRoughness(); roughMap.repeat.set(9, 9);
+    const wallMap = wallTexture(); wallMap.repeat.set(9, 4.5);
+    const wallBump = bumpTexture(256); wallBump.repeat.set(9, 4.5);
+    const floorMap = floorTexture(); floorMap.repeat.set(34, 34);
+    const floorBump = bumpTexture(256, false); floorBump.repeat.set(34, 34);
+    const roughMap = floorRoughness(); roughMap.repeat.set(20, 20);
 
     const matConcrete = new THREE.MeshStandardMaterial({
-      color: 0x4a565d, map: wallMap, roughness: 0.93, metalness: 0.05, envMapIntensity: 0.25,
+      color: 0x58646b, map: wallMap, bumpMap: wallBump, bumpScale: 0.035,
+      roughness: 0.94, metalness: 0.04, envMapIntensity: 0.3,
     });
     // The floor is the star: dark, wet, and only partly rough, so the env map and the
     // light smears below draw long reflections into it.
     const matFloor = new THREE.MeshStandardMaterial({
-      color: 0x39434a, map: floorMap, roughnessMap: roughMap,
-      roughness: 1.0, metalness: 0.25, envMapIntensity: 0.22,
+      color: 0x2f383d, map: floorMap, roughnessMap: roughMap,
+      bumpMap: floorBump, bumpScale: 0.014,
+      roughness: 1.0, metalness: 0.2, envMapIntensity: 0.26,
     });
     const matBars = new THREE.MeshStandardMaterial({
       color: 0x1a2127, roughness: 0.34, metalness: 0.9, envMapIntensity: 0.75,
     });
     const matFrame = new THREE.MeshStandardMaterial({ color: 0x14191d, roughness: 0.55, metalness: 0.6 });
-    const matCeiling = new THREE.MeshStandardMaterial({ color: 0x232a2f, map: wallMap, roughness: 0.96 });
+    const matCeiling = new THREE.MeshStandardMaterial({ color: 0x2b3338, map: wallMap, bumpMap: wallBump, bumpScale: 0.03, roughness: 0.96 });
     const matDado = new THREE.MeshStandardMaterial({ color: 0x1f272c, roughness: 0.7, metalness: 0.15 });
     const matGate = new THREE.MeshStandardMaterial({ color: 0x3a3f42, roughness: 0.55, metalness: 0.6 });
     const matBed = new THREE.MeshStandardMaterial({ color: 0x2e3a44, roughness: 0.92 });
@@ -346,7 +375,17 @@ export default function Prison3D({ mode, onExit }: Props) {
         }
       }
     }
+    // The hall is roofed by one slab on a beam grid. Without it the ceiling reads as a
+    // black void and the whole space looks unfinished.
+    const hallBeams: THREE.BufferGeometry[] = [];
+    for (let z = -70; z <= 70; z += 6.5) {
+      hallBeams.push(box(168, 0.36, 0.3, 0, CEIL - 0.18, z));
+    }
+    for (let x = -82; x <= 82; x += 6.5) {
+      hallBeams.push(box(0.3, 0.36, 146, x, CEIL - 0.18, 0));
+    }
     if (beamGeos.length) scene.add(new THREE.Mesh(mergeGeometries(beamGeos)!, matConcrete));
+    scene.add(new THREE.Mesh(mergeGeometries(hallBeams)!, matConcrete));
     if (pipeGeos.length) scene.add(new THREE.Mesh(mergeGeometries(pipeGeos)!, matPipe));
     if (trayGeos.length) scene.add(new THREE.Mesh(mergeGeometries(trayGeos)!, matPipe));
 
@@ -364,7 +403,7 @@ export default function Prison3D({ mode, onExit }: Props) {
 
     const groups: Record<string, THREE.BufferGeometry[]> = {
       bed: [], metal: [], wood: [], screen: [], siren: [], cloth: [], stone: [], bench: [], camera: [],
-      mattress: [], celllamp: [], steel: [], red: [], board: [],
+      mattress: [], celllamp: [], steel: [], red: [], board: [], column: [],
     };
     for (const p of sim.props) {
       const key =
@@ -377,6 +416,7 @@ export default function Prison3D({ mode, onExit }: Props) {
         : p.kind === 'camera' ? 'camera'
         : (p.kind === 'stove' || p.kind === 'cooker' || p.kind === 'sink' || p.kind === 'toilet' || p.kind === 'fridge' || p.kind === 'locker' || p.kind === 'bin') ? 'steel'
         : p.kind === 'board' ? 'board'
+        : p.kind === 'column' ? 'column'
         : p.kind === 'extinguisher' ? 'red'
         : (p.kind === 'table' || p.kind === 'desk' || p.kind === 'crate' || p.kind === 'workbench' || p.kind === 'shelf') ? 'wood'
         : (p.kind === 'stretcher' || p.kind === 'laundry' || p.kind === 'chair') ? 'cloth'
@@ -393,6 +433,7 @@ export default function Prison3D({ mode, onExit }: Props) {
       steel: new THREE.MeshStandardMaterial({ color: 0x7d868c, roughness: 0.42, metalness: 0.7 }),
       red: new THREE.MeshStandardMaterial({ color: 0x9c1f1a, roughness: 0.55, metalness: 0.3 }),
       board: new THREE.MeshStandardMaterial({ color: 0x6a5740, roughness: 0.92 }),
+      column: matConcrete,
       screen: new THREE.MeshBasicMaterial({ color: 0x3fd9b0 }),
       siren: new THREE.MeshBasicMaterial({ color: 0xd8323a }),
       cloth: new THREE.MeshStandardMaterial({ color: 0x46545e, roughness: 0.95 }),
@@ -666,8 +707,10 @@ export default function Prison3D({ mode, onExit }: Props) {
 
     /* ---------------- dynamic lights ---------------- */
     const lights: THREE.PointLight[] = [];
-    for (let i = 0; i < 16; i++) {
-      const l = new THREE.PointLight(0xd8ecff, 0, 19, 2);
+    // Twenty tubes ride with the operative: whichever fixtures are closest are lit for
+    // real, so a gallery reads the same whether you are in it or across the hall.
+    for (let i = 0; i < 20; i++) {
+      const l = new THREE.PointLight(0xdcefff, 0, 23, 2);
       scene.add(l); lights.push(l);
     }
     const redLights: THREE.PointLight[] = [];
@@ -1044,14 +1087,66 @@ export default function Prison3D({ mode, onExit }: Props) {
       animate(iBody, i, n.x, n.z, n.y, n.ang, tilt, n.limb || 0, down ? 0 : n.gait || 0, sim.time, down);
     };
 
-    /* ---------------- player weapon ---------------- */
+    /* ---------------- first-person weapon ----------------
+     * A pistol in gloved hands, held where a person actually holds one: slide, frame,
+     * trigger guard, magazine floorplate, night sights, both hands and both forearms.
+     */
     const weapon = new THREE.Group();
-    const gunBody = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.13, 0.42), matMetal);
-    gunBody.position.set(0, 0, -0.1);
-    const gunGrip = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.2, 0.1), new THREE.MeshStandardMaterial({ color: 0x2a2a2c, roughness: 0.9 }));
-    gunGrip.position.set(0, -0.14, 0.06); gunGrip.rotation.x = 0.35;
-    weapon.add(gunBody, gunGrip);
-    weapon.position.set(0.28, -0.24, -0.5);
+    const matGunSteel = new THREE.MeshStandardMaterial({ color: 0x24282c, roughness: 0.34, metalness: 0.86 });
+    const matGunPoly = new THREE.MeshStandardMaterial({ color: 0x14171a, roughness: 0.72, metalness: 0.1 });
+    const matGlove = new THREE.MeshStandardMaterial({ color: 0x22272b, roughness: 0.92, metalness: 0.05 });
+    const matGloveCuff = new THREE.MeshStandardMaterial({ color: 0x171b1f, roughness: 0.95 });
+    const matSight = new THREE.MeshStandardMaterial({ color: 0x8ef0b0, roughness: 0.4, metalness: 0.2, emissive: 0x0d3a1e });
+    const gunPart = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, rx = 0, ry = 0, rz = 0) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, y, z);
+      m.rotation.set(rx, ry, rz);
+      weapon.add(m);
+      return m;
+    };
+    // slide and barrel (this is the part that grows into a rifle when you loot one)
+    const gunBody = new THREE.Group();
+    gunBody.add(new THREE.Mesh(new THREE.BoxGeometry(0.052, 0.056, 0.23), matGunSteel));
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.05, 10), matGunSteel);
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.set(0, 0.008, 0.14);
+    gunBody.add(barrel);
+    // slide serrations, ejection port, front and rear sights
+    for (let i = 0; i < 5; i++) {
+      const serr = new THREE.Mesh(new THREE.BoxGeometry(0.056, 0.045, 0.006), matGunSteel);
+      serr.position.set(0, 0, -0.085 + i * 0.014);
+      gunBody.add(serr);
+    }
+    const port = new THREE.Mesh(new THREE.BoxGeometry(0.01, 0.03, 0.07), matGunPoly);
+    port.position.set(0.028, 0.012, 0.01);
+    gunBody.add(port);
+    gunBody.position.set(0, 0.03, -0.06);
+    weapon.add(gunBody);
+    gunPart(new THREE.BoxGeometry(0.014, 0.016, 0.012), matGunSteel, 0, 0.062, -0.17);   // rear sight
+    gunPart(new THREE.BoxGeometry(0.006, 0.012, 0.01), matSight, 0, 0.064, -0.172);      // night dot
+    gunPart(new THREE.BoxGeometry(0.008, 0.014, 0.012), matGunSteel, 0, 0.064, 0.05);    // front post
+    // frame, trigger guard and magazine
+    gunPart(new THREE.BoxGeometry(0.046, 0.03, 0.2), matGunPoly, 0, 0.012, -0.04);
+    gunPart(new THREE.BoxGeometry(0.042, 0.055, 0.075), matGunPoly, 0, -0.028, -0.03);
+    gunPart(new THREE.BoxGeometry(0.036, 0.02, 0.045), matGunPoly, 0, -0.022, 0.055);
+    gunPart(new THREE.BoxGeometry(0.03, 0.11, 0.05), matGunPoly, 0, -0.075, 0.045, -0.26);
+    gunPart(new THREE.BoxGeometry(0.032, 0.012, 0.05), matGunSteel, 0, -0.132, 0.058, -0.26);
+    gunPart(new THREE.BoxGeometry(0.008, 0.03, 0.012), matGunSteel, 0, -0.04, 0.012, 0.2);  // trigger
+    // gloved hands: right hand on the grip, left hand supporting
+    gunPart(new THREE.BoxGeometry(0.052, 0.085, 0.062), matGlove, 0.012, -0.082, 0.052, -0.26);
+    for (let i = 0; i < 3; i++) {
+      gunPart(new THREE.BoxGeometry(0.02, 0.024, 0.05), matGlove, 0.044, -0.062 - i * 0.022, 0.03 + i * 0.004, -0.26);
+    }
+    gunPart(new THREE.BoxGeometry(0.022, 0.05, 0.03), matGlove, -0.03, -0.05, 0.045, -0.3);   // thumb
+    gunPart(new THREE.BoxGeometry(0.062, 0.075, 0.07), matGlove, -0.03, -0.1, -0.02, -0.1);   // support hand
+    for (let i = 0; i < 3; i++) {
+      gunPart(new THREE.BoxGeometry(0.018, 0.02, 0.045), matGlove, -0.012 + i * 0.016, -0.062, -0.05, 0.2);
+    }
+    // forearms, angling out of frame
+    gunPart(new THREE.BoxGeometry(0.075, 0.075, 0.26), matGloveCuff, 0.03, -0.14, 0.2, 0.42);
+    gunPart(new THREE.BoxGeometry(0.07, 0.07, 0.2), matGloveCuff, -0.02, -0.16, 0.16, 0.32);
+    weapon.position.set(0.24, -0.2, -0.46);
+    weapon.rotation.set(0.02, -0.06, 0);
     camera.add(weapon);
     scene.add(camera);
 
@@ -1232,8 +1327,8 @@ export default function Prison3D({ mode, onExit }: Props) {
       hatchLid.rotation.z = sim.hatch.progress * 0.5;
       ladder.visible = sim.hatch.open;
       // the gun in your hands grows when you pick a rifle up
-      const wscale = sim.weapon === 'carbine' ? 1.75 : sim.weapon === 'shotgun' ? 1.5 : sim.weapon === 'smg' ? 1.25 : 1;
-      gunBody.scale.set(1, 1, wscale);
+      const wscale = sim.weapon === 'carbine' ? 1.9 : sim.weapon === 'shotgun' ? 1.6 : sim.weapon === 'smg' ? 1.35 : 1;
+      gunBody.scale.set(1 + (wscale - 1) * 0.25, 1 + (wscale - 1) * 0.2, wscale);
       // handles swing with their progress, lamps go green when thrown
       for (const lv of leverHandles) {
         const st = sim.levers.find((q) => q.id === lv.id);
@@ -1269,8 +1364,13 @@ export default function Prison3D({ mode, onExit }: Props) {
       );
       // head bob
       camera.position.y = sim.py + Math.sin(sim.time * 8) * 0.012 * (fwd || strafe ? 1 : 0.2);
-      weapon.position.z = -0.5 + Math.sin(sim.time * 7) * 0.006;
-      weapon.rotation.x = sim.flash > 0 ? -0.22 : 0;
+      // the gun sways a little as the operative breathes and walks, and it kicks
+      const sway = Math.sin(sim.time * 1.6) * 0.004 + (onFoot ? Math.sin(sim.time * 6) * 0.006 : 0);
+      weapon.position.z = -0.46 + Math.sin(sim.time * 7) * 0.004;
+      weapon.position.y = -0.2 + sway;
+      weapon.position.x = 0.24 + Math.cos(sim.time * 1.3) * 0.003;
+      weapon.rotation.x = 0.02 + (sim.flash > 0 ? -0.2 : 0);
+      weapon.rotation.z = sway * 1.6;
 
       // lamps: nearest pool to the player
       const near = lampSpots
@@ -1281,7 +1381,7 @@ export default function Prison3D({ mode, onExit }: Props) {
         const s = near[i];
         if (!s) { l.intensity = 0; return; }
         l.position.copy(s.p);
-        l.intensity = sim.lightsOut ? 1.6 : 16;
+        l.intensity = sim.lightsOut ? 1.8 : 21;
       });
       // red fixtures: the nearest ones get real light, so the bars catch the glow
       const nearStrobe = strobeSpots
