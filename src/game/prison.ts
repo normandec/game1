@@ -47,6 +47,8 @@ export interface PrisonGuard {
   lastX: number; lastZ: number;
   /** cooldown after a capture, so the same officer cannot cuff twice in a second */
   cuffCool: number;
+  /** facing he is turning towards, in radians */
+  wantAng: number;
 }
 
 export interface PrisonInmate {
@@ -77,7 +79,8 @@ export interface PrisonProp {
   kind: 'bed' | 'toilet' | 'sink' | 'table' | 'bench' | 'locker' | 'desk' | 'crate' | 'console' | 'pipe' | 'medkit' | 'lamp' | 'camera'
     | 'monitor' | 'chair' | 'tray' | 'pot' | 'rack' | 'shelf' | 'cabinet' | 'workbench' | 'laundry' | 'stretcher'
     | 'siren' | 'vent' | 'fridge' | 'tank' | 'weaponrack'
-    | 'mattress' | 'celllamp' | 'stove' | 'cooker' | 'bin' | 'board' | 'extinguisher';
+    | 'mattress' | 'celllamp' | 'stove' | 'cooker' | 'bin' | 'board' | 'extinguisher'
+    | 'column';
   solid: boolean;
 }
 
@@ -107,10 +110,11 @@ export interface WeaponSpec {
 
 /** Four guns, all lootable from the armory and the guard house. */
 export const WEAPONS: Record<WeaponId, WeaponSpec> = {
-  pistol: { name: 'M9 SIDEARM', mag: 12, reserve: 36, cool: 0.16, damage: 46, spread: 0.012, pellets: 1, reload: 1.25, auto: false },
-  carbine: { name: 'AR-4 CARBINE', mag: 30, reserve: 90, cool: 0.1, damage: 54, spread: 0.009, pellets: 1, reload: 1.7, auto: true },
-  shotgun: { name: 'M870 BREACHER', mag: 6, reserve: 24, cool: 0.72, damage: 30, spread: 0.055, pellets: 8, reload: 2.3, auto: false },
-  smg: { name: 'MP-9 COMPACT', mag: 32, reserve: 128, cool: 0.075, damage: 32, spread: 0.02, pellets: 1, reload: 1.5, auto: true },
+  // Reserves are three times what they were: the operative carries a war load.
+  pistol: { name: 'M9 SIDEARM', mag: 12, reserve: 108, cool: 0.16, damage: 46, spread: 0.012, pellets: 1, reload: 1.25, auto: false },
+  carbine: { name: 'AR-4 CARBINE', mag: 30, reserve: 270, cool: 0.1, damage: 54, spread: 0.009, pellets: 1, reload: 1.7, auto: true },
+  shotgun: { name: 'M870 BREACHER', mag: 6, reserve: 72, cool: 0.72, damage: 30, spread: 0.055, pellets: 8, reload: 2.3, auto: false },
+  smg: { name: 'MP-9 COMPACT', mag: 32, reserve: 384, cool: 0.075, damage: 32, spread: 0.02, pellets: 1, reload: 1.5, auto: true },
 };
 
 export interface PrisonPickup {
@@ -156,6 +160,28 @@ const rnd = (a: number, b: number) => a + Math.random() * (b - a);
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 const lerpTo = (v: number, target: number, k: number) => v + (target - v) * clamp(k, 0, 1);
 
+/**
+ * How far a body travels in one full gait cycle, in metres: a slow walk covers about a
+ * metre, a hard run nearly two. Both the simulation and the renderer use this number,
+ * which is what keeps the boots planted instead of skating.
+ */
+export const strideLength = (gait: number) => 1.05 + clamp((gait - 2.2) / 2, 0, 1) * 0.6;
+
+/** Radians of leg cycle for `metres` walked at `gait`. */
+export const stridePhase = (gait: number, metres: number) =>
+  metres <= 0 ? 0 : (metres / strideLength(gait || 1)) * Math.PI * 2;
+
+/** A person turns their whole body; they never snap to a new heading in one frame. */
+export const turnToward = (o: { ang: number; wantAng: number }, dt: number, rate = 3.9) => {
+  let d = o.wantAng - o.ang;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  const step = rate * dt;
+  o.ang += Math.abs(d) <= step ? d : Math.sign(d) * step;
+  if (o.ang > Math.PI * 2) o.ang -= Math.PI * 2;
+  if (o.ang < 0) o.ang += Math.PI * 2;
+};
+
 /** Wing origins: four parallel galleried cell houses. */
 export const wingZ = (wing: number) => (wing - 1.5) * 30;
 export const WING_X0 = -(WING_ROWS * CELL_W) / 2;
@@ -168,7 +194,7 @@ export class PrisonSim {
   buttons: PrisonButton[] = [];
   levers: PrisonLever[] = [];
   /** Rooms by name, so the HUD and the compass can say where things are. */
-  rooms: { name: string; x: number; z: number; w: number; d: number }[] = [];
+  rooms: { name: string; x: number; z: number; w: number; d: number; door: 'n' | 's' | 'e' | 'w' }[] = [];
   /** 0..1 how loud the sirens are right now (rises when the alarm is tripped). */
   siren = 0;
   props: PrisonProp[] = [];
@@ -183,7 +209,7 @@ export class PrisonSim {
   hp = 100; maxHp = 100; armor = 0;
   /** the gun in hand, and its state */
   weapon: WeaponId = 'pistol';
-  mag = 12; magSize = 12; reserve = 48; reloading = 0; cool = 0;
+  mag = 12; magSize = 12; reserve = 144; reloading = 0; cool = 0;
   /** seconds left of the cuffing cinematic: hands behind the back, no input */
   cuffed = 0;
   /** the floor grate in the workshop */
@@ -327,14 +353,17 @@ export class PrisonSim {
       const zb = wingZ(wing + 1) - CORRIDOR_HALF - CELL_D;
       const z = (za + zb) / 2;
       const len = WING_ROWS * CELL_W + 12;
-      W(-len / 2, z, len, 2.2, 0, 6);            // spine wall with gangway gaps
+      /* The spine wall runs down the middle of the cross corridor, centred on the hall,
+       * with a gangway every 22 m. It used to be built from x = -78, which laid a
+       * 156 m slab across the west side of the block and sealed off half the prison. */
+      let cur = -len / 2;
       for (let k = -3; k <= 3; k++) {
-        // gangway openings: cut the wall into segments so the player can pass
         const gapX = k * 22;
-        this.walls.pop();
-        W(-len / 2, z, gapX - 3 + len / 2, 2.2, 0, 6);
-        W(gapX + 3, z, len / 2 - gapX - 3, 2.2, 0, 6);
+        const g0 = gapX - 3, g1 = gapX + 3;
+        if (g0 > cur + 0.2) W((cur + g0) / 2, z, g0 - cur, 2.2, 0, 6);
+        cur = Math.max(cur, g1);
       }
+      if (len / 2 > cur + 0.2) W((cur + len / 2) / 2, z, len / 2 - cur, 2.2, 0, 6);
     }
   }
 
@@ -390,7 +419,7 @@ export class PrisonSim {
     horiz(cz + hd, door === 's');
     vert(cx - hw, door === 'w');
     vert(cx + hw, door === 'e');
-    this.rooms.push({ name, x: cx, z: cz, w, d });
+    this.rooms.push({ name, x: cx, z: cz, w, d, door });
   }
 
   /** The furniture that makes each room read as the room it is. */
@@ -467,12 +496,13 @@ export class PrisonSim {
   private spawnGuards() {
     let id = 0;
     const push = (x: number, z: number, patrol: { x: number; z: number }[], tower = false) => {
+      const face = rnd(0, TAU);
       this.guards.push({
-        id: id++, x, z, ang: rnd(0, TAU), y: tower ? 9.5 : 0,
+        id: id++, x, z, ang: face, y: tower ? 9.5 : 0,
         hp: 150, maxHp: 150, state: 'patrol', patrol, node: 0,
         cool: rnd(0.4, 1.6), alertT: 0, tower, flash: 0,
         vx: 0, vz: 0, vy: 0, tilt: 0, spin: 0, limb: 0, elite: false, room: '',
-        gait: 0, lastX: x, lastZ: z, cuffCool: 0,
+        gait: 0, lastX: x, lastZ: z, cuffCool: 0, wantAng: face,
       });
     };
     // 4 per wing corridor, walking the length of the block
@@ -507,13 +537,14 @@ export class PrisonSim {
       ['CONTROL B', 50, 82], ['CONTROL B', 56, 86], ['CONTROL B', 62, 78],
     ];
     for (const [room, x, z] of held) {
+      const face = rnd(0, TAU);
       this.guards.push({
-        id: id++, x, z, ang: rnd(0, TAU), y: 0,
+        id: id++, x, z, ang: face, y: 0,
         hp: 260, maxHp: 260, state: 'patrol',
         patrol: [{ x: x - 3, z }, { x: x + 3, z }, { x, z: z + 3 }, { x, z: z - 3 }], node: 0,
         cool: rnd(0.3, 0.9), alertT: 0, tower: false, flash: 0,
         vx: 0, vz: 0, vy: 0, tilt: 0, spin: 0, limb: 0, elite: true, room,
-        gait: 0, lastX: x, lastZ: z, cuffCool: 0,
+        gait: 0, lastX: x, lastZ: z, cuffCool: 0, wantAng: face,
       });
     }
     // eight tower marksmen
@@ -692,6 +723,33 @@ export class PrisonSim {
     P(-103, 44, 1.0, 1.0, 1.6, 'shelf');
     P(-88, 22.5, 0.9, 0.9, 0.9, 'bin', false);
 
+    /* ---- STRUCTURE: concrete piers across the hall, so it reads as a cell house ---- */
+    const ringX = 77, ringZ = 61;
+    for (let x = -78; x <= 78; x += 13) {
+      P(x, ringZ, 0.9, 0.9, 6.0, 'column');
+      P(x, -ringZ, 0.9, 0.9, 6.0, 'column');
+    }
+    for (let z = -58; z <= 58; z += 13) {
+      P(ringX, z, 0.9, 0.9, 6.0, 'column');
+      P(-ringX, z, 0.9, 0.9, 6.0, 'column');
+    }
+    // piers down the cross corridors between the wings, clear of the spine walls
+    for (let x = -66; x <= 66; x += 13) {
+      for (const z of [-34.5, -25.5, -4.5, 4.5, 25.5, 34.5]) P(x, z, 0.8, 0.8, 5.4, 'column');
+    }
+    // ceiling fixtures over every hall corridor, on the same grid as the piers
+    for (let x = -78; x <= 78; x += 6.5) {
+      P(x, ringZ, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+      P(x, -ringZ, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+    }
+    for (let z = -58; z <= 58; z += 6.5) {
+      P(ringX, z, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+      P(-ringX, z, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+    }
+    for (let x = -69.25; x <= 69.25; x += 13) {
+      for (const z of [-34.5, -25.5, -4.5, 4.5, 25.5, 34.5]) P(x, z, 1.72, 0.46, 0.14, 'lamp', false, 3.34);
+    }
+
     /* ---- the service ring and the yard: notices, extinguishers, bins ---- */
     for (const [x, z] of [[-70, 60], [70, 60], [-70, -60], [70, -60], [0, 84], [0, -84]] as [number, number][]) {
       P(x, z, 1.6, 0.14, 1.1, 'board', false, 1.5);
@@ -743,10 +801,10 @@ export class PrisonSim {
   private addPickups() {
     // consumables in the same places as before
     this.pickups.push({ x: -78, z: -76, y: 0.9, kind: 'medkit', taken: false });
-    this.pickups.push({ x: 80, z: 84, y: 0.9, kind: 'ammo', amount: 24, taken: false });
+    this.pickups.push({ x: 80, z: 84, y: 0.9, kind: 'ammo', amount: 72, taken: false });
     this.pickups.push({ x: 56, z: -80, y: 0.9, kind: 'armor', taken: false });
     this.pickups.push({ x: -56, z: 80, y: 0.9, kind: 'keys', taken: false });
-    this.pickups.push({ x: 0, z: 0, y: 0.9, kind: 'ammo', amount: 18, taken: false });
+    this.pickups.push({ x: 0, z: 0, y: 0.9, kind: 'ammo', amount: 54, taken: false });
     this.pickups.push({ x: 0, z: -96, y: 0.9, kind: 'medkit', taken: false });
     this.pickups.push({ x: -72, z: -88, y: 0.9, kind: 'medkit', taken: false });
     this.pickups.push({ x: 74, z: -96, y: 0.9, kind: 'armor', taken: false });
@@ -755,15 +813,15 @@ export class PrisonSim {
     this.pickups.push({ x: 88, z: 31.4, y: 1.1, kind: 'weapon', weapon: 'carbine', taken: false });
     this.pickups.push({ x: 93.0, z: 31.4, y: 1.1, kind: 'weapon', weapon: 'shotgun', taken: false });
     this.pickups.push({ x: 97.6, z: 31.4, y: 1.1, kind: 'weapon', weapon: 'smg', taken: false });
-    this.pickups.push({ x: 86.5, z: 34.5, y: 0.8, kind: 'ammo', amount: 90, taken: false });
-    this.pickups.push({ x: 90.5, z: 34.5, y: 0.8, kind: 'ammo', amount: 60, taken: false });
-    this.pickups.push({ x: 94.5, z: 34.5, y: 0.8, kind: 'ammo', amount: 60, taken: false });
+    this.pickups.push({ x: 86.5, z: 34.5, y: 0.8, kind: 'ammo', amount: 270, taken: false });
+    this.pickups.push({ x: 90.5, z: 34.5, y: 0.8, kind: 'ammo', amount: 180, taken: false });
+    this.pickups.push({ x: 94.5, z: 34.5, y: 0.8, kind: 'ammo', amount: 180, taken: false });
     this.pickups.push({ x: 99.5, z: 47.5, y: 1.1, kind: 'weapon', weapon: 'shotgun', taken: false });
     // GUARD HOUSE: the sergeant's shotgun behind the desk
     this.pickups.push({ x: -88, z: -3.2, y: 1.0, kind: 'weapon', weapon: 'shotgun', taken: false });
-    this.pickups.push({ x: -104, z: -14, y: 0.9, kind: 'ammo', amount: 36, taken: false });
+    this.pickups.push({ x: -104, z: -14, y: 0.9, kind: 'ammo', amount: 108, taken: false });
     // WORKSHOP: a stash the inmates hid under the bench
-    this.pickups.push({ x: 92, z: -15.4, y: 0.9, kind: 'ammo', amount: 45, taken: false });
+    this.pickups.push({ x: 92, z: -15.4, y: 0.9, kind: 'ammo', amount: 135, taken: false });
     this.pickups.push({ x: 84.9, z: -21.4, y: 0.9, kind: 'armor', taken: false });
   }
 
@@ -801,7 +859,7 @@ export class PrisonSim {
   /** Wake up on the bunk: full health, pistol ready, still locked in. */
   wake() {
     this.spawnInCell();
-    this.hp = this.maxHp; this.mag = this.magSize; this.reserve = Math.max(this.reserve, 24);
+    this.hp = this.maxHp; this.mag = this.magSize; this.reserve = Math.max(this.reserve, 72);
     this.alive = true; this.started = true; this.time = 0;
     this.message = 'YOU WAKE UP IN CELL 8-22 · THE LOCK ON YOUR BARS IS BEATEN, NOT BROKEN';
     this.messageT = 6;
@@ -964,7 +1022,7 @@ export class PrisonSim {
       this.lightsOut = !this.lightsOut;
       this.message = this.lightsOut ? 'LIGHTING GRID DOWN' : 'LIGHTING GRID RESTORED';
     } else if (l.id === 'armory') {
-      this.reserve += 60; this.armor = Math.max(this.armor, 60);
+      this.reserve += 180; this.armor = Math.max(this.armor, 60);
       for (const n of this.inmates) if (n.state === 'free' || n.state === 'fight') n.hp = Math.min(n.maxHp, n.hp + 20);
       this.events.push({ kind: 'armory', x: l.x, z: l.z, y: 1 });
       this.message = 'ARMORY RACK OPEN — AMMUNITION AND PLATES FOR EVERYONE';
@@ -1193,7 +1251,7 @@ export class PrisonSim {
         const tz = goToPlayer ? this.pz : foe && !sees ? foe.z : g.lastZ;
         const dx = tx - g.x, dz = tz - g.z;
         const d = Math.hypot(dx, dz) || 1;
-        g.ang = Math.atan2(dz, dx);
+        g.wantAng = Math.atan2(dz, dx);
         const sprinting = this.alarm > 0.5 || dToP < 14;
         const sp = (sprinting ? 4.15 : 3.15) * (g.elite ? 1.1 : 1);
         if (d > 1.05) {
@@ -1202,7 +1260,8 @@ export class PrisonSim {
           if (!this.staticBlocked(g.x + sx, g.z, 0.42)) g.x += sx;
           if (!this.staticBlocked(g.x, g.z + sz, 0.42)) g.z += sz;
           g.gait = Math.hypot(g.x - x0, g.z - z0) / Math.max(dt, 0.001);
-          g.limb += dt * (3.4 + g.gait * 1.6);
+          // the stride is driven by metres walked, so the boots never skate
+          g.limb += stridePhase(g.gait, g.gait * dt);
         } else {
           g.gait = 0;
           // close enough to fight an inmate
@@ -1233,12 +1292,14 @@ export class PrisonSim {
           const sp = (this.alarm > 0.5 ? 2.4 : 1.45) * (g.elite ? 1.25 : 1) * dt;
           const x0 = g.x, z0 = g.z;
           g.x += (dx / d) * sp; g.z += (dz / d) * sp;
-          g.ang = Math.atan2(dz, dx);
+          g.wantAng = Math.atan2(dz, dx);
           g.gait = Math.hypot(g.x - x0, g.z - z0) / Math.max(dt, 0.001);
-          g.limb += dt * (3.2 + g.gait * 1.7);
+          g.limb += stridePhase(g.gait, g.gait * dt);
         }
         if (g.alertT > 0) g.alertT -= dt;
       }
+      // a person turns their whole body at about 200 degrees a second, never instantly
+      turnToward(g, dt);
     }
 
     // ---- inmates ----
@@ -1260,8 +1321,13 @@ export class PrisonSim {
         if (!g || g.state === 'down') { n.state = 'free'; continue; }
         const dx = g.x - n.x, dz = g.z - n.z, d = Math.hypot(dx, dz) || 1;
         n.ang = Math.atan2(dz, dx);
-        if (d > 1.3) { n.x += (dx / d) * 3.1 * dt; n.z += (dz / d) * 3.1 * dt; n.limb += dt * 8.4; }
-        else {
+        if (d > 1.3) {
+          const x0 = n.x, z0 = n.z;
+          n.x += (dx / d) * 3.1 * dt; n.z += (dz / d) * 3.1 * dt;
+          n.gait = Math.hypot(n.x - x0, n.z - z0) / Math.max(dt, 0.001);
+          n.limb += stridePhase(n.gait, n.gait * dt);
+        } else n.gait = 0;
+        if (d <= 1.3) {
           g.hp -= 26 * dt;
           if (g.hp <= 0) {
             g.state = 'down'; this.stats.guardsDown++;
@@ -1281,12 +1347,12 @@ export class PrisonSim {
           this.equip(p.weapon);
           this.message = `${WEAPONS[p.weapon].name} IN HAND — ${WEAPONS[p.weapon].mag} IN THE MAG`;
         } else if (p.kind === 'ammo') {
-          this.reserve += p.amount ?? 36;
-          this.message = `AMMUNITION +${p.amount ?? 36} · ${this.spec.name}`;
+          this.reserve += p.amount ?? 108;
+          this.message = `AMMUNITION +${p.amount ?? 108} · ${this.spec.name}`;
         } else if (p.kind === 'medkit') this.hp = Math.min(this.maxHp, this.hp + 45);
         else if (p.kind === 'armor') this.armor = Math.min(100, this.armor + 50);
         else if (p.kind === 'keys') {
-          this.reserve += 12;
+          this.reserve += 36;
           this.message = 'A RING OF KEYS — SOMEONE ELSE\'S BAD DAY';
         }
         this.messageT = 3.5;
@@ -1364,7 +1430,7 @@ export class PrisonSim {
     this.allOpen = false;
     // the gun you stole is gone; the sergeant keeps it
     this.weapon = 'pistol'; this.magSize = WEAPONS.pistol.mag; this.mag = WEAPONS.pistol.mag;
-    this.reserve = 12; this.reloading = 0;
+    this.reserve = 36; this.reloading = 0;
     for (const o of this.guards) {
       if (o === g) continue;
       if (Math.hypot(o.x - this.px, o.z - this.pz) < 9) { o.state = 'patrol'; o.alertT = 0; o.cuffCool = 3; }
