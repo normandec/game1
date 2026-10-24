@@ -16,6 +16,8 @@ The original continuous north wall has been split into two physical sections. Ra
 - C: consume one AEGIS cell for a three-second invulnerable forward shield. It does not protect the rear.
 - G / right mouse: grenade, aircraft rockets or bomber payload.
 - Space / Shift: dash on foot; Shift boosts a driven van.
+- I / Tab: open or close the kit — the operative's loadout, grouped as it is packed.
+- In a seized interceptor: Shift burns, S brakes, A / D rolls, X swaps cannon and missile stations, G / Q fires a locked missile, E toggles the orbit autopilot, Space drops countermeasures and breaks hard.
 - Escape / P: pause the battlefield.
 
 Inside the 3D vault, WASD moves the operative, dragging rotates the camera and the wheel zooms. The numbered station tabs move the camera to the air wing, operations, quartermaster and Carter archive. Aircraft requisitions and supplies work only after reaching the vault in the campaign. The menu's 3D tour does not grant rewards.
@@ -39,6 +41,16 @@ Inside the 3D vault, WASD moves the operative, dragging rotates the camera and t
 - Cached facility art includes containment chambers, radar dishes, vehicle lifts, transformers, cooling tanks and weapon racks. Roof cutaways reveal the laboratory, workshop and armory interiors.
 - Assault waves now deploy 4 to 8 fireteams. Distant garrisons sleep, and infantry separation uses neighboring spatial buckets.
 
+## Iron Reserve
+
+- The army district is new ground south of the legacy frame in sector 6: a kilometre-long parade of a thousand men, megahangars, tower blocks, radomes, a water tower, artillery casemates and a motor pool. Its ranks, hulls, gates and turrets wake in stages; the base is built to be practically indestructible.
+- Every army soldier wears camouflage — woodland, desert and winter patterns are drawn per unit, so a rank does not read as one flat colour.
+- Cars are everywhere: staff cars and fuel bowsers parked in the motor pool and driven on four traffic circuits that loop the perimeter road, the causeway, the air park and the east service road.
+- A military prison stands inside the sector: a wire compound with two cell blocks and four guard towers. Clear the military police around it and press F to break the stockade — fourteen of the army's own fall in on your side.
+- Sector 3 hides the Glacier Vault behind an ice gate at X 10 710 / Y 9 820. The door opens on a bright three-dimensional hall of blue ice: twenty shield troopers in winter camouflage, two gunships that rise out of the wells and fight for you, and the Frostwing — an ice interceptor that grants permanent clearance, +30 health and a colder, faster airframe.
+- The seized interceptor has a full flight model: throttle, airbrake, afterburner, a 57-degree seeker cone, cannon and missile stations, countermeasures with a hard break, and an orbit autopilot.
+- Routine life in the bases does not wait for the player: patrols walk their posts, crews service hulls, convoys load and roll out, and guards rotate through the watchtowers while the alarm net is still asleep.
+
 ## Verification
 
 The production build is verified with the supplied build tool. Browser playthroughs, WebGL appearance and device-specific frame rates still need manual verification.
@@ -56,5 +68,7 @@ Suggested manual checks: enter and exit the vault without losing progress; seal 
 - Mnemosyne Library, farther north, contains three Carter volumes. Use F to read nearby volumes. The correct sequence is III, I, II: the last watch, the first oath, the second dawn. Solving it awards a 60-second searchlight identity mask, score and an EMP upgrade; existing convoys are not cancelled.
 - Airfield and depot patrols move in two-column formations. Regular attack rosters follow phase doctrine rather than random tactic selection; the general still reacts to the player's mobility and use of cover.
 - The Nightjar has a revised swept-wing silhouette, four engine nacelles, panel seams, cockpit glass, markings and an animated bomb bay. Its carpet bombs now descend from altitude instead of bouncing along walls.
+
+Iron Reserve checks: walk a camouflage rank and confirm the pattern varies per soldier; drive the four traffic circuits; count the megahangars from the causeway; clear the military police around the stockade and break it open; open the ice gate in sector 3, fight through the vault, take the Frostwing and return to the surface; in the interceptor, lock a target, fire a missile, drop flares and let the autopilot orbit.
 
 Additional manual checks: stand in a searchlight cone and count the five reserve vans; hide behind a wall until tracking ends; breach each guarded zone and check eight crews of eight; watch rope and parachute landings; destroy a wall section and drive through a wide enough breach; solve the library index; verify return trips and congestion recovery in narrow convoy lanes.

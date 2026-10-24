@@ -21,6 +21,19 @@ export function structuralHealth(kind: StructKind) {
   if (kind === 'barrel') return 90;
   if (kind === 'tank') return 320;
   if (kind === 'console') return 280;
+  // Army strongpoints: the megastructures take sustained artillery, the soft-skinned
+  // vehicles do not.
+  if (kind === 'rampart') return 900;
+  if (kind === 'kazemat' || kind === 'silo') return 760;
+  if (kind === 'megahangar' || kind === 'towerblock' || kind === 'radome') return 640;
+  if (kind === 'dronebay' || kind === 'stockade' || kind === 'watertower') return 420;
+  if (kind === 'railcar' || kind === 'gantry' || kind === 'crane') return 300;
+  if (kind === 'launcher' || kind === 'howitzer') return 260;
+  if (kind === 'tent' || kind === 'target') return 70;
+  if (kind === 'bladder') return 110;
+  if (kind === 'car') return 90;
+  if (kind === 'humvee') return 180;
+  if (kind === 'bus' || kind === 'tanker') return 160;
   return 220;
 }
 

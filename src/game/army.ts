@@ -73,6 +73,10 @@ export interface ArmyPlan {
   strongpoints: ArmyStrongpoint[];
   /** Extra soldiers holding the strongpoints (world seeds them as enemies). */
   guards: { x: number; y: number; type: string }[];
+  /** Traffic circuits: convoys and staff cars drive these loops all day. */
+  routes: { x: number; y: number }[][];
+  /** The brig: break it open and the inmates fight for whoever freed them. */
+  stockade: { x: number; y: number; w: number; h: number };
   /** Where the base alarm is tripped: crossing into the walled compound. */
   alarm: { x: number; y: number; w: number; h: number };
   spawn: { x: number; y: number };
@@ -109,6 +113,7 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
   const turrets: ArmyTurretSpot[] = [];
   const strongpoints: ArmyStrongpoint[] = [];
   const guards: { x: number; y: number; type: string }[] = [];
+  const routes: { x: number; y: number }[][] = [];
 
   const gate = (x: number, y: number, w: number, h: number, innerGate: boolean, hp: number): ArmyGate => {
     const rects: Rect[] = [];
@@ -357,13 +362,87 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
   zone(base.x + 4300, y0 + 690, 4600, 340, 'runway');
   zone(base.x + 4300, y0 + 680, 240, 360, 'concrete');
 
+  // Two aircraft halls the size of a cathedral: a megahangar is 190 m of clear span, and
+  // the whole wing taxies out of one end.
   for (let i = 0; i < 2; i++) {
-    const hx = base.x + 4600 + i * 2200;
-    add(hx, y0 + 760, 1500, 260, 'hangar', 96);
-    add(hx, y0 + 760, 40, 260, 'hangar', 90);
-    add(hx + 1460, y0 + 760, 40, 260, 'hangar', 90);
-    zone(hx + 40, y0 + 1020, 1420, 120, 'concrete');
+    const hx = base.x + 4300 + i * 2100;
+    add(hx, y0 + 620, 1900, 420, 'megahangar', 170);
+    zone(hx + 60, y0 + 1036, 1780, 22, 'concrete');
+    zone(hx - 60, y0 + 1040, 2020, 110, 'concrete');
+    man(hx + 180, y0 + 1080, 'armyengineer');
+    man(hx + 1660, y0 + 1080, 'armyguard');
   }
+  // control tower over the apron
+  add(base.x + 6300, y0 + 1150, 260, 260, 'tower', 140);
+  squad(base.x + 6430, y0 + 1290, 3, ['armyguard', 'armyengineer'], 60);
+
+  /* ---------------- MEGASTRUCTURES ---------------- */
+  // Eight-storey accommodation blocks, the kind that house a battalion each.
+  post('towerblock-w', 'ACCOMMODATION BLOCK A · 8 FLOORS', base.x + 100, y0 + 1260, 700, 520, 24);
+  add(base.x + 120, y0 + 1300, 660, 450, 'towerblock', 300, '#6a7258');
+  post('towerblock-e', 'ACCOMMODATION BLOCK B · 8 FLOORS', base.x + 8800, y0 + 1260, 700, 520, 24);
+  add(base.x + 8820, y0 + 1300, 660, 450, 'towerblock', 300, '#6a7258');
+  squad(base.x + 450, y0 + 1830, 5, ['armytrooper', 'armytrooper', 'armyguard', 'armymedic'], 90);
+  squad(base.x + 9150, y0 + 1830, 5, ['armytrooper', 'armytrooper', 'armyguard', 'armyengineer'], 90);
+
+  // Radar domes: a 40 m golf ball on a plinth, and the array that feeds it.
+  add(base.x + 180, y0 + 1960, 520, 520, 'radome', 190, '#c9d4c0');
+  add(base.x + 1900, y0 + 2820, 420, 420, 'radome', 190, '#c9d4c0');
+  add(base.x + 780, y0 + 2020, 260, 200, 'radar', 90, '#5a6656');
+
+  // A water tower tall enough to gravity-feed the whole base.
+  add(base.x + 8920, y0 + 2000, 380, 380, 'watertower', 260, '#8b967e');
+  add(base.x + 8840, y0 + 2420, 540, 24, 'sandbag', 16);
+
+  // Artillery casemates along the south wall: concrete boxes with a gun in the mouth.
+  for (let i = 0; i < 4; i++) {
+    const kx = base.x + 1200 + i * 1900;
+    add(kx, y0 + 3040, 520, 200, 'kazemat', 120, '#7d8670');
+    man(kx + 250, y0 + 2990, 'armyengineer');
+    man(kx + 300, y0 + 3000, 'armyguard');
+  }
+  post('casemates', 'ARTILLERY CASEMATES', base.x + 1100, y0 + 3000, 8000, 260, 16);
+
+  /* ---------------- STOCKADE / MILITARY PRISON ----------------
+   * A base this size has its own brig: wire, four guard towers, two cell blocks and an
+   * exercise cage. The inmates are the army's own — deserters, and the ones who asked
+   * questions. Break the stockade open and they will fight for whoever freed them.
+   */
+  const stock = { x: base.x + 2100, y: y0 + 640, w: 1500, h: 460 };
+  post('stockade', 'STOCKADE / MILITARY PRISON', stock.x, stock.y, stock.w, stock.h, 22);
+  add(stock.x + 120, stock.y + 70, 520, 300, 'stockade', 74, '#7a7f6a');
+  add(stock.x + 760, stock.y + 70, 520, 300, 'stockade', 74, '#7a7f6a');
+  add(stock.x + 40, stock.y + 390, 1420, 24, 'fence', 54, '#9aa08a');
+  add(stock.x + 40, stock.y + 34, 1420, 18, 'fence', 54, '#9aa08a');
+  add(stock.x - 10, stock.y + 34, 20, 380, 'fence', 54, '#9aa08a');
+  add(stock.x + 1480, stock.y + 34, 20, 380, 'fence', 54, '#9aa08a');
+  for (const [tx, ty] of [[stock.x + 60, stock.y + 60], [stock.x + 1380, stock.y + 60],
+    [stock.x + 60, stock.y + 380], [stock.x + 1380, stock.y + 380]] as const) {
+    add(tx, ty, 90, 90, 'tower', 96, '#7d8670');
+    man(tx + 45, ty + 120, 'armymajor');
+  }
+  // the exercise cage in the middle
+  add(stock.x + 660, stock.y + 390, 330, 60, 'fence', 40, '#9aa08a');
+  for (let i = 0; i < 6; i++) man(stock.x + 200 + i * 190, stock.y + 440, 'armyengineer');
+
+  /* ---------------- MOTOR POOL: vehicles, parked and working ---------------- */
+  post('motorpool', 'MOTOR POOL / VEHICLE DEPOT', base.x + 800, y0 + 2360, 1700, 700, 18);
+  for (let i = 0; i < 8; i++) {
+    const vx = base.x + 860 + (i % 4) * 400, vy = y0 + 2420 + Math.floor(i / 4) * 300;
+    const kind = (['humvee', 'car', 'tanker', 'bus'] as const)[i % 4];
+    const w = kind === 'bus' ? 260 : kind === 'tanker' ? 220 : 150;
+    const h = kind === 'bus' ? 100 : kind === 'tanker' ? 90 : 74;
+    add(vx, vy, w, h, kind, kind === 'bus' ? 96 : 62);
+  }
+  add(base.x + 800, y0 + 2340, 1700, 22, 'sandbag', 16);
+  add(base.x + 800, y0 + 3020, 1700, 22, 'sandbag', 16);
+  squad(base.x + 1650, y0 + 2700, 6, ['armyengineer', 'armytrooper', 'armyguard'], 100);
+
+  // A fuel point and a wash rack on the east side of the pool.
+  add(base.x + 2580, y0 + 2500, 320, 240, 'bladder', 60, '#5c5c44');
+  add(base.x + 2560, y0 + 2760, 380, 24, 'sandbag', 16);
+  for (let i = 0; i < 6; i++) add(base.x + 2620 + (i % 3) * 110, y0 + 2840 + Math.floor(i / 3) * 110, 52, 52, 'barrel', 26, '#6e6234');
+  man(base.x + 2700, y0 + 2960, 'armyengineer');
   post('airpark', 'AIR PARK / 9TH AIR WING', base.x + 4300, y0 + 660, 4600, 520, 26);
   squad(base.x + 5400, y0 + 980, 5, ['armyengineer', 'armyguard'], 120);
   squad(base.x + 7600, y0 + 980, 5, ['armyengineer', 'armyguard'], 120);
@@ -533,9 +612,31 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
     void t;
   }
 
+  /* ---------------- TRAFFIC CIRCUITS ----------------
+   * Four loops: the perimeter road inside the wall, the causeway approach, the air-park
+   * access and the east service road. Convoys, staff cars and fuel bowsers work them.
+   */
+  const midY = y0 + 1120;
+  routes.push([
+    { x: base.x + 200, y: midY }, { x: CX - 700, y: midY }, { x: CX - 700, y: base.y + 500 },
+    { x: base.x + 200, y: base.y + 500 },
+  ]);
+  routes.push([
+    { x: CX + 700, y: midY }, { x: base.x + base.w - 200, y: midY },
+    { x: base.x + base.w - 200, y: y0 + 2400 }, { x: CX + 700, y: y0 + 2400 },
+  ]);
+  routes.push([
+    { x: CX, y: y0 + 300 }, { x: CX, y: base.y + 240 }, { x: CX - 1000, y: base.y + 240 },
+    { x: CX - 1000, y: y0 + 300 },
+  ]);
+  routes.push([
+    { x: CX - 300, y: y0 + 1900 }, { x: CX + 300, y: y0 + 1900 },
+    { x: CX + 300, y: y0 + 2900 }, { x: CX - 300, y: y0 + 2900 },
+  ]);
+
   return {
     region, base, core, parade, tanks, tankPatrols, helis, jets, turrets, generators, gates,
-    strongpoints, guards,
+    strongpoints, guards, routes, stockade: stock,
     alarm: { x: inner.x - 200, y: base.y, w: inner.w + 400, h: base.h },
     spawn: { x: CX, y: y0 + 260 },
     hq: { x: CX, y: core.y + core.h / 2 },

@@ -340,3 +340,31 @@ kbd { font-family: 'Share Tech Mono', monospace; }
   .combat-override { top: 20%; padding: 7px; }.combat-override b { font-size: 10px; }.combat-override p { display: none; }
   .operation-briefing { justify-content: start; padding: 22px 6%; }.briefing-stamp svg { width: 34px; }.briefing-stamp > b { font-size: 7px; letter-spacing: .5px; }.briefing-classification { font-size: 7px; letter-spacing: 1px; margin: 16px 0 22px; }.briefing-document > p { font-size: 11px; line-height: 1.85; }.briefing-orders { gap: 11px; flex-direction: column; padding: 13px 0; }.briefing-orders ol { font-size: 9px; }.briefing-actions { flex-wrap: wrap; gap: 12px; margin-top: 19px; }.briefing-actions > small { display: none; }.briefing-signal { font-size: 6px; letter-spacing: 1px; line-height: 1.7; margin-bottom: 15px; }
 }
+
+/* ---------------- THE KIT ----------------
+ * A loadout board, not a stat readout: groups that read like pouches, one chip per item,
+ * tone-coloured by what the thing is (ice = clearance, gold = ordnance, danger = lost).
+ */
+.combat-inventory { position: absolute; left: 24px; bottom: 164px; pointer-events: auto; }
+.combat-inventory .inv-toggle { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid #81bdb355; background: #0b1c26c9; color: #a9d6cc; font: 9px 'Share Tech Mono', monospace; letter-spacing: .18em; cursor: pointer; }
+.combat-inventory .inv-toggle kbd { padding: 1px 4px; border: 1px solid #81bdb366; border-radius: 2px; font-size: 8px; }
+.combat-inventory.open .inv-toggle { border-color: #9fe8ff88; color: #d8f6ff; }
+.inv-panel { position: absolute; left: 0; bottom: 38px; width: 430px; max-height: min(62vh, 520px); overflow: auto; border: 1px solid #7fd4e855; border-left: 2px solid #9fe8ffaa; background: linear-gradient(180deg, #071820f2, #05121af2); box-shadow: 0 18px 40px #000a; backdrop-filter: blur(6px); }
+.inv-panel header { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px 8px; border-bottom: 1px solid #7fd4e833; }
+.inv-panel header b { color: #d8f6ff; font: 11px 'Share Tech Mono', monospace; letter-spacing: .22em; }
+.inv-panel header span { color: #6fa6b1; font: 8px 'Share Tech Mono', monospace; letter-spacing: .24em; }
+.inv-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; padding: 10px 12px; }
+.inv-groups section { min-width: 0; }
+.inv-groups h4 { margin: 0 0 4px; color: #7fd4e8; font: 8px 'Share Tech Mono', monospace; letter-spacing: .26em; opacity: .85; }
+.inv-groups ul { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.inv-groups li { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 3px 6px; border-left: 2px solid #2c4a55; background: #0c2029aa; color: #b9d8d3; font: 9px 'Share Tech Mono', monospace; letter-spacing: .06em; }
+.inv-groups li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inv-groups li b { flex: none; color: #e7f6f2; font-weight: 400; }
+.inv-groups li.tone-active { border-left-color: #9fe8ff; background: #103039cc; }
+.inv-groups li.tone-ice { border-left-color: #8be8ff; }
+.inv-groups li.tone-gold { border-left-color: #e8c168; }
+.inv-groups li.tone-sky { border-left-color: #7fb4e8; }
+.inv-groups li.tone-steel { border-left-color: #6f8a86; }
+.inv-groups li.tone-danger { border-left-color: #ff7a6a; color: #ffb9ad; }
+.inv-panel footer { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 12px; border-top: 1px solid #7fd4e833; color: #7fb0a9; font: 8px 'Share Tech Mono', monospace; letter-spacing: .18em; }
+@media (max-width: 720px) { .inv-panel { width: min(92vw, 430px); } .combat-inventory { left: 12px; bottom: 210px; } }

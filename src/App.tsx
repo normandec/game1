@@ -10,6 +10,7 @@ import OperationsMenu from './components/OperationsMenu';
 import CombatHud from './components/CombatHud';
 import OperationBriefing from './components/OperationBriefing';
 import Prison3D, { type PrisonMode } from './components/Prison3D';
+import Glacier3D, { type GlacierStats } from './components/Glacier3D';
 import type { PrisonStats } from './game/prison';
 
 const emptyHud: Hud = {
@@ -25,7 +26,10 @@ const emptyHud: Hud = {
   heliStation: 0, heliAmmo: [-1, 8, 6] as [number, number, number], heliLock: false,
   armyAlarm: 0, armyAwake: 0, armyTotal: 0, turretsHeld: 0, turretsTotal: 0, turretPrompt: '',
   sector: 1, basesCleared: 0, sectorName: 'THE FALLEN HUB', destination: '', transitPct: 0,
-  driving: false, tank: false, flyingPlane: false, jet: false, jetBoost: 0, allies: 0, barricades: 0, siegeActive: false,
+  driving: false, tank: false, flyingPlane: false, jet: false, jetBoost: 0,
+  jetSpeed: 0, jetAlt: 0, jetMode: 'cannon', jetFlares: 0, jetLock: '', jetAutopilot: false, frostwing: false,
+  inventory: [],
+  allies: 0, barricades: 0, siegeActive: false,
   lasersHeld: 0, poisCaptured: 0, poisTotal: 5, vaultFound: false, nearPrompt: '',
   coords: 'X 6000  Y 6800', gatePrompt: '', aegisCharges: 0, aegisTime: 0, mouseSens: 1,
   vehicleHp: 0, vehicleMax: 1, vehicleFuel: 100,
@@ -119,6 +123,13 @@ export default function App() {
     setPrisonMode(mode);
     setStatus('prison');
   }, [setStatus]);
+  /** The hidden ice base hands the operative back to the surface with whatever he found. */
+  const handleGlacier = useCallback(() => setStatus('glacier'), [setStatus]);
+  const handleGlacierExit = useCallback((stats: GlacierStats, tookPlane: boolean) => {
+    gameRef.current?.leaveGlacier(stats, tookPlane);
+    setStatus('playing');
+  }, [setStatus]);
+
   const handlePrisonExit = useCallback((stats: PrisonStats, escaped: boolean) => {
     const g = gameRef.current;
     g?.leavePrison(stats, escaped);
@@ -142,6 +153,7 @@ export default function App() {
       onTransit: handleTransit,
       onVault: handleVault,
       onPrison: handlePrison,
+      onGlacier: handleGlacier,
       onArrestAnimChange: handleArrestAnim,
     });
     gameRef.current = g;
@@ -248,11 +260,12 @@ export default function App() {
       <canvas
         ref={canvasRef}
         className="absolute inset-0 block h-full w-full touch-none"
-        style={{ cursor: status === 'playing' && !touch ? 'crosshair' : 'default', visibility: status === 'interior' || status === 'menu' || status === 'prison' ? 'hidden' : 'visible' }}
+        style={{ cursor: status === 'playing' && !touch ? 'crosshair' : 'default', visibility: status === 'interior' || status === 'menu' || status === 'prison' || status === 'glacier' ? 'hidden' : 'visible' }}
       />
 
       {status === 'menu' && !tour && <VaultRoom backdrop onExit={() => {}} onAction={() => ''} />}
       {status === 'prison' && <Prison3D mode={prisonMode} onExit={handlePrisonExit} />}
+      {status === 'glacier' && <Glacier3D onExit={handleGlacierExit} />}
 
       {(status === 'interior' || tour) && <VaultRoom preview={tour}
         onExit={() => tour ? setTour(false) : gameRef.current?.leaveVault()}

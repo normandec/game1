@@ -1,7 +1,7 @@
 import { sfx } from './audio';
 import type { SectorDressing } from './sectorKits';
 import type { ArmyPlan } from './army';
-import { AIRFIELD, VAULT_ENTRY, ARENA_W, ARENA_H, HQ, PLAYER_START, SECTORS, SpatialGrid, generateWorld, type Rect, type Zone } from './world';
+import { AIRFIELD, VAULT_ENTRY, ARENA_W, ARENA_H, GEN_H, HQ, PLAYER_START, SECTORS, SpatialGrid, generateWorld, type Rect, type Zone } from './world';
 import { RoutePlanner, segmentBox, segmentCircle, type Point, type Block } from './navigation';
 import { makeGates, makeDetails, gateBlocks, drawGate, drawDetails, type HydraulicGate, type RoomDetail } from './installations';
 import { drawTransport, drawParkedAircraft } from './vehicleArt';
@@ -26,6 +26,8 @@ export { ARENA_W, ARENA_H };
 export type GameStatus = 'menu' | 'playing' | 'paused' | 'over' | 'upgrade' | 'transit' | 'victory' | 'interior'
   /** Cuffed and driven away: the van ride before the prison. */
   | 'arrest'
+  /** Inside the hidden glacier base, drawn by Glacier3D. */
+  | 'glacier'
   /** Inside the fully 3D prison, drawn by Prison3D. */
   | 'prison';
 
@@ -81,8 +83,12 @@ export interface Hud {
   heliStation: number; heliAmmo: [number, number, number]; heliLock: boolean;
   sector: number; basesCleared: number; sectorName: string; destination: string; transitPct: number;
   driving: boolean; tank: boolean; flyingPlane: boolean; allies: number; barricades: number;
-  /** Seized army interceptor and its afterburner level. */
+  /** Seized army interceptor: afterburner, airspeed, station, flares and lock. */
   jet: boolean; jetBoost: number;
+  jetSpeed: number; jetAlt: number; jetMode: string; jetFlares: number;
+  jetLock: string; jetAutopilot: boolean; frostwing: boolean;
+  /** The kit: four groups of item chips, built every HUD tick. */
+  inventory: { group: string; items: { label: string; detail: string; tone: string }[] }[];
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
   vaultFound: boolean; nearPrompt: string;
   coords: string; gatePrompt: string; aegisCharges: number; aegisTime: number;
@@ -248,6 +254,21 @@ interface Plough {
   /** Distance from the centreline to the shoulder the load is thrown onto. */
   off: number;
 }
+/** A vehicle working a base circuit: convoy truck, staff car, fuel bowser, ambulance. */
+interface RoadCar {
+  x: number; y: number; ang: number; speed: number;
+  kind: 'car' | 'humvee' | 'bus' | 'tanker' | 'ambulance';
+  route: { x: number; y: number }[]; node: number;
+  /** Metres of road held before the next one moves: convoys keep their spacing. */
+  wait: number; dead: boolean; colour: string;
+  /** Siren / indicator phase so lights blink instead of glowing flat. */
+  light: number;
+}
+/** A routine the garrison performs on a timer: PT, shift change, refuel, alarm test. */
+interface ArmyRoutine {
+  kind: 'pt' | 'shift' | 'siren' | 'drill' | 'crane' | 'colors';
+  x: number; y: number; t: number; dur: number; label: string;
+}
 /** A heap of snow / dust / slurry beside a road. Ploughs grow it, weather slowly adds to it. */
 interface SnowBank { x: number; y: number; r: number; h: number; fill: number; }
 /**
@@ -270,6 +291,14 @@ interface ArmyJet {
   manned?: boolean;
   /** 0..1 afterburner, only meaningful while manned. */
   boost?: number;
+  /** Selected wing station while manned: cannon or missile. */
+  mode?: 'cannon' | 'missile';
+  /** Countermeasure cartridges left. */
+  flares?: number;
+  /** Autopilot: holds a circle over the locked target. */
+  autopilot?: boolean;
+  /** Missile seeker: what the nose is currently holding. */
+  lock?: { x: number; y: number; label: string; air: boolean } | null;
 }
 /** Attack gunship — strafes, hovers, rockets the player. */
 interface Heli {
@@ -455,6 +484,7 @@ export class Game {
   onTransit: (sector: number) => void;
   onVault: (open: boolean) => void;
   onPrison: (mode: 'arrest' | 'visit') => void;
+  onGlacier: () => void;
   onArrestAnimChange: (on: boolean) => void;
 
   mods: Mods = defaultMods();
@@ -491,6 +521,13 @@ export class Game {
   private dressing: SectorDressing | null = null;
   /** Snowploughs working their lanes (Arctic only). */
   ploughs: Plough[] = [];
+  /** Moving traffic on the base roads and the annex ring road. */
+  roadCars: RoadCar[] = [];
+  /** Garrison routines currently playing out, drawn as little scenes. */
+  routines: ArmyRoutine[] = [];
+  routineT = 6;
+  /** Every third routine is a big one, so the base never repeats itself twice in a row. */
+  routineSeq = 0;
   /** Heaps of snow / red dust / slurry beside the roads. */
   snowBanks: SnowBank[] = [];
   /** Lanes the ploughs have already cleared, drawn over the snow. */
@@ -508,9 +545,20 @@ export class Game {
   armyJets: ArmyJet[] = [];
   /** The army interceptor the operative is flying, if any. */
   playerJet: ArmyJet | null = null;
+  /** Air-to-air / air-to-ground missiles in flight from the interceptor. */
+  jetMissiles: { x: number; y: number; vx: number; vy: number; life: number; air: boolean; dmg: number }[] = [];
+  /** Afterburner trail positions, drawn as a heat plume. */
+  jetTrail: { x: number; y: number; t: number }[] = [];
   /** Armour sortie clock and how many hulls the park has already sent. */
   armyTankWaveT = 0;
   armyTankSent = 0;
+  /** The military prison in sector 6: break the brig and its inmates fall in with you. */
+  stockadeOpen = false;
+  private stockadeSpot: { x: number; y: number; w: number; h: number } | null = null;
+  /** The glacier gate in sector 3 and the Frostwing clearance it can grant. */
+  glacierSpot: { x: number; y: number } | null = null;
+  glacierVisits = 0;
+  frostwing = false;
   /** The Cage crossing: an orange suspension bridge that can be severed for good. */
   bridgeHp = 2600;
   bridgeMaxHp = 2600;
@@ -731,6 +779,7 @@ export class Game {
     onVictory: (s: number, w: number) => void; onTransit: (sector: number) => void;
     onVault: (open: boolean) => void;
     onPrison: (mode: 'arrest' | 'visit') => void;
+  onGlacier: () => void;
     onArrestAnimChange: (on: boolean) => void;
   }) {
     this.canvas = canvas;
@@ -741,6 +790,7 @@ export class Game {
     this.onTransit = cb.onTransit;
     this.onVault = cb.onVault;
     this.onPrison = cb.onPrison;
+    this.onGlacier = cb.onGlacier;
     this.onArrestAnimChange = cb.onArrestAnimChange;
     try {
       const saved = parseFloat(localStorage.getItem('pse.aimSens') || '');
@@ -894,12 +944,47 @@ export class Game {
     this.weatherT = 0;
     /* ---------------- IRON RESERVE ---------------- */
     this.army = world.army;
+    this.glacierSpot = world.glacier;
+    this.stockadeSpot = world.army?.stockade ?? null;
+    this.stockadeOpen = false;
     this.armyRanksData = world.ranks || [];
     this.armyGuardsData = world.armyGuards || [];
     this.armyAlarm = 0; this.armyAlerted = false; this.armyWakeT = 0; this.armyWaves = 0;
     this.playerJet = null; this.armyTankWaveT = 0; this.armyTankSent = 0;
+    this.jetMissiles = []; this.jetTrail = [];
     this.bridgeHp = this.bridgeMaxHp; this.bridgeDown = false; this.bridgeWarn = 0;
     this.armyLaunchT = 0;
+    // Traffic. Army circuits in sector 6; the annex ring road everywhere else.
+    this.roadCars = [];
+    const routes = world.army?.routes || [];
+    const fallback = [[
+      { x: 900, y: GEN_H + 2000 }, { x: 11200, y: GEN_H + 2000 },
+      { x: 11200, y: GEN_H + 2500 }, { x: 900, y: GEN_H + 2500 },
+    ]];
+    const useRoutes = routes.length ? routes : fallback;
+    const carKinds: RoadCar['kind'][] = ['humvee', 'car', 'bus', 'tanker', 'ambulance', 'humvee', 'car'];
+    const colours = ['#5a6349', '#8a8f7a', '#33474a', '#6a5f45', '#9a9f88', '#4e5743', '#7d7f6a'];
+    for (let r = 0; r < useRoutes.length; r++) {
+      const route = useRoutes[r];
+      const n = route.length;
+      for (let i = 0; i < 2 + (r % 2); i++) {
+        const t = (i + 0.5) / 3;
+        const seg = t * n;
+        const a = route[Math.floor(seg) % n], b = route[(Math.floor(seg) + 1) % n];
+        const f = seg - Math.floor(seg);
+        this.roadCars.push({
+          x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f,
+          ang: Math.atan2(b.y - a.y, b.x - a.x),
+          speed: 62 + rand(0, 46),
+          kind: carKinds[(r * 3 + i) % carKinds.length],
+          route, node: (Math.floor(seg) + 1) % n,
+          wait: i * 26 + rand(0, 20), dead: false,
+          colour: colours[(r * 3 + i) % colours.length],
+          light: rand(0, TAU),
+        });
+      }
+    }
+    this.routines = []; this.routineT = 6; this.routineSeq = 0;
     this.armyTurrets = (world.army?.turrets || []).map((t) => ({
       x: t.x, y: t.y, ang: t.ang, hp: t.heavy ? 900 : 620, maxHp: t.heavy ? 900 : 620,
       owner: 'enemy' as const, cool: rand(0, 2), heavy: t.heavy, burst: 0, flash: 0, muzzle: 0,
@@ -967,7 +1052,9 @@ export class Game {
     });
     this.vtols = [];
 
-    const insert = world.dressing?.start || PLAYER_START;
+    // The start must never be inside a wall: the army district moved buildings onto the
+    // old insert points, so settle the spawn exactly like a loot cache.
+    const insert = settle(world.dressing?.start || PLAYER_START, 26);
     this.px = insert.x; this.py = insert.y; this.pvx = 0; this.pvy = 0;
     this.pang = -Math.PI / 2;
     this.hp = this.maxHp = 100;
@@ -1271,13 +1358,22 @@ export class Game {
     if (k === 'escape') this.lastEscapeAt = performance.now();
     if (k === 'escape' || k === 'p') this.onPauseToggle();
     if (this.status !== 'playing') return;
-    if (k === ' ' || k === 'shift') { if (!this.piloting && !this.flyingPlane && !this.drivingVan && !this.playerTank) this.doDash(); }
+    if (k === ' ' || k === 'shift') { if (!this.piloting && !this.flyingPlane && !this.drivingVan && !this.playerTank && !this.playerJet) this.doDash(); }
     if (k === 'g' || k === 'q' || k === 'e') {
       if (this.flyingPlane) this.dropBombs();
       else if (this.piloting && this.playerHeli) this.fireHeliRocket(this.playerHeli);
-      else if (!this.drivingVan && !this.playerTank) this.throwGrenade();
+      else if (!this.drivingVan && !this.playerTank && !this.playerJet) this.throwGrenade();
     }
     if (k === 'f') this.interactHeli();
+    if (this.playerJet) {
+      const j = this.playerJet;
+      if (k === 'x') j.mode = j.mode === 'missile' ? 'cannon' : 'missile';
+      else if (k === 'g' || k === 'q') this.fireJetMissile();
+      else if (k === 'e') {
+        j.autopilot = !j.autopilot;
+        this.addText(j.x, j.y - 80, j.autopilot ? 'AUTOPILOT · ORBITING' : 'MANUAL CONTROL', '#a9ecff', 14);
+      } else if (k === ' ') this.dropJetFlares();
+    }
     if (this.piloting && this.playerHeli) {
       if (k === '1' || k === '2' || k === '3') this.selectHeliStation(this.playerHeli, Number(k) - 1);
       else if (k === 'x') this.selectHeliStation(this.playerHeli, ((this.playerHeli.station || 0) + 1) % HELI_ORDNANCE.length);
@@ -1450,7 +1546,7 @@ export class Game {
     if (this.pointerLocked && this.status !== 'playing' && document.exitPointerLock) {
       document.exitPointerLock();
     }
-    if (this.status !== 'interior' && this.status !== 'menu') this.render();
+    if (this.status !== 'interior' && this.status !== 'menu' && this.status !== 'prison' && this.status !== 'glacier') this.render();
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) { this.hudTimer = 0.06; this.pushHud(); }
   };
@@ -1460,6 +1556,75 @@ export class Game {
     this.transitT -= dt;
     if (this.playerHeli) this.playerHeli.rotor += dt * 36;
     if (this.transitT <= 0) { if (this.prisonFinale) this.startPrisonLevel(); else this.enterNextSector(); }
+  }
+
+  /** Everything the operative is carrying, grouped the way a kit is actually packed. */
+  private buildInventory(): Hud['inventory'] {
+    const wName = WEAPONS[this.weapon]?.name || this.weapon.toUpperCase();
+    const ammoText = this.ammo === Infinity ? 'UNLIMITED' : `${Math.max(0, Math.floor(this.ammo))}`;
+    const carried: { label: string; detail: string; tone: string }[] = [];
+    for (const [id, left] of this.weaponAmmo) {
+      if (id === this.weapon) continue;
+      const def = WEAPONS[id];
+      if (!def) continue;
+      carried.push({ label: def.short, detail: left === Infinity ? '∞' : `${Math.max(0, Math.floor(left))}`, tone: 'steel' });
+    }
+    const aircraft: { label: string; detail: string; tone: string }[] = [];
+    if (this.playerJet) {
+      aircraft.push({
+        label: this.frostwing ? 'FROSTWING' : 'INTERCEPTOR',
+        detail: `${this.playerJet.hp}/${this.playerJet.maxHp} · FLR ${this.playerJet.flares ?? 0}`,
+        tone: 'ice',
+      });
+    }
+    if (this.playerHeli) {
+      aircraft.push({ label: 'KESTREL', detail: `${Math.round(this.playerHeli.hp)}/${this.playerHeli.maxHp}`, tone: 'sky' });
+    }
+    if (this.plane) {
+      aircraft.push({ label: 'NIGHTJAR', detail: `${Math.round(this.plane.hp)}/${this.plane.maxHp}`, tone: 'sky' });
+    }
+    const systems: { label: string; detail: string; tone: string }[] = [
+      { label: 'AEGIS', detail: this.aegisTime > 0 ? `${this.aegisTime.toFixed(1)}s` : `${this.aegisCharges}`, tone: 'gold' },
+    ];
+    if (this.frostwing) systems.push({ label: 'FROSTWING CLEARANCE', detail: 'ICE PLATING', tone: 'ice' });
+    if (this.bridgeDown) systems.push({ label: 'CAGE CROSSING', detail: 'SEVERED', tone: 'danger' });
+    if (this.vaultOpen) systems.push({ label: 'BLACK VAULT', detail: this.vaultChoice === 'taken' ? 'EMPTIED' : 'OPEN', tone: 'ice' });
+    const keys: { label: string; detail: string; tone: string }[] = [];
+    const sites = this.campaignSites;
+    if (sites) {
+      if (sites.libraryProgress) keys.push({ label: 'MNEMOSYNE', detail: `${sites.libraryProgress}/3`, tone: 'gold' });
+      if (sites.librarySolved) keys.push({ label: 'CARTER CIPHER', detail: 'MASK ACTIVE', tone: 'gold' });
+    }
+    if (this.glacierVisits) keys.push({ label: 'GLACIER VAULT', detail: `${this.glacierVisits} VISIT${this.glacierVisits > 1 ? 'S' : ''}`, tone: 'ice' });
+    if (this.prisonVisits) keys.push({ label: 'THE CAGE', detail: `${this.prisonVisits} ENTR${this.prisonVisits > 1 ? 'IES' : 'Y'}`, tone: 'steel' });
+    if (this.stockadeOpen) keys.push({ label: 'STOCKADE', detail: 'BROKEN', tone: 'gold' });
+    if (this.turretsHeld()) keys.push({ label: 'TWIN GUNS', detail: `${this.turretsHeld()} SEIZED`, tone: 'ice' });
+
+    return [
+      {
+        group: 'PRIMARY',
+        items: [
+          { label: wName, detail: ammoText, tone: 'active' },
+          ...carried,
+        ],
+      },
+      {
+        group: 'ORDNANCE',
+        items: [
+          { label: 'FRAG', detail: `${this.grenades}/${this.mods.grenadeCap}`, tone: 'gold' },
+          ...(this.shieldMax > 0 ? [{ label: 'PLATE', detail: `${Math.round(this.shieldHp)}/${this.shieldMax}`, tone: 'steel' }] : []),
+          { label: 'STREAK', detail: `${this.streak}`, tone: 'steel' },
+        ],
+      },
+      ...(aircraft.length ? [{ group: 'AIRFRAME', items: aircraft }] : []),
+      { group: 'SYSTEMS', items: systems },
+      { group: 'INTEL', items: keys.length ? keys : [{ label: 'NO CIPHERS', detail: 'SEARCH THE BASES', tone: 'steel' }] },
+    ];
+  }
+
+  /** Small helper: how many twin guns are held, for the inventory chip. */
+  private turretsHeld() {
+    return this.armyTurrets.filter((t) => t.owner === 'player').length;
   }
 
   /** Context prompt shown on the HUD for whatever the operative can interact with. */
@@ -1487,6 +1652,13 @@ export class Game {
         Math.hypot(this.planeSpot.x - this.px, this.planeSpot.y - this.py) < 260) return 'F · CLAIM AIR WING';
     if (this.plane && Math.hypot(this.plane.x - this.px, this.plane.y - this.py) < 170) return 'F · BOARD BOMBER';
     if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 230) return 'F · ENTER THE CAGE';
+    if (this.glacierSpot && Math.hypot(this.glacierSpot.x - this.px, this.glacierSpot.y - this.py) < 200)
+      return this.glacierVisits ? 'F · RETURN TO THE GLACIER VAULT' : 'F · OPEN THE GLACIER GATE';
+    if (this.stockadeSpot && !this.stockadeOpen) {
+      const st = this.stockadeSpot;
+      if (this.px > st.x - 90 && this.px < st.x + st.w + 90 && this.py > st.y - 90 && this.py < st.y + st.h + 90)
+        return this.mpNear(st) ? `F · BREAK THE STOCKADE (${this.mpNear(st)} MP INSIDE)` : 'F · BREAK THE STOCKADE';
+    }
     if (this.parkedPlaneNear(210)) return 'F · SEIZE BOMBER';
     const l = this.lasers.find((q) => !q.captured && Math.hypot(q.x - this.px, q.y - this.py) < 120);
     if (l) return 'F · CAPTURE BEAM';
@@ -1592,8 +1764,16 @@ export class Game {
       coords: `X ${Math.round(this.px)}  Y ${Math.round(this.py)}`,
       gatePrompt: this.gates.some(g => g.hp > 0 && Math.hypot(g.x - this.px, g.y - this.py) < 165) ? 'L / LOCK OR UNLOCK GATE' : '',
       aegisCharges: this.aegisCharges, aegisTime: this.aegisTime,
+      inventory: this.buildInventory(),
       jet: !!this.playerJet,
       jetBoost: this.playerJet ? (this.playerJet.boost || 0) : 0,
+      jetSpeed: this.playerJet ? Math.round(this.playerJet.speed) : 0,
+      jetAlt: this.playerJet ? Math.round(this.playerJet.alt) : 0,
+      jetMode: this.playerJet?.mode || 'cannon',
+      jetFlares: this.playerJet?.flares ?? 0,
+      jetLock: this.playerJet?.lock ? `${this.playerJet.lock.label}` : '',
+      jetAutopilot: !!this.playerJet?.autopilot,
+      frostwing: this.frostwing,
       vehicleHp: this.playerJet ? this.playerJet.hp : this.flyingPlane ? this.plane?.hp || 0 : this.playerTank ? this.playerTank.hp : this.drivingVan ? this.drivingVan.hp : this.piloting ? this.playerHeli?.hp || 0 : 0,
       vehicleMax: this.playerJet ? this.playerJet.maxHp : this.flyingPlane ? this.plane?.maxHp || 1 : this.playerTank ? this.playerTank.maxHp : this.drivingVan ? this.drivingVan.maxHp : this.piloting ? this.playerHeli?.maxHp || 1 : 1,
       vehicleFuel: this.flyingPlane ? this.plane?.fuel || 0 : this.piloting ? this.playerHeli?.fuel || 0 : 100,
@@ -1670,6 +1850,8 @@ export class Game {
     // rank woken by the alarm is already awake when the soldiers think this frame.
     this.updateDressing(dt);
     this.updateArmy(dt);
+    this.updateTraffic(dt);
+    this.updateRoutines(dt);
     if (this.status !== 'playing') return;
     this.updateSquads(dt);
     this.updateEnemies(dt);
@@ -1870,6 +2052,90 @@ export class Game {
 
     this.updateArmyTurrets(dt);
     this.updateArmyJets(dt);
+    this.updateJetMissiles(dt);
+  }
+
+  /**
+   * Base traffic. Vehicles hold their spacing in a convoy, brake for the operative and
+   * for each other, and go round their circuit all day whether anyone is watching or not.
+   */
+  private updateTraffic(dt: number) {
+    for (const c of this.roadCars) {
+      if (c.dead) continue;
+      c.light += dt;
+      const node = c.route[c.node % c.route.length];
+      const dx = node.x - c.x, dy = node.y - c.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const want = Math.atan2(dy, dx);
+      const turn = ((want - c.ang + Math.PI * 3) % TAU) - Math.PI;
+      c.ang += clamp(turn, -1.6 * dt, 1.6 * dt);
+      // spacing: never drive into the vehicle in front on the same circuit
+      let blocked = c.wait > 0;
+      if (!blocked) for (const o of this.roadCars) {
+        if (o === c || o.dead || o.route !== c.route) continue;
+        const ahead = Math.cos(c.ang) * (o.x - c.x) + Math.sin(c.ang) * (o.y - c.y);
+        if (ahead > 0 && ahead < 96 && Math.abs(Math.sin(c.ang) * (o.x - c.x) - Math.cos(c.ang) * (o.y - c.y)) < 44) {
+          blocked = true; break;
+        }
+      }
+      // and never drive through the operative
+      const toPlayer = Math.cos(c.ang) * (this.px - c.x) + Math.sin(c.ang) * (this.py - c.y);
+      if (toPlayer > 0 && toPlayer < 72 && Math.abs(Math.sin(c.ang) * (this.px - c.x) - Math.cos(c.ang) * (this.py - c.y)) < 46) blocked = true;
+      const speed = blocked ? 0 : c.speed * (1 - Math.min(0.6, Math.abs(turn)));
+      if (c.wait > 0) c.wait -= dt;
+      if (speed > 0) {
+        c.x += Math.cos(c.ang) * speed * dt;
+        c.y += Math.sin(c.ang) * speed * dt;
+        if (Math.random() < 0.25) {
+          this.addParticle(c.x - Math.cos(c.ang) * 26, c.y - Math.sin(c.ang) * 26,
+            rand(-8, 8), rand(-8, 8), 0.5, rand(2, 4), 'rgba(120,120,110,0.5)', true);
+        }
+      }
+      if (d < 60) c.node = (c.node + 1) % c.route.length;
+      // a hit base scatters the traffic
+      if (this.armyAlerted && this.sector >= 6 && Math.hypot(c.x - this.px, c.y - this.py) < 320) {
+        c.speed = Math.max(c.speed, 110);
+      }
+    }
+  }
+
+  /** The garrison's day: PT, shift changes, siren tests, convoy drills, lift operations. */
+  private updateRoutines(dt: number) {
+    for (let i = this.routines.length - 1; i >= 0; i--) {
+      const r = this.routines[i];
+      r.t += dt;
+      if (r.t > r.dur) this.routines.splice(i, 1);
+    }
+    if (this.status !== 'playing') return;
+    this.routineT -= dt;
+    if (this.routineT > 0) return;
+    this.routineT = rand(14, 24);
+    const a = this.army;
+    const kinds: ArmyRoutine['kind'][] = a
+      ? ['pt', 'shift', 'siren', 'drill', 'crane', 'colors']
+      : ['pt', 'shift', 'drill'];
+    const kind = kinds[this.routineSeq++ % kinds.length];
+    let x: number, y: number;
+    if (a) {
+      const sp = a.strongpoints[(this.routineSeq * 3) % a.strongpoints.length];
+      x = sp.x + sp.w / 2; y = sp.y + sp.h / 2;
+      // keep it on screen-adjacent ground, never inside the parade
+      if (Math.abs(x - this.px) > 2600) { x = this.px + rand(-900, 900); y = this.py + rand(-700, 700); }
+    } else {
+      x = this.px + rand(-900, 900); y = this.py + rand(-700, 700);
+    }
+    const label = kind === 'pt' ? 'MORNING PT'
+      : kind === 'shift' ? 'SHIFT CHANGE'
+        : kind === 'siren' ? 'AIR-RAID SIREN TEST'
+          : kind === 'drill' ? 'CONVOY DRILL'
+            : kind === 'crane' ? 'LIFT OPERATION' : 'COLOURS';
+    this.routines.push({
+      kind, x, y, t: 0, dur: kind === 'siren' ? 7 : 22, label,
+    });
+    if (kind === 'siren') {
+      this.addText(x, y - 120, '⚠ SIREN TEST — STAND BY', '#ffd166', 15);
+      if (this.sector >= 6 && this.armyAlerted) sfx.wave();
+    }
   }
 
   /** Wake the nearest sleeping ranks. Returns how many stood up. */
@@ -2064,7 +2330,16 @@ export class Game {
   private seizeJet(j: ArmyJet) {
     this.playerJet = j;
     j.manned = true;
-    j.alt = 0; j.speed = 120; j.boost = 0; j.hp = Math.max(j.hp, j.maxHp * 0.8);
+    j.alt = 0; j.speed = 120; j.boost = 0;
+    j.mode = 'cannon'; j.flares = 6; j.autopilot = false; j.lock = null;
+    // Frostwing clearance: the airframe comes back ice-plated and with more countermeasures.
+    if (this.frostwing) {
+      j.maxHp = Math.round(j.maxHp * 1.5);
+      j.hp = j.maxHp;
+      j.flares = 10;
+    } else {
+      j.hp = Math.max(j.hp, j.maxHp * 0.8);
+    }
     this.px = j.x; this.py = j.y; this.pvx = 0; this.pvy = 0;
     for (const o of this.armyJets) {
       if (o === j) continue;
@@ -2072,7 +2347,7 @@ export class Game {
     }
     for (const h of this.helis) h.state = 'egress';
     this.score += 1500;
-    this.setBanner('INTERCEPTOR SEIZED', 'MOUSE TO FLY · W/S THROTTLE · HOLD SHIFT FOR AFTERBURNER · LMB CANNON');
+    this.setBanner('INTERCEPTOR SEIZED', 'LMB FIRE · G MISSILE · X STATION · E AUTOPILOT · SPACE FLARES · SHIFT BURN');
     this.addText(j.x, j.y - 90, 'AIRSPACE IS YOURS — NOTHING ELSE FLIES', '#a9ecff', 17);
     this.flash = 0.35; this.flashColor = '150,235,255';
     sfx.rotor();
@@ -2095,9 +2370,76 @@ export class Game {
     sfx.click();
   }
 
+  /** What the nose is pointing at: nearest hostile inside the seeker cone. */
+  private jetSeeker(j: ArmyJet): { x: number; y: number; label: string; air: boolean } | null {
+    const nose = { x: Math.cos(j.ang), y: Math.sin(j.ang) };
+    let best: { x: number; y: number; label: string; air: boolean } | null = null;
+    let bestScore = -1;
+    const consider = (x: number, y: number, label: string, air: boolean) => {
+      const dx = x - j.x, dy = y - j.y;
+      const d = Math.hypot(dx, dy);
+      if (d < 60 || d > 2600) return;
+      const dot = (dx * nose.x + dy * nose.y) / d;
+      if (dot < 0.55) return;                     // roughly 57 degrees off the nose
+      const score = dot * 2 - d / 2600;
+      if (score > bestScore) { bestScore = score; best = { x, y, label, air }; }
+    };
+    for (const e of this.enemies) {
+      if (e.hp <= 0 || e.spawnT > 0 || e.def.civilian) continue;
+      consider(e.x, e.y, 'INFANTRY', false);
+    }
+    for (const t of this.tanks) if (!t.dead && !t.captured) consider(t.x, t.y, 'ARMOUR', false);
+    for (const h of this.helis) consider(h.x, h.y, 'GUNSHIP', true);
+    for (const o of this.armyJets) {
+      if (o === j || o.state === 'parked') continue;
+      consider(o.x, o.y, 'INTERCEPTOR', true);
+    }
+    for (const t of this.armyTurrets) if (t.owner === 'enemy') consider(t.x, t.y, 'TWIN GUN', false);
+    return best;
+  }
+
+  /** G: a missile off the wing, into whatever the seeker is holding. */
+  private fireJetMissile() {
+    const j = this.playerJet;
+    if (!j) return;
+    const lock = j.lock;
+    if (!lock) {
+      this.addText(j.x, j.y - 70, 'NO LOCK — POINT THE NOSE AT SOMETHING', '#ffcf7a', 13);
+      return;
+    }
+    const a = Math.atan2(lock.y - j.y, lock.x - j.x);
+    this.jetMissiles.push({
+      x: j.x + Math.cos(a) * 60, y: j.y + Math.sin(a) * 60,
+      vx: Math.cos(a) * 900, vy: Math.sin(a) * 900,
+      life: 6, air: lock.air, dmg: lock.air ? 320 : 420,
+    });
+    this.addText(j.x, j.y - 70, `FOX TWO · ${lock.label}`, '#a9ecff', 14);
+    this.addLight(j.x, j.y, 320, '180,235,255', 0.3);
+    sfx.shoot('rocket');
+  }
+
+  /** SPACE: countermeasures, and the hard break that comes with them. */
+  private dropJetFlares() {
+    const j = this.playerJet;
+    if (!j) return;
+    if ((j.flares ?? 0) <= 0) { this.addText(j.x, j.y - 60, 'NO FLARES LEFT', '#ff9d9d', 13); return; }
+    j.flares = (j.flares ?? 0) - 1;
+    for (let i = 0; i < 8; i++) {
+      const a = j.ang + Math.PI + rand(-0.9, 0.9);
+      this.addParticle(j.x, j.y, Math.cos(a) * rand(120, 320), Math.sin(a) * rand(120, 320),
+        rand(0.6, 1.4), rand(3, 6), i % 2 ? '#ffd166' : '#fff2c0', true);
+    }
+    j.x -= Math.cos(j.ang) * 220;
+    j.y -= Math.sin(j.ang) * 220;
+    this.iFrames = Math.max(this.iFrames, 1.4);
+    this.addLight(j.x, j.y, 420, '255,220,150', 0.4);
+    this.addText(j.x, j.y - 70, `FLARES ${j.flares} · BREAK`, '#ffd166', 14);
+    sfx.click();
+  }
+
   /**
-   * Fast-jet flight model: always moving forwards, steered by the nose, with a
-   * afterburner that roughly triples the ground speed. Holding SHIFT is the whole point.
+   * Fast-jet flight model with the full control set: throttle, airbrake, afterburner,
+   * seeker lock, cannon and missile stations, countermeasures and an orbit autopilot.
    */
   private updatePlayerJet(dt: number) {
     const j = this.playerJet;
@@ -2109,8 +2451,12 @@ export class Game {
       j.manned = false; j.state = 'parked'; j.hp = 0;
       this.playerJet = null;
       this.px = j.x; this.py = j.y; this.pvx = 0; this.pvy = 0;
+      this.jetMissiles = [];
       return;
     }
+    const lock = this.jetSeeker(j);
+    j.lock = lock;
+
     let aim = j.ang, firing = false;
     if (this.aimStick.active) {
       const dx = this.aimStick.x - this.aimStick.ox, dy = this.aimStick.y - this.aimStick.oy;
@@ -2119,54 +2465,118 @@ export class Game {
       aim = Math.atan2(this.mouseY + this.camY - j.y, this.mouseX + this.camX - j.x);
       firing = this.firing;
     }
-    // A/D are also a rudder: at 1 700 m/s the mouse alone is too coarse.
-    if (m.x) aim = j.ang + m.x * 0.75;
+    // A/D: a coordinated roll into a hard turn, the way a fighter changes heading.
+    const roll = m.x;
+    if (roll) aim = j.ang + roll * 1.15;
     let turn = aim - j.ang;
     while (turn > Math.PI) turn -= TAU;
     while (turn < -Math.PI) turn += TAU;
-    const agility = 2.3 - Math.min(1, j.speed / 1800) * 0.9;
+
+    const brake = !!this.keys['s'] && !this.keys['w'];
+    const boost = !!this.keys['shift'];   // SPACE is countermeasures in a jet, not burner
+    if (j.autopilot) {
+      const cx = lock ? lock.x : j.x, cy = lock ? lock.y : j.y;
+      const a = Math.atan2(j.y - cy, j.x - cx);
+      const tx = cx + Math.cos(a - 0.5) * 900, ty = cy + Math.sin(a - 0.5) * 900;
+      aim = Math.atan2(ty - j.y, tx - j.x);
+      turn = aim - j.ang;
+      while (turn > Math.PI) turn -= TAU;
+      while (turn < -Math.PI) turn += TAU;
+    }
+
+    const agility = (2.5 - Math.min(1, j.speed / 1800) * 0.9) * (brake ? 1.8 : 1);
     j.ang += clamp(turn, -agility * dt, agility * dt);
 
-    const boost = !!(this.keys['shift'] || this.keys[' ']);
-    const throttle = m.y < -0.1 ? 1 : m.y > 0.1 ? -0.6 : 0;
-    const want = boost ? 1750 : 600 + throttle * 240;
-    j.speed += (want - j.speed) * Math.min(1, dt * (boost ? 1.7 : 2.4));
-    j.boost = lerp(j.boost || 0, boost ? 1 : 0, Math.min(1, dt * 4));
-    j.alt = clamp(j.alt + (boost ? 46 : 14) * dt, 0, 480);
+    const throttle = m.y < -0.1 ? 1 : m.y > 0.1 ? -0.55 : 0;
+    const topSpeed = this.frostwing ? 2050 : 1750;
+    const want = brake ? 210 : boost ? topSpeed : 620 + throttle * 260;
+    j.speed += (want - j.speed) * Math.min(1, dt * (boost ? 1.9 : brake ? 4.2 : 2.6));
+    j.boost = lerp(j.boost || 0, boost && !brake ? 1 : 0, Math.min(1, dt * 4));
+    j.alt = clamp(j.alt + (boost ? 46 : brake ? -30 : 14) * dt, 0, 480);
     j.cool = Math.max(0, j.cool - dt);
 
     j.x += Math.cos(j.ang) * j.speed * dt;
     j.y += Math.sin(j.ang) * j.speed * dt;
-    // the arena has walls; the jet slides along them instead of leaving the world
     if (j.x < 220 || j.x > ARENA_W - 220) { j.x = clamp(j.x, 220, ARENA_W - 220); j.ang = Math.PI - j.ang; }
     if (j.y < 220 || j.y > ARENA_H - 220) { j.y = clamp(j.y, 220, ARENA_H - 220); j.ang = -j.ang; }
 
-    if (j.boost > 0.15 && Math.random() < 0.9) {
-      for (const side of [-1, 1]) {
-        const ox = Math.cos(j.ang + Math.PI / 2) * side * 16 - Math.cos(j.ang) * 110;
-        const oy = Math.sin(j.ang + Math.PI / 2) * side * 16 - Math.sin(j.ang) * 110;
-        this.addParticle(ox + j.x, oy + j.y, rand(-30, 30), rand(-30, 30), 0.3, rand(2, 5),
-          j.boost > 0.6 ? '#9fe0ff' : '#c9d4c0', true);
-      }
-      this.addLight(j.x, j.y, 260, '150,225,255', 0.18);
+    if (j.boost > 0.12) {
+      this.jetTrail.push({ x: j.x - Math.cos(j.ang) * 90, y: j.y - Math.sin(j.ang) * 90, t: 0.55 });
+      if (j.boost > 0.6) this.addLight(j.x, j.y, 280, this.frostwing ? '150,235,255' : '150,225,255', 0.2);
     }
+    for (let i = this.jetTrail.length - 1; i >= 0; i--) {
+      this.jetTrail[i].t -= dt;
+      if (this.jetTrail[i].t <= 0) this.jetTrail.splice(i, 1);
+    }
+    if (this.jetTrail.length > 90) this.jetTrail.splice(0, this.jetTrail.length - 90);
+
     if (firing && j.cool <= 0) {
-      j.cool = 0.06;
-      for (const side of [-1, 1]) {
-        const a = j.ang + rand(-0.012, 0.012);
-        const ox = Math.cos(j.ang + Math.PI / 2) * side * 14 + Math.cos(j.ang) * 74;
-        const oy = Math.sin(j.ang + Math.PI / 2) * side * 14 + Math.sin(j.ang) * 74;
-        this.bullets.push({
-          x: j.x + ox, y: j.y + oy, px: j.x + ox, py: j.y + oy,
-          vx: Math.cos(a) * 2100, vy: Math.sin(a) * 2100,
-          dmg: 24, life: 0.9, friendly: true, color: '#d6f6ff', r: 3.6, hits: [],
-        });
+      if (j.mode === 'missile') {
+        j.cool = 1.6;
+        this.fireJetMissile();
+      } else {
+        j.cool = 0.055;
+        for (const side of [-1, 1]) {
+          const a = j.ang + rand(-0.01, 0.01);
+          const ox = Math.cos(j.ang + Math.PI / 2) * side * 14 + Math.cos(j.ang) * 74;
+          const oy = Math.sin(j.ang + Math.PI / 2) * side * 14 + Math.sin(j.ang) * 74;
+          this.bullets.push({
+            x: j.x + ox, y: j.y + oy, px: j.x + ox, py: j.y + oy,
+            vx: Math.cos(a) * 2100, vy: Math.sin(a) * 2100,
+            dmg: this.frostwing ? 30 : 24, life: 0.9, friendly: true,
+            color: this.frostwing ? '#c8f8ff' : '#d6f6ff', r: 3.6, hits: [],
+          });
+        }
+        this.addLight(j.x, j.y, 200, '190,240,255', 0.1);
+        sfx.shoot('rifle');
       }
-      this.addLight(j.x, j.y, 200, '190,240,255', 0.1);
-      sfx.shoot('rifle');
     }
-    this.px = j.x; this.py = j.y; this.pvx = Math.cos(j.ang) * j.speed; this.pvy = Math.sin(j.ang) * j.speed;
+    this.px = j.x; this.py = j.y;
+    this.pvx = Math.cos(j.ang) * j.speed; this.pvy = Math.sin(j.ang) * j.speed;
     this.pang = j.ang;
+  }
+
+  /** Missiles in flight: they fly straight at where the target was and go off on contact. */
+  private updateJetMissiles(dt: number) {
+    for (let i = this.jetMissiles.length - 1; i >= 0; i--) {
+      const m = this.jetMissiles[i];
+      m.life -= dt;
+      m.x += m.vx * dt; m.y += m.vy * dt;
+      if (Math.random() < 0.9) {
+        this.addParticle(m.x, m.y, rand(-20, 20), rand(-20, 20), 0.45, rand(2, 5), '#cfe8ff', true);
+      }
+      let hit = false;
+      if (m.air) {
+        for (const h of this.helis) {
+          if (Math.hypot(h.x - m.x, h.y - m.y) < 70) { h.hp -= m.dmg; hit = true; if (h.hp <= 0) this.killHeli(h); break; }
+        }
+        if (!hit) for (const o of this.armyJets) {
+          if (o.manned || o.state === 'parked') continue;
+          if (Math.hypot(o.x - m.x, o.y - m.y) < 90) {
+            o.hp -= m.dmg; hit = true;
+            if (o.hp <= 0) { o.state = 'parked'; this.explode(o.x, o.y, 180, 60, true); this.score += 1400; }
+            break;
+          }
+        }
+      } else {
+        for (const e of this.enemies) {
+          if (e.hp <= 0 || e.spawnT > 0) continue;
+          if (Math.hypot(e.x - m.x, e.y - m.y) < 46) { this.hurtEnemy(e, m.dmg); hit = true; break; }
+        }
+        if (!hit) for (const t of this.tanks) {
+          if (t.dead || t.captured) continue;
+          if (Math.hypot(t.x - m.x, t.y - m.y) < 70) { t.hp -= m.dmg; hit = true; break; }
+        }
+        if (!hit) for (const t of this.armyTurrets) {
+          if (t.owner === 'player') continue;
+          if (Math.hypot(t.x - m.x, t.y - m.y) < 56) { t.hp -= m.dmg; hit = true; break; }
+        }
+      }
+      if (hit || m.life <= 0) {
+        this.explode(m.x, m.y, 170, m.dmg * 0.5, true);
+        this.jetMissiles.splice(i, 1);
+      }
+    }
   }
 
   /** F on a suppressed emplacement: the crew is dead, the guns are yours. */
@@ -2957,6 +3367,14 @@ export class Game {
       return;
     }
     if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 230) { this.enterPrison('visit'); return; }
+    if (this.glacierSpot && Math.hypot(this.glacierSpot.x - this.px, this.glacierSpot.y - this.py) < 200) { this.enterGlacier(); return; }
+    if (this.stockadeSpot && !this.stockadeOpen) {
+      const st = this.stockadeSpot;
+      if (this.px > st.x - 90 && this.px < st.x + st.w + 90 && this.py > st.y - 90 && this.py < st.y + st.h + 90) {
+        this.breakStockade(st);
+        return;
+      }
+    }
     if (Math.hypot(this.px - VAULT_ENTRY.x, this.py - VAULT_ENTRY.y) < 130) { this.enterVault(); return; }
     const sites = this.campaignSites;
     const volume = sites?.volumes.find(v => Math.hypot(v.x - this.px, v.y - this.py) < 88);
@@ -3486,6 +3904,97 @@ export class Game {
     ctx.fillStyle = '#0d1a1e'; ctx.fillRect(W * 0.25, H * 0.955, W * 0.5, 5);
     ctx.fillStyle = '#9fc2ff'; ctx.fillRect(W * 0.25, H * 0.955, W * 0.5 * p, 5);
     ctx.textAlign = 'left';
+  }
+
+  /** How many military police are still standing inside the brig. */
+  private mpNear(st: { x: number; y: number; w: number; h: number }) {
+    let n = 0;
+    for (const e of this.enemies) {
+      if (e.hp <= 0 || e.def.civilian) continue;
+      if (e.x > st.x - 160 && e.x < st.x + st.w + 160 && e.y > st.y - 160 && e.y < st.y + st.h + 160) n++;
+    }
+    return n;
+  }
+
+  /**
+   * The stockade. The army's own prisoners are not Hydra, and they have no reason to love
+   * the men who locked them up: break the brig and they take up rifles for you.
+   */
+  private breakStockade(st: { x: number; y: number; w: number; h: number }) {
+    if (this.stockadeOpen) return;
+    const inside = this.mpNear(st);
+    if (inside > 0) {
+      this.addText(this.px, this.py - 56, `THE MP WING IS STILL FIRING (${inside})`, '#ff9d9d', 14);
+      return;
+    }
+    this.stockadeOpen = true;
+    const cx = st.x + st.w / 2, cy = st.y + st.h / 2;
+    this.score += 6000;
+    for (let i = 0; i < 14; i++) {
+      this.allies.push({
+        x: cx + rand(-140, 140), y: cy + rand(-120, 120), vx: 0, vy: 0, ang: 0,
+        hp: 220, maxHp: 220, cool: rand(0.2, 1), slot: this.allies.length, flash: 0,
+        kind: i % 4 === 0 ? 'heavy' : i % 7 === 0 ? 'medic' : 'rifle',
+      });
+    }
+    this.explode(cx - st.w * 0.3, cy, 90, 0, true);
+    this.explode(cx + st.w * 0.3, cy, 90, 0, true);
+    this.setBanner('STOCKADE BROKEN', 'FOURTEEN OF THE ARMY\'S OWN, ARMED AND ON YOUR SIDE');
+    this.addText(cx, cy - 90, 'THE BRIG IS OPEN +6000', '#ffd166', 18);
+    this.tellStory({
+      id: 'stockade', channel: 'MP STOCKADE / INTERNAL',
+      title: 'They were locked up for asking the wrong question.',
+      text: 'Fourteen soldiers in a military prison, charged with refusing an order nobody would put in writing. They will not fight for the flag anymore. They will fight for the person who opened the door.',
+    }, 11);
+    sfx.wave();
+  }
+
+  /* ---------------- the glacier vault ---------------- */
+
+  /** The ice gate opens: hand over to the 3D vault. */
+  enterGlacier() {
+    if (this.status !== 'playing' || !this.glacierSpot) return;
+    this.glacierVisits++;
+    this.status = 'glacier';
+    this.clearInput();
+    this.firing = false;
+    this.setBanner('THE GLACIER GATE OPENS', 'A BASE INSIDE THE MOUNTAIN — NOTHING THAT FLIES OUT HERE CAN FOLLOW YOU IN');
+    sfx.rotor();
+    this.onGlacier();
+  }
+
+  /** Back on the ice shelf: what the vault gave up. */
+  leaveGlacier(stats: { kills: number; escorts: number; plane: boolean; time: number }, tookPlane: boolean) {
+    if (this.status !== 'glacier') return;
+    this.status = 'playing';
+    this.px = (this.glacierSpot?.x ?? this.px) + 60;
+    this.py = (this.glacierSpot?.y ?? this.py) + 260;
+    this.pvx = 0; this.pvy = 0;
+    this.iFrames = 3;
+    const reward = 9000 + stats.kills * 260 + stats.escorts * 180 + (tookPlane ? 22000 : 0);
+    this.score += reward;
+    if (tookPlane && !this.frostwing) {
+      this.frostwing = true;
+      this.maxHp += 30; this.hp = this.maxHp;
+      this.setBanner('FROSTWING CLEARANCE', 'EVERY INTERCEPTOR YOU SEIZE IS NOW ICE-PLATED AND FASTER');
+      this.addText(this.px, this.py - 70, 'FROSTWING AUTHORISED', '#a9ecff', 20);
+    } else if (tookPlane) {
+      this.setBanner('FROSTWING AGAIN', 'THE VAULT KEPT ITS SECRET BETTER THE SECOND TIME');
+    } else {
+      this.setBanner('OUT OF THE ICE', `${stats.kills} ICE GUARDS DOWN · THE VAULT IS STILL THERE`);
+    }
+    this.addText(this.px, this.py - 46, `+${reward}`, '#8be8ff', 18);
+    this.hp = Math.max(60, Math.min(this.maxHp, this.hp + 40));
+    this.tellStory({
+      id: 'glacier-vault',
+      channel: 'S.H.I.E.L.D. / GLACIER WATCH',
+      title: tookPlane ? 'The Frostwing came out of the mountain.' : 'The vault is still standing.',
+      text: tookPlane
+        ? 'A platoon that had been written off, two gunships nobody ever logged, and an interceptor with no squadron number. The army spent decades hiding a hangar inside a glacier; you spent eleven minutes taking it.'
+        : 'The shield platoon is still in there, holding a hall they were never relieved from. The gate is open now, and the ice keeps its own counsel.',
+    }, 13);
+    sfx.wave();
+    this.pushHud();
   }
 
   /** Step through the sally port on the island, or wake up here after an arrest. */
@@ -8125,6 +8634,7 @@ export class Game {
     this.drawZones(ctx, camX, camY);
     this.drawSuspensionBridge(ctx, camX, camY);
     this.drawSnowWorks(ctx, camX, camY);
+    this.drawTrafficAndRoutines(ctx, camX, camY);
     this.facilityPainter.drawGround(ctx, this.facilities, { x: camX, y: camY, w: this.w, h: this.h }, this.simulationTime);
     drawRuins(ctx, this.ruins, { x: camX, y: camY, w: this.w, h: this.h });
     this.drawDecals(ctx, camX, camY);
@@ -9448,6 +9958,48 @@ export class Game {
       }
     }
 
+    // heat plume and missiles in flight
+    for (const t of this.jetTrail) {
+      if (!on(t.x, t.y)) continue;
+      const a = Math.max(0, t.t / 0.55);
+      ctx.fillStyle = `rgba(${this.frostwing ? '170,240,255' : '180,220,255'},${a * 0.5})`;
+      ctx.beginPath(); ctx.arc(t.x, t.y, 10 * a + 3, 0, TAU); ctx.fill();
+    }
+    for (const m of this.jetMissiles) {
+      if (!on(m.x, m.y)) continue;
+      const a = Math.atan2(m.vy, m.vx);
+      ctx.save();
+      ctx.translate(m.x, m.y);
+      ctx.rotate(a);
+      ctx.fillStyle = '#dfe9ef';
+      ctx.beginPath(); ctx.roundRect(-12, -3, 24, 6, 3); ctx.fill();
+      ctx.fillStyle = 'rgba(255,214,140,0.9)';
+      ctx.beginPath(); ctx.moveTo(-12, -3); ctx.lineTo(-26, 0); ctx.lineTo(-12, 3); ctx.fill();
+      ctx.restore();
+    }
+    // seeker box on whatever the nose is holding
+    const pj = this.playerJet;
+    if (pj && pj.lock) {
+      const l = pj.lock;
+      ctx.save();
+      ctx.strokeStyle = l.air ? 'rgba(160,240,255,0.9)' : 'rgba(255,210,140,0.9)';
+      ctx.lineWidth = 2;
+      const s2 = 26;
+      for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
+        ctx.beginPath();
+        ctx.moveTo(l.x + sx * s2, l.y + sy * s2 - sy * 10);
+        ctx.lineTo(l.x + sx * s2, l.y + sy * s2);
+        ctx.lineTo(l.x + sx * s2 - sx * 10, l.y + sy * s2);
+        ctx.stroke();
+      }
+      ctx.font = 'bold 10px ui-monospace, monospace';
+      ctx.fillStyle = l.air ? '#bff2ff' : '#ffd8a0';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${l.label} · ${Math.round(Math.hypot(l.x - pj.x, l.y - pj.y))}m`, l.x, l.y - 38);
+      ctx.textAlign = 'left';
+      ctx.restore();
+    }
+
     // Interceptors: modelled on a real fifth-generation fighter — long nose, diamond
     // wing, canted twin tails, twin engines — and big enough to read from the ground.
     for (const j of this.armyJets) {
@@ -9509,6 +10061,53 @@ export class Game {
       ctx.fillText(this.armyAlerted ? 'GENERAL QUARTERS' : 'COMMAND BUNKER', a.hq.x, a.hq.y - 120);
       ctx.restore();
     }
+  }
+
+  /** Parked road vehicles: body, cabin, glass, wheels, and a lit roof. */
+  private drawVehicleProp(ctx: CanvasRenderingContext2D, o: Rect) {
+    const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+    const horiz = o.w >= o.h;
+    const L = (horiz ? o.w : o.h) / 2;
+    const Wd = (horiz ? o.h : o.w) / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    if (!horiz) ctx.rotate(Math.PI / 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.beginPath(); ctx.roundRect(-L + 6, -Wd + 8, L * 2, Wd * 2, 8); ctx.fill();
+    const body = o.kind === 'humvee' ? (o.tint || '#5a6349')
+      : o.kind === 'bus' ? '#33474a' : o.kind === 'tanker' ? '#6a5f45' : (o.tint || '#7a7f6a');
+    // chassis
+    ctx.fillStyle = body;
+    ctx.beginPath(); ctx.roundRect(-L, -Wd, L * 2, Wd * 2, o.kind === 'car' ? 10 : 6); ctx.fill();
+    // cabin
+    ctx.fillStyle = 'rgba(20,26,22,0.5)';
+    ctx.beginPath();
+    ctx.roundRect(-L * 0.34, -Wd * 0.78, L * 0.72, Wd * 1.56, 5);
+    ctx.fill();
+    // windscreen
+    ctx.fillStyle = 'rgba(150,200,215,0.5)';
+    if (o.kind === 'bus') {
+      for (let i = 0; i < 5; i++) ctx.fillRect(-L * 0.3 + i * L * 0.14, -Wd * 0.62, L * 0.1, Wd * 1.24);
+    } else {
+      ctx.beginPath(); ctx.roundRect(-L * 0.24, -Wd * 0.6, L * 0.44, Wd * 1.2, 3); ctx.fill();
+    }
+    // roof markings: military star or a hazard stripe
+    ctx.fillStyle = o.kind === 'humvee' ? 'rgba(226,232,190,0.5)' : 'rgba(230,200,120,0.45)';
+    ctx.beginPath(); ctx.arc(L * 0.6, 0, Math.min(Wd * 0.34, 7), 0, TAU); ctx.fill();
+    // wheels
+    ctx.fillStyle = '#151a15';
+    for (const wx of [-L * 0.62, L * 0.62]) {
+      for (const wy of [-Wd, Wd]) {
+        ctx.beginPath(); ctx.ellipse(wx, wy, L * 0.12, Wd * 0.2, 0, 0, TAU); ctx.fill();
+      }
+    }
+    // emergency light bar on the ones that need it
+    if (o.kind === 'humvee' || o.kind === 'bus') {
+      const on = Math.sin(this.simulationTime * 6 + o.x) > 0;
+      ctx.fillStyle = on ? '#ffd166' : '#a15a2a';
+      ctx.fillRect(-L * 0.3, -Wd * 0.3, L * 0.16, Wd * 0.6);
+    }
+    ctx.restore();
   }
 
   /**
@@ -9753,6 +10352,170 @@ export class Game {
         ctx.restore();
         return true;
       }
+      case 'megahangar': {
+        // 190 m of clear span, a segmented roof and two taxi doors at the front.
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(o.x + 18, o.y + 24, o.w, o.h);
+        ctx.fillStyle = o.tint || '#59634f';
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        // roof ribs
+        ctx.strokeStyle = 'rgba(20,26,18,0.35)';
+        ctx.lineWidth = 3;
+        for (let gx = o.x + 90; gx < o.x + o.w - 20; gx += 120) {
+          ctx.beginPath(); ctx.moveTo(gx, o.y + 8); ctx.lineTo(gx, o.y + o.h - 8); ctx.stroke();
+        }
+        // central spine light
+        ctx.fillStyle = 'rgba(220,240,200,0.14)';
+        ctx.fillRect(o.x + 40, o.y + o.h * 0.42, o.w - 80, o.h * 0.16);
+        // doors
+        const doors = 2;
+        for (let i = 0; i < doors; i++) {
+          const dx = o.x + o.w * (0.16 + i * 0.42);
+          ctx.fillStyle = '#2b332a';
+          ctx.fillRect(dx, o.y + o.h - 26, o.w * 0.26, 26);
+          ctx.fillStyle = 'rgba(200,220,180,0.25)';
+          for (let k = 0; k < 7; k++) ctx.fillRect(dx + 8 + k * (o.w * 0.26 / 7), o.y + o.h - 22, 4, 18);
+        }
+        ctx.fillStyle = 'rgba(226,232,190,0.5)';
+        ctx.font = `bold ${Math.round(Math.min(30, o.h * 0.1))}px ui-monospace, monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText('9TH AIR WING', o.x + o.w / 2, o.y + o.h * 0.32);
+        ctx.textAlign = 'left';
+        ctx.restore();
+        return true;
+      }
+      case 'towerblock': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(o.x + 14, o.y + 20, o.w, o.h);
+        ctx.fillStyle = o.tint || '#6a7258';
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        // window rows: eight floors, lit from inside
+        const rows = 8;
+        for (let r = 0; r < rows; r++) {
+          const ry = o.y + 16 + (o.h - 40) * (r / rows);
+          for (let c = 0; c < 9; c++) {
+            const wx = o.x + 22 + (o.w - 44) * (c / 9);
+            const lit = (r * 9 + c) % 5 !== 0;
+            ctx.fillStyle = lit ? 'rgba(240,246,190,0.55)' : 'rgba(30,36,28,0.75)';
+            ctx.fillRect(wx, ry, (o.w - 44) / 9 * 0.62, 12);
+          }
+        }
+        // roof plant and a painted number
+        ctx.fillStyle = '#3f4738';
+        ctx.fillRect(o.x + o.w * 0.2, o.y + o.h * 0.42, o.w * 0.24, o.h * 0.16);
+        ctx.fillStyle = 'rgba(226,232,190,0.65)';
+        ctx.font = `bold ${Math.round(Math.min(34, o.h * 0.09))}px ui-monospace, monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText('BARRACKS', o.x + o.w / 2, o.y + o.h * 0.62);
+        ctx.textAlign = 'left';
+        ctx.restore();
+        return true;
+      }
+      case 'watertower': {
+        const cxw = o.x + o.w / 2, cyw = o.y + o.h / 2;
+        ctx.save();
+        // legs
+        ctx.strokeStyle = '#6d7660';
+        ctx.lineWidth = 7;
+        for (const [dx, dy] of [[-0.34, -0.34], [0.34, -0.34], [-0.34, 0.34], [0.34, 0.34]] as const) {
+          ctx.beginPath();
+          ctx.moveTo(cxw + dx * o.w, cyw + dy * o.h);
+          ctx.lineTo(cxw + dx * o.w * 0.4, cyw + dy * o.h * 0.4);
+          ctx.stroke();
+        }
+        // tank
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath(); ctx.ellipse(cxw + 8, cyw + 10, o.w * 0.4, o.h * 0.4, 0, 0, TAU); ctx.fill();
+        ctx.fillStyle = o.tint || '#8b967e';
+        ctx.beginPath(); ctx.ellipse(cxw, cyw, o.w * 0.4, o.h * 0.4, 0, 0, TAU); ctx.fill();
+        ctx.strokeStyle = 'rgba(30,36,28,0.5)'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.ellipse(cxw, cyw, o.w * 0.4, o.h * 0.4, 0, 0, TAU); ctx.stroke();
+        ctx.beginPath(); ctx.ellipse(cxw, cyw, o.w * 0.24, o.h * 0.24, 0, 0, TAU); ctx.stroke();
+        ctx.fillStyle = 'rgba(220,235,250,0.35)';
+        ctx.beginPath(); ctx.ellipse(cxw - o.w * 0.1, cyw - o.h * 0.12, o.w * 0.14, o.h * 0.09, 0, 0, TAU); ctx.fill();
+        ctx.restore();
+        return true;
+      }
+      case 'radome': {
+        const cxd = o.x + o.w / 2, cyd = o.y + o.h / 2;
+        const r = Math.min(o.w, o.h) / 2;
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.beginPath(); ctx.arc(cxd + 10, cyd + 12, r, 0, TAU); ctx.fill();
+        ctx.fillStyle = o.tint || '#c9d4c0';
+        ctx.beginPath(); ctx.arc(cxd, cyd, r, 0, TAU); ctx.fill();
+        // panel seams
+        ctx.strokeStyle = 'rgba(120,132,116,0.55)'; ctx.lineWidth = 2;
+        for (let i = 1; i <= 3; i++) {
+          ctx.beginPath(); ctx.arc(cxd, cyd, r * (i / 4), 0, TAU); ctx.stroke();
+        }
+        const sweep = this.simulationTime * 0.6;
+        ctx.strokeStyle = 'rgba(160,255,220,0.5)';
+        ctx.beginPath(); ctx.moveTo(cxd, cyd);
+        ctx.lineTo(cxd + Math.cos(sweep) * r, cyd + Math.sin(sweep) * r);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.22)';
+        ctx.beginPath(); ctx.arc(cxd - r * 0.3, cyd - r * 0.35, r * 0.3, 0, TAU); ctx.fill();
+        ctx.restore();
+        return true;
+      }
+      case 'kazemat': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(o.x + 10, o.y + 14, o.w, o.h);
+        ctx.fillStyle = o.tint || '#7d8670';
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        // sloped face and a gun slit
+        ctx.fillStyle = 'rgba(20,26,18,0.5)';
+        ctx.fillRect(o.x + o.w * 0.12, o.y + o.h * 0.34, o.w * 0.76, o.h * 0.3);
+        ctx.fillStyle = '#1a2018';
+        ctx.fillRect(o.x + o.w * 0.2, o.y + o.h * 0.4, o.w * 0.6, o.h * 0.16);
+        ctx.fillStyle = '#2b332a';
+        ctx.fillRect(o.x + o.w * 0.42, o.y + o.h * 0.42, o.w * 0.5, o.h * 0.07);
+        ctx.strokeStyle = 'rgba(226,232,190,0.3)'; ctx.lineWidth = 2;
+        ctx.strokeRect(o.x + 4, o.y + 4, o.w - 8, o.h - 8);
+        ctx.restore();
+        return true;
+      }
+      case 'stockade': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(o.x + 12, o.y + 16, o.w, o.h);
+        ctx.fillStyle = o.tint || '#7a7f6a';
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        // cell windows behind bars
+        const cols = Math.max(3, Math.round(o.w / 90));
+        for (let r = 0; r < 2; r++) {
+          for (let c = 0; c < cols; c++) {
+            const wx = o.x + 16 + (o.w - 32) * (c / cols);
+            const wy = o.y + 20 + r * (o.h * 0.44);
+            ctx.fillStyle = '#1a201a';
+            ctx.fillRect(wx, wy, (o.w - 32) / cols * 0.66, o.h * 0.28);
+            ctx.fillStyle = 'rgba(200,210,180,0.35)';
+            for (let b = 0; b < 4; b++) ctx.fillRect(wx + 4 + b * 9, wy + 3, 3, o.h * 0.28 - 6);
+            // a face at the bars, sometimes
+            if ((c + r * 3) % 3 === 0) {
+              ctx.fillStyle = 'rgba(220,200,170,0.35)';
+              ctx.beginPath();
+              ctx.arc(wx + (o.w - 32) / cols * 0.3, wy + o.h * 0.16, 5, 0, TAU);
+              ctx.fill();
+            }
+          }
+        }
+        ctx.fillStyle = 'rgba(226,232,190,0.4)';
+        ctx.font = 'bold 12px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('MP / STOCKADE', o.x + o.w / 2, o.y + o.h - 8);
+        ctx.textAlign = 'left';
+        ctx.restore();
+        return true;
+      }
+      case 'car': case 'humvee': case 'bus': case 'tanker': {
+        this.drawVehicleProp(ctx, o);
+        return true;
+      }
       case 'rampart': {
         // a low, thick concrete wall with a firing step cut into the top
         const hh = Math.min(H, 40);
@@ -9774,6 +10537,129 @@ export class Game {
         return true;
       }
       default: return false;
+    }
+  }
+
+  /** Traffic and garrison routines, drawn under the structures so they read as passing. */
+  private drawTrafficAndRoutines(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    const on = (x: number, y: number, pad = 160) =>
+      x > camX - pad && x < camX + this.w + pad && y > camY - pad && y < camY + this.h + pad;
+
+    for (const c of this.roadCars) {
+      if (c.dead || !on(c.x, c.y)) continue;
+      const L = c.kind === 'bus' ? 62 : c.kind === 'tanker' ? 54 : c.kind === 'humvee' ? 44 : 38;
+      const Wd = c.kind === 'bus' ? 20 : 17;
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.rotate(c.ang);
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.beginPath(); ctx.roundRect(-L + 4, -Wd + 5, L * 2, Wd * 2, 6); ctx.fill();
+      ctx.fillStyle = c.colour;
+      ctx.beginPath(); ctx.roundRect(-L, -Wd, L * 2, Wd * 2, c.kind === 'car' ? 8 : 5); ctx.fill();
+      ctx.fillStyle = 'rgba(16,22,18,0.55)';
+      ctx.beginPath(); ctx.roundRect(-L * 0.3, -Wd * 0.7, L * 0.6, Wd * 1.4, 4); ctx.fill();
+      ctx.fillStyle = 'rgba(150,205,220,0.55)';
+      ctx.beginPath(); ctx.roundRect(-L * 0.12, -Wd * 0.55, L * 0.4, Wd * 1.1, 3); ctx.fill();
+      // headlights
+      const beam = 0.5 + Math.sin(c.light * 3) * 0.1;
+      ctx.fillStyle = `rgba(255,240,190,${beam})`;
+      ctx.beginPath(); ctx.arc(L, -Wd * 0.6, 3.4, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(L, Wd * 0.6, 3.4, 0, TAU); ctx.fill();
+      if (c.kind === 'ambulance' || c.kind === 'humvee') {
+        const on2 = Math.sin(c.light * 8) > 0;
+        ctx.fillStyle = on2 ? '#ff5a5a' : '#3a6cff';
+        ctx.fillRect(-L * 0.1, -Wd * 0.34, 10, 6);
+      }
+      ctx.restore();
+    }
+
+    for (const r of this.routines) {
+      if (!on(r.x, r.y, 420)) continue;
+      const fade = Math.min(1, Math.min(r.t, r.dur - r.t) / 1.2);
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, fade);
+      if (r.kind === 'pt') {
+        // a squad jogging a circuit, counted with a barked cadence
+        const n = 8;
+        for (let i = 0; i < n; i++) {
+          const a = r.t * 1.1 + (i / n) * TAU;
+          const px = r.x + Math.cos(a) * (74 + (i % 2) * 16);
+          const py = r.y + Math.sin(a) * (74 + (i % 2) * 16) * 0.7;
+          ctx.fillStyle = '#4d5b33';
+          ctx.beginPath(); ctx.arc(px, py, 8, 0, TAU); ctx.fill();
+          ctx.fillStyle = 'rgba(230,232,190,0.5)';
+          ctx.fillRect(px - 4, py - 10, 8, 3);
+        }
+      } else if (r.kind === 'shift') {
+        // two files crossing: the old watch out, the new watch in
+        for (let i = 0; i < 6; i++) {
+          const f = (r.t * 0.16 + i * 0.06) % 1;
+          const px = r.x - 190 + f * 380, py = r.y - 40 + (i % 2) * 22;
+          ctx.fillStyle = '#4d5b33';
+          ctx.beginPath(); ctx.arc(px, py, 8, 0, TAU); ctx.fill();
+          ctx.fillStyle = '#2b3324';
+          ctx.fillRect(px - 3, py - 6, 6, 3);
+        }
+      } else if (r.kind === 'siren') {
+        // pulsing red rings over the compound, the way a base tests its alarm
+        const k = (Math.sin(r.t * 7) + 1) / 2;
+        ctx.strokeStyle = `rgba(255,90,80,${0.15 + k * 0.35})`;
+        ctx.lineWidth = 4;
+        for (let i = 1; i <= 3; i++) {
+          ctx.beginPath(); ctx.arc(r.x, r.y, 40 + i * 46 + k * 20, 0, TAU); ctx.stroke();
+        }
+      } else if (r.kind === 'drill') {
+        // three humvees running a figure of eight round a marked box
+        for (let i = 0; i < 3; i++) {
+          const ph = r.t * 0.8 + (i * TAU) / 3;
+          const px = r.x + Math.cos(ph) * 150, py = r.y + Math.sin(ph * 2) * 90;
+          ctx.save();
+          ctx.translate(px, py);
+          ctx.rotate(Math.atan2(Math.cos(ph * 2) * 180, -Math.sin(ph) * 150) + Math.PI / 2);
+          ctx.fillStyle = '#5a6349';
+          ctx.beginPath(); ctx.roundRect(-22, -12, 44, 24, 5); ctx.fill();
+          ctx.fillStyle = 'rgba(150,205,220,0.5)';
+          ctx.fillRect(-4, -8, 16, 16);
+          ctx.restore();
+        }
+      } else if (r.kind === 'crane') {
+        // a hook on a cable, swinging a crate between the yard and a truck
+        const swing = Math.sin(r.t * 1.1) * 0.5;
+        ctx.strokeStyle = 'rgba(210,200,160,0.6)'; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(r.x, r.y - 90);
+        ctx.lineTo(r.x + Math.sin(swing) * 70, r.y - 90 + Math.cos(swing) * 70);
+        ctx.stroke();
+        ctx.fillStyle = '#6a5a3a';
+        ctx.save();
+        ctx.translate(r.x + Math.sin(swing) * 70, r.y - 20 + Math.cos(swing) * 70);
+        ctx.rotate(swing);
+        ctx.fillRect(-14, -10, 28, 20);
+        ctx.strokeStyle = '#2b2418'; ctx.lineWidth = 2;
+        ctx.strokeRect(-14, -10, 28, 20);
+        ctx.restore();
+      } else {
+        // colours: the whole base stops while the flag goes up
+        ctx.strokeStyle = 'rgba(220,226,180,0.55)'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(r.x, r.y + 60); ctx.lineTo(r.x, r.y - 60); ctx.stroke();
+        const flap = Math.sin(r.t * 3) * 6;
+        ctx.fillStyle = 'rgba(220,226,180,0.5)';
+        ctx.beginPath();
+        ctx.moveTo(r.x, r.y - 60);
+        ctx.lineTo(r.x + 54 + flap, r.y - 48);
+        ctx.lineTo(r.x, r.y - 34);
+        ctx.closePath(); ctx.fill();
+        for (let i = 0; i < 5; i++) {
+          ctx.fillStyle = '#4d5b33';
+          ctx.beginPath(); ctx.arc(r.x - 40 + i * 20, r.y + 70, 8, 0, TAU); ctx.fill();
+        }
+      }
+      ctx.fillStyle = 'rgba(226,232,190,0.6)';
+      ctx.font = 'bold 11px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(r.label, r.x, r.y - 130);
+      ctx.textAlign = 'left';
+      ctx.restore();
     }
   }
 
@@ -11340,6 +12226,41 @@ export class Game {
           ctx.strokeStyle = '#bed88d'; ctx.lineWidth = 1.5;
           ctx.beginPath(); ctx.moveTo(-13, -7); ctx.lineTo(-19, -20); ctx.stroke();
           ctx.fillStyle = '#dfeb9e'; ctx.fillRect(0, -7, 5, 3);
+        }
+
+        // ARMY CAMOUFLAGE. Every soldier in the district wears the same disruptive
+        // pattern, drawn deterministically from his own position so it never flickers.
+        if (e.type.startsWith('army')) {
+          const seed = Math.abs(Math.round(e.homeX * 0.37 + e.homeY * 0.11));
+          ctx.save();
+          ctx.beginPath(); ctx.arc(0, 0, def.r * 0.78, 0, TAU); ctx.clip();
+          const tones = ['#48582f', '#5c6b3c', '#39472a', '#6b7448', '#2f3a22'];
+          for (let i = 0; i < 7; i++) {
+            const a = ((seed + i * 71) % 360) * Math.PI / 180;
+            const rr = ((seed + i * 37) % 100) / 100 * def.r * 0.7;
+            ctx.fillStyle = tones[(seed + i) % tones.length];
+            ctx.beginPath();
+            ctx.ellipse(Math.cos(a) * rr, Math.sin(a) * rr,
+              def.r * (0.22 + ((seed + i) % 5) * 0.05), def.r * 0.16, a, 0, TAU);
+            ctx.fill();
+          }
+          ctx.restore();
+          // helmet ring + webbing
+          ctx.strokeStyle = '#2b3324'; ctx.lineWidth = 2.4;
+          ctx.beginPath(); ctx.arc(0, 0, def.r * 0.78, 0, TAU); ctx.stroke();
+          ctx.fillStyle = '#2b3324';
+          ctx.fillRect(-def.r * 0.7, -2, def.r * 1.4, 4);
+          // rank chevron for the majors
+          if (e.type === 'armymajor') {
+            ctx.fillStyle = '#e2d79a';
+            ctx.fillRect(-4, -def.r * 0.95, 8, 3);
+            ctx.fillRect(-4, -def.r * 0.95 + 5, 8, 3);
+          }
+          if (e.type === 'armymedic') {
+            ctx.fillStyle = '#e8fff2';
+            ctx.fillRect(-2.5, 2, 5, 10);
+            ctx.fillRect(-5, 4.5, 10, 5);
+          }
         }
 
         // Custody officer: dark blue uniform, white "POLICE" band, visored helmet.

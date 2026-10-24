@@ -363,13 +363,33 @@ export function HudLayer({
             </div>
           )}
           {hud.jet && (
-            <div className="mt-2 rounded-sm border border-cyan-200/70 bg-cyan-300/15 px-2 py-1 text-center text-[10px] font-bold tracking-[0.18em] text-cyan-50">
-              <div>🛩 INTERCEPTOR · {hud.vehicleHp}/{hud.vehicleMax} HULL</div>
-              <div className="font-tech mt-0.5 text-[9px] tracking-widest text-cyan-100/70">
-                SHIFT AFTERBURNER · LMB CANNON · F EJECT
+            <div className="mt-2 rounded-sm border border-cyan-200/70 bg-cyan-300/15 px-2 py-1 text-cyan-50">
+              <div className="flex items-baseline justify-between text-[10px] font-bold tracking-[0.18em]">
+                <span>{hud.frostwing ? '❄ FROSTWING' : '🛩 INTERCEPTOR'}</span>
+                <span className="font-tech text-[9px] text-cyan-100/70">{hud.vehicleHp}/{hud.vehicleMax} HULL</span>
+              </div>
+              <div className="mt-1 flex items-center justify-between font-tech text-[10px] tracking-widest text-cyan-100/80">
+                <span>{hud.jetSpeed} m/s</span>
+                <span>ALT {hud.jetAlt}</span>
+                <span className={hud.jetMode === 'missile' ? 'text-amber-200' : 'text-cyan-50'}>
+                  {hud.jetMode === 'missile' ? 'AAM/A2G' : 'CANNON'}
+                </span>
+                <span>FLR {hud.jetFlares}</span>
               </div>
               <div className="mt-1 h-1 overflow-hidden rounded-sm bg-black/60">
-                <div className="h-full bg-gradient-to-r from-cyan-300 to-white" style={{ width: `${Math.round(hud.jetBoost * 100)}%` }} />
+                <div className={`h-full ${hud.jetBoost > 0.5 ? 'bg-gradient-to-r from-cyan-200 to-white' : 'bg-cyan-400/60'}`}
+                  style={{ width: `${Math.round(hud.jetBoost * 100)}%` }} />
+              </div>
+              <div className="font-tech mt-0.5 flex justify-between text-[9px] tracking-widest">
+                <span className={hud.jetLock ? 'text-rose-200' : 'text-cyan-100/40'}>
+                  {hud.jetLock ? `◎ LOCK ${hud.jetLock}` : '◎ NO LOCK'}
+                </span>
+                <span className={hud.jetAutopilot ? 'text-emerald-200' : 'text-cyan-100/40'}>
+                  {hud.jetAutopilot ? 'AUTOPILOT' : 'MANUAL'}
+                </span>
+              </div>
+              <div className="font-tech mt-1 text-center text-[8px] tracking-widest text-cyan-100/50">
+                SHIFT BURN · S BRAKE · A/D ROLL · LMB FIRE · G MISSILE · X STATION · E ORBIT · SPACE FLARES · F EJECT
               </div>
             </div>
           )}
