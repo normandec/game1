@@ -6,6 +6,8 @@ interface Props {
   onPause: () => void; onMute: () => void; onFullscreen: () => void; onUse: () => void;
   onGate: () => void; onAegis: () => void; onGuide: () => void; onMouse: () => void;
   onDash: () => void; onSecondary: () => void;
+  /** Shoulder a carried weapon from the kit (touch players have no number keys). */
+  onWeapon: (short: string) => void;
 }
 
 export default function CombatHud(p: Props) {
@@ -28,7 +30,7 @@ export default function CombatHud(p: Props) {
   const hp = vehicle ? h.vehicleHp : h.hp, max = vehicle ? h.vehicleMax : h.maxHp;
   const vehicleName = h.flyingPlane ? 'NIGHTJAR' : h.piloting ? 'KESTREL' : h.tank ? 'HYDRA TANK' : h.driving ? 'HYDRA TRANSPORT' : 'OPERATIVE';
   return <div className="combat-hud">
-    <header className="combat-top"><div className="combat-score"><small>PROTOCOL SOLAR ECLIPSE</small><strong>{h.score.toLocaleString()}</strong><span>BEST {p.best.toLocaleString()}</span></div><div className="combat-sector"><small>SECTOR {h.sector} / 05</small><b>{h.sectorName}</b><span>WAVE {String(h.wave).padStart(2, '0')} <i>/</i> {h.enemiesLeft} HOSTILES</span></div><div className="combat-settings"><button onClick={p.onMute} aria-label={p.muted ? 'Enable sound' : 'Mute sound'}>{p.muted ? 'SOUND OFF' : 'SOUND ON'}</button><button onClick={p.onFullscreen} aria-label={p.fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} title={p.fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>{p.fullscreen ? 'EXIT FULL' : 'FULLSCREEN'}</button><button onClick={p.onMouse} aria-label="Mouse sensitivity" title="Mouse sensitivity — also the mouse wheel in game">{`MOUSE ${h.mouseSens.toFixed(2)}x`}</button><button onClick={p.onPause} aria-label="Pause game">II <kbd>ESC</kbd></button></div></header>
+    <header className="combat-top"><div className="combat-score"><small>PROTOCOL SOLAR ECLIPSE</small><strong>{h.score.toLocaleString()}</strong><span>BEST {p.best.toLocaleString()}</span></div><div className="combat-sector"><small>SECTOR {h.sector} / 06</small><b>{h.sectorName}</b><span>WAVE {String(h.wave).padStart(2, '0')} <i>/</i> {h.enemiesLeft} HOSTILES</span></div><div className="combat-settings"><button onClick={p.onMute} aria-label={p.muted ? 'Enable sound' : 'Mute sound'}>{p.muted ? 'SOUND OFF' : 'SOUND ON'}</button><button onClick={p.onFullscreen} aria-label={p.fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} title={p.fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>{p.fullscreen ? 'EXIT FULL' : 'FULLSCREEN'}</button><button onClick={p.onMouse} aria-label="Mouse sensitivity" title="Mouse sensitivity — also the mouse wheel in game">{`MOUSE ${h.mouseSens.toFixed(2)}x`}</button><button onClick={p.onPause} aria-label="Pause game">II <kbd>ESC</kbd></button></div></header>
     {h.blackoutHud && <div className="combat-blackout"><b>NIGHT</b><span>HEADLAMPS INBOUND</span></div>}
     <div className="combat-objective"><small>PRIMARY OBJECTIVE</small><p>{h.objective}</p><span>MAINFRAMES {h.serversTotal - h.serversLeft}/{h.serversTotal} <i>/</i> {h.generalShield ? 'COMMAND SHIELDED' : 'GENERAL EXPOSED'}</span></div>
     <div className="combat-position"><span>{h.coords}</span><button onClick={p.onGuide} title="Toggle guide to the concealed vault entrance">VAULT GUIDE <kbd>V</kbd></button></div>
@@ -75,12 +77,19 @@ export default function CombatHud(p: Props) {
               <section key={group.group}>
                 <h4>{group.group}</h4>
                 <ul>
-                  {group.items.map((it, i) => (
-                    <li key={`${group.group}-${i}`} className={`tone-${it.tone}`}>
-                      <span>{it.label}</span>
-                      <b>{it.detail}</b>
-                    </li>
-                  ))}
+                  {group.items.map((it, i) => {
+                    const selectable = group.group === 'PRIMARY';
+                    const isCurrent = selectable && it.tone === 'active';
+                    return (
+                      <li key={`${group.group}-${i}`}
+                        className={`tone-${it.tone} ${isCurrent ? 'is-current' : ''} ${selectable ? 'is-pick' : ''}`}
+                        onClick={selectable ? () => p.onWeapon(it.label) : undefined}
+                        title={selectable ? `Shoulder ${it.label} — number keys also work` : undefined}>
+                        <span>{it.label}</span>
+                        <b>{it.detail}</b>
+                      </li>
+                    );
+                  })}
                 </ul>
               </section>
             ))}
@@ -90,6 +99,7 @@ export default function CombatHud(p: Props) {
             <span>ARMOR {h.shieldHp}</span>
             <span>FRAGS {h.grenades}</span>
             <span>{h.frostwing ? 'FROSTWING CLEARANCE' : 'NO SPECIAL CLEARANCE'}</span>
+            <span className="inv-hint">1-6 SHOULDER · I CLOSE</span>
           </footer>
         </div>
       )}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Game, type GameStatus, type Hud, type Perk } from './game/engine';
+import { Game, WEAPONS, type GameStatus, type Hud, type Perk } from './game/engine';
 import { sfx } from './game/audio';
 import { bestScore, loadName, loadScores, renameEntry, saveName, saveScore, type ScoreEntry } from './game/scores';
 import {
@@ -281,6 +281,9 @@ export default function App() {
           onAegis={() => gameRef.current?.activateAegis()}
           onGuide={() => gameRef.current?.toggleVaultRoute()}
           onMouse={cycleMouse}
+          onWeapon={(short) => gameRef.current?.selectWeapon(
+            Object.keys(WEAPONS).find((id) => WEAPONS[id].short === short) ?? 'rifle',
+          )}
         />
       )}
 

@@ -9,7 +9,7 @@ export default function OperationBriefing({ onBegin, onBack }: { onBegin: () => 
       <small className="briefing-chapter">PROTOCOL SOLAR ECLIPSE / CAMPAIGN PROLOGUE</small>
       <h1 id="briefing-title">The night the<br/><em>badges changed.</em></h1>
       <p>{PROLOGUE.text}</p>
-      <div className="briefing-orders"><span>MISSION DIRECTIVES</span><ol><li><b>01</b> Recover the five occupied command sectors.</li><li><b>02</b> Disrupt Goliath's transport and supply network.</li><li><b>03</b> Find the Mnemosyne cipher. Bring our people home.</li></ol></div>
+      <div className="briefing-orders"><span>MISSION DIRECTIVES</span><ol><li><b>01</b> Recover the six occupied command sectors.</li><li><b>02</b> Disrupt Goliath's transport and supply network.</li><li><b>03</b> Find the Mnemosyne cipher. Bring our people home.</li></ol></div>
       <div className="briefing-actions"><button className="deploy-button" onClick={onBegin}>BEGIN INSERTION <span>&#8599;</span></button><button onClick={onBack}>BACK TO OPERATIONS</button><small><kbd>ENTER</kbd> TO CONTINUE</small></div>
     </div>
     <div className="briefing-signal"><span/> VERIFIED SECURE CHANNEL <i>/</i> TRUST THE SIGNAL, NOT THE UNIFORM.</div>
