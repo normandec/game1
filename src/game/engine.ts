@@ -81,6 +81,8 @@ export interface Hud {
   heliStation: number; heliAmmo: [number, number, number]; heliLock: boolean;
   sector: number; basesCleared: number; sectorName: string; destination: string; transitPct: number;
   driving: boolean; tank: boolean; flyingPlane: boolean; allies: number; barricades: number;
+  /** Seized army interceptor and its afterburner level. */
+  jet: boolean; jetBoost: number;
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
   vaultFound: boolean; nearPrompt: string;
   coords: string; gatePrompt: string; aegisCharges: number; aegisTime: number;
@@ -256,12 +258,18 @@ interface ArmyTurret {
   x: number; y: number; ang: number; hp: number; maxHp: number;
   owner: 'enemy' | 'player'; cool: number; heavy: boolean;
   burst: number; flash: number; muzzle: number;
+  /** Rounds left in the current burst and the gap between them. */
+  rounds: number; gap: number;
 }
 /** Military fast jet: parked until the base is breached, then it hunts. */
 interface ArmyJet {
   x: number; y: number; ang: number; hp: number; maxHp: number;
   state: 'parked' | 'launch' | 'attack' | 'egress';
   alt: number; speed: number; cool: number; t: number;
+  /** A seized interceptor: from here on the operative is the pilot. */
+  manned?: boolean;
+  /** 0..1 afterburner, only meaningful while manned. */
+  boost?: number;
 }
 /** Attack gunship — strafes, hovers, rockets the player. */
 interface Heli {
@@ -498,14 +506,24 @@ export class Game {
   private armyLaunchT = 0;
   armyTurrets: ArmyTurret[] = [];
   armyJets: ArmyJet[] = [];
+  /** The army interceptor the operative is flying, if any. */
+  playerJet: ArmyJet | null = null;
+  /** Armour sortie clock and how many hulls the park has already sent. */
+  armyTankWaveT = 0;
+  armyTankSent = 0;
+  /** The Cage crossing: an orange suspension bridge that can be severed for good. */
+  bridgeHp = 2600;
+  bridgeMaxHp = 2600;
+  bridgeDown = false;
+  bridgeWarn = 0;
   /** Ranks still asleep in the parade ground. */
   armyDormant = 0;
   /** The parade, kept from the world build so the ranks can be spawned in populateHQ(). */
   private armyRanksData: { x: number; y: number; type: string }[] = [];
+  private armyGuardsData: { x: number; y: number; type: string }[] = [];
   /** Both army shutters, kept apart so the inner one can be powered down. */
   private armyShutters: Rect[] = [];
   private armyInnerOpen = false;
-  private armyTanksSent = false;
   private campaignSites: CampaignSites | null = null;
   private blackout = { active: false, t: 0, searchT: 0, lastX: 0, lastY: 0 };
   private responseOrders: { id: string; target: Point; units: number; size: number; sent: number }[] = [];
@@ -877,11 +895,15 @@ export class Game {
     /* ---------------- IRON RESERVE ---------------- */
     this.army = world.army;
     this.armyRanksData = world.ranks || [];
+    this.armyGuardsData = world.armyGuards || [];
     this.armyAlarm = 0; this.armyAlerted = false; this.armyWakeT = 0; this.armyWaves = 0;
-    this.armyLaunchT = 0; this.armyTanksSent = false;
+    this.playerJet = null; this.armyTankWaveT = 0; this.armyTankSent = 0;
+    this.bridgeHp = this.bridgeMaxHp; this.bridgeDown = false; this.bridgeWarn = 0;
+    this.armyLaunchT = 0;
     this.armyTurrets = (world.army?.turrets || []).map((t) => ({
       x: t.x, y: t.y, ang: t.ang, hp: t.heavy ? 900 : 620, maxHp: t.heavy ? 900 : 620,
       owner: 'enemy' as const, cool: rand(0, 2), heavy: t.heavy, burst: 0, flash: 0, muzzle: 0,
+      rounds: 0, gap: 0, aimX: t.x, aimY: t.y,
     }));
     this.armyInnerOpen = false;
     this.armyJets = (world.army?.jets || []).map((j) => ({
@@ -1016,7 +1038,7 @@ export class Game {
     this.banner = ''; this.bannerT = 0;
     this.hqBreached = false; this.garrisonAlerted = false; this.commandOnline = true;
     this.planT = 6; this.planTactic = 'phalanx';
-    this.objective = `SECTOR ${this.sector}/5 · ASSAULT ${SECTORS[this.sector - 1].name}`;
+    this.objective = `SECTOR ${this.sector}/6 · ASSAULT ${SECTORS[this.sector - 1].name}`;
     this.buildPierceRects();
     this.populateHQ();
     this.rebuildNavigation();
@@ -1081,6 +1103,17 @@ export class Game {
       this.armyDormant = this.armyRanksData.length;
     } else {
       this.armyDormant = 0;
+    }
+    /* ---------------- IRON RESERVE STRONGPOINTS ----------------
+     * The men on duty: artillery crews, silo watches, engineers, the provost. They are
+     * awake from the start — a base this size is never empty, it is just quiet.
+     */
+    for (const [i, g] of (this.armyGuardsData || []).entries()) {
+      const stand = this.infantryRoutesReadyPoint(g.x, g.y);
+      const e = this.makeEnemy(g.type, stand.x, stand.y, -5000000 - i, i % 6);
+      e.spawnT = 0; e.garrison = true; e.homeX = stand.x; e.homeY = stand.y;
+      e.ang = -Math.PI / 2;
+      this.enemies.push(e);
     }
     for (let i = 0; i < 6; i++) {
       const x = AIRFIELD.x - 700 + i * 265, y = AIRFIELD.y - 380;
@@ -1431,6 +1464,9 @@ export class Game {
 
   /** Context prompt shown on the HUD for whatever the operative can interact with. */
   private nearPrompt(): string {
+    if (this.playerJet) return 'F · EJECT FROM INTERCEPTOR';
+    const jetNear = this.nearArmyJet();
+    if (jetNear) return 'F · SEIZE THE INTERCEPTOR';
     if (this.flyingPlane) return 'F · LAND BOMBER';
     if (this.playerTank) return 'F · EXIT TANK';
     if (this.drivingBoat) return 'F · EXIT BOAT';
@@ -1556,8 +1592,10 @@ export class Game {
       coords: `X ${Math.round(this.px)}  Y ${Math.round(this.py)}`,
       gatePrompt: this.gates.some(g => g.hp > 0 && Math.hypot(g.x - this.px, g.y - this.py) < 165) ? 'L / LOCK OR UNLOCK GATE' : '',
       aegisCharges: this.aegisCharges, aegisTime: this.aegisTime,
-      vehicleHp: this.flyingPlane ? this.plane?.hp || 0 : this.playerTank ? this.playerTank.hp : this.drivingVan ? this.drivingVan.hp : this.piloting ? this.playerHeli?.hp || 0 : 0,
-      vehicleMax: this.flyingPlane ? this.plane?.maxHp || 1 : this.playerTank ? this.playerTank.maxHp : this.drivingVan ? this.drivingVan.maxHp : this.piloting ? this.playerHeli?.maxHp || 1 : 1,
+      jet: !!this.playerJet,
+      jetBoost: this.playerJet ? (this.playerJet.boost || 0) : 0,
+      vehicleHp: this.playerJet ? this.playerJet.hp : this.flyingPlane ? this.plane?.hp || 0 : this.playerTank ? this.playerTank.hp : this.drivingVan ? this.drivingVan.hp : this.piloting ? this.playerHeli?.hp || 0 : 0,
+      vehicleMax: this.playerJet ? this.playerJet.maxHp : this.flyingPlane ? this.plane?.maxHp || 1 : this.playerTank ? this.playerTank.maxHp : this.drivingVan ? this.drivingVan.maxHp : this.piloting ? this.playerHeli?.maxHp || 1 : 1,
       vehicleFuel: this.flyingPlane ? this.plane?.fuel || 0 : this.piloting ? this.playerHeli?.fuel || 0 : 100,
       facilityLabel: this.nearbyFacility ? `${this.nearbyFacility.code} / ${this.nearbyFacility.name}` : '',
       facilityStatus: this.nearbyFacility ? this.nearbyFacility.secured ? 'SECURED / SUPPLIES RELEASED'
@@ -1798,22 +1836,36 @@ export class Game {
       }
     }
 
-    // The armour park empties once: four hulls roll out behind the infantry.
-    if (this.armyAlerted && !this.armyTanksSent) {
-      this.armyTanksSent = true;
-      for (const spot of a.tankPatrols) {
-        if (this.tanks.length > 7) break;
-        const ang = Math.atan2(this.py - spot.y, this.px - spot.x);
-        this.tanks.push({
-          x: spot.x, y: spot.y,
-          goalX: this.px - Math.cos(ang) * 340, goalY: this.py - Math.sin(ang) * 340,
-          ang, turret: ang, lean: 0,
-          hp: 2400, maxHp: 2400, speed: 0,
-          cool: rand(2.5, 4.5), dead: false, announced: false, captured: false,
-          ttl: 400, id: this.tankSeq++,
-        });
+    /* ---------------- ARMOUR ---------------- *
+     * This is an army base, not a checkpoint. The park holds a battalion and it keeps
+     * feeding hulls onto the field for as long as the alarm is up: waves of eight to ten,
+     * thirty-four alive at once, each with a main gun that will end a careless run.
+     */
+    if (this.armyAlerted) {
+      this.armyTankWaveT -= dt;
+      const live = this.tanks.filter((q) => !q.dead && !q.captured).length;
+      if (this.armyTankWaveT <= 0 && live < 34 && a.tankPatrols.length) {
+        this.armyTankWaveT = 6;
+        const batch = Math.min(10, 34 - live);
+        for (let i = 0; i < batch; i++) {
+          const spot = a.tankPatrols[this.armyTankSent % a.tankPatrols.length];
+          this.armyTankSent++;
+          const ang = Math.atan2(this.py - spot.y, this.px - spot.x);
+          const jx = spot.x + rand(-40, 40), jy = spot.y + rand(-40, 40);
+          this.tanks.push({
+            x: jx, y: jy,
+            goalX: this.px - Math.cos(ang) * 360, goalY: this.py - Math.sin(ang) * 360,
+            ang, turret: ang, lean: 0,
+            hp: 1900, maxHp: 1900, speed: 0,
+            cool: rand(1.4, 3.4), dead: false, announced: true, captured: false,
+            ttl: 420, id: this.tankSeq++,
+          });
+        }
+        this.addText(this.px, this.py - 120,
+          `ARMOURED BATTALION · ${batch} HULLS ROLLING OUT`, '#ffb0b0', 17);
+        this.shocks.push({ x: a.base.x + a.base.w / 2, y: a.base.y + 900, r: 40, max: 320, life: 0.5, t: 0.5, color: '255,190,140', width: 6 });
+        sfx.rotor();
       }
-      this.addText(this.px, this.py - 120, 'ARMOUR ROLLING OUT OF THE PARK', '#ffb0b0', 16);
     }
 
     this.updateArmyTurrets(dt);
@@ -1842,7 +1894,10 @@ export class Game {
 
   /** Send up the base's aircraft: a fast jet, and a gunship until the apron is empty. */
   private launchArmyAir() {
-    const jet = this.armyJets.find((j) => j.state === 'parked');
+    // The sky belongs to one aircraft at a time. While the operative is flying a seized
+    // interceptor, the army keeps everything else on the apron.
+    if (this.playerJet) return;
+    const jet = this.armyJets.find((j) => j.state === 'parked' && !j.manned);
     if (jet) {
       jet.state = 'launch';
       jet.alt = 40; jet.speed = 260; jet.t = 0; jet.cool = 1.2;
@@ -1867,59 +1922,74 @@ export class Game {
   private updateArmyTurrets(dt: number) {
     for (const t of this.armyTurrets) {
       t.cool -= dt;
+      t.gap -= dt;
       t.flash = Math.max(0, t.flash - dt);
       t.muzzle = Math.max(0, t.muzzle - dt * 6);
       const hostile = t.owner === 'enemy';
-      // who is it shooting at
-      let tx = 0, ty = 0, has = false, range = 0;
+      // Who is it shooting at, and where will that thing be when the rounds arrive?
+      let tx = 0, ty = 0, has = false, range = 0, vx = 0, vy = 0;
       if (hostile) {
-        if (!this.armyAlerted && Math.hypot(this.px - t.x, this.py - t.y) > 620) continue;
-        tx = this.px; ty = this.py; has = true;
-        range = t.heavy ? 1750 : 1280;
+        if (!this.armyAlerted && Math.hypot(this.px - t.x, this.py - t.y) > 620) { t.rounds = 0; continue; }
+        tx = this.px; ty = this.py; vx = this.pvx; vy = this.pvy; has = true;
+        range = t.heavy ? 1900 : 1450;
       } else {
-        let bd = 1450;
+        let bd = 1650;
         for (const e of this.enemies) {
           if (e.hp <= 0 || e.spawnT > 0 || e.def.civilian) continue;
           const d = Math.hypot(e.x - t.x, e.y - t.y);
-          if (d < bd) { bd = d; tx = e.x; ty = e.y; has = true; }
+          if (d < bd) { bd = d; tx = e.x; ty = e.y; vx = e.vx; vy = e.vy; has = true; }
         }
-        range = 1450;
+        range = 1650;
       }
-      if (!has) continue;
+      if (!has) { t.rounds = 0; continue; }
       const d = Math.hypot(tx - t.x, ty - t.y);
-      if (d > range) continue;
-      const want = Math.atan2(ty - t.y, tx - t.x);
-      const turn = Math.max(-3.6 * dt, Math.min(3.6 * dt, ((want - t.ang + Math.PI * 3) % TAU) - Math.PI));
+      if (d > range) { t.rounds = 0; continue; }
+      // Lead the target: an emplacement that fires at where you *are* can never hit a jet.
+      const flight = d / 1520;
+      const want = Math.atan2(ty + vy * flight - t.y, tx + vx * flight - t.x);
+      const turn = Math.max(-4.6 * dt, Math.min(4.6 * dt, ((want - t.ang + Math.PI * 3) % TAU) - Math.PI));
       t.ang += turn;
-      if (Math.abs(((want - t.ang + Math.PI * 3) % TAU) - Math.PI) > 0.22) continue;
-      if (t.cool > 0) continue;
-      // twin guns: ground and air are the same problem
-      t.cool = t.heavy ? 0.22 : 0.34;
-      t.flash = 0.08;
+      const err = ((want - t.ang + Math.PI * 3) % TAU) - Math.PI;
+      // A twin mount is on target well inside seven degrees. Anything looser and the crew
+      // sprays the countryside — which is exactly what made these feel broken.
+      if (Math.abs(err) > 0.12) { t.rounds = 0; continue; }
+      // Burst fire: five or six rounds, then a beat to settle.
+      if (t.rounds <= 0) {
+        if (t.cool > 0) continue;
+        t.rounds = t.heavy ? 6 : 5;
+        t.gap = 0;
+        t.cool = t.heavy ? 1.25 : 1.55;
+      }
+      if (t.gap > 0) continue;
+      t.rounds--;
+      t.gap = t.heavy ? 0.055 : 0.07;
+      t.flash = 0.09;
       t.muzzle = 1;
-      const rounds = t.heavy ? 3 : 2;
-      for (let i = 0; i < rounds; i++) {
-        const spread = rand(-0.022, 0.022);
-        const a = t.ang + spread;
-        const side = (i % 2 === 0 ? -1 : 1) * 22;
+      // Rounds leave the barrel tips, not the middle of the pit where the sandbags are.
+      const mx = t.x + Math.cos(t.ang) * 44, my = t.y + Math.sin(t.ang) * 44;
+      // Ground and air are the same problem for a twin mount: no target class lock.
+      for (const side of [-1, 1]) {
+        const a = t.ang + rand(-0.008, 0.008);
+        const ox = Math.cos(t.ang + Math.PI / 2) * side * 11;
+        const oy = Math.sin(t.ang + Math.PI / 2) * side * 11;
         this.bullets.push({
-          x: t.x + Math.cos(t.ang + Math.PI / 2) * side,
-          y: t.y + Math.sin(t.ang + Math.PI / 2) * side,
-          px: t.x, py: t.y,
-          vx: Math.cos(a) * 980, vy: Math.sin(a) * 980,
-          dmg: hostile ? (t.heavy ? 14 : 10) : 16,
-          life: 1.6, friendly: !hostile,
+          x: mx + ox, y: my + oy, px: mx + ox, py: my + oy,
+          vx: Math.cos(a) * 1520, vy: Math.sin(a) * 1520,
+          dmg: hostile ? (t.heavy ? 11 : 8) : 20,
+          life: 1.5, friendly: !hostile,
           color: hostile ? '#ffd08a' : '#c6f0ff', r: 3,
-          hits: [], arm: t.heavy ? undefined : 'ground',
+          hits: [],
         });
       }
-      this.addLight(t.x, t.y, 150, '255,210,150', 0.08);
+      this.addLight(mx, my, 170, '255,210,150', 0.08);
       if (hostile) sfx.shoot('smg');
     }
   }
 
   private updateArmyJets(dt: number) {
     for (const j of this.armyJets) {
+      if (j.manned) continue;
+      if (this.playerJet && j.state !== 'parked') { j.state = 'parked'; j.alt = 0; j.speed = 0; continue; }
       if (j.state === 'parked') continue;
       j.t += dt;
       j.cool = Math.max(0, j.cool - dt);
@@ -1972,6 +2042,133 @@ export class Game {
     }
   }
 
+  /* ---------------- the seized interceptor ---------------- */
+
+  /** A parked army jet within reach of the operative, if there is one. */
+  private nearArmyJet(): ArmyJet | null {
+    if (!this.army) return null;
+    let best: ArmyJet | null = null, bd = 240;
+    for (const j of this.armyJets) {
+      if (j.manned || j.state !== 'parked') continue;
+      const d = Math.hypot(j.x - this.px, j.y - this.py);
+      if (d < bd) { bd = d; best = j; }
+    }
+    return best;
+  }
+
+  /**
+   * Take the interceptor. From this moment the operative *is* the air force: the army's
+   * own jets go back on the apron and its gunships are waved off, because a dogfight
+   * against scripted aircraft is not a fight — it is a cutscene with a health bar.
+   */
+  private seizeJet(j: ArmyJet) {
+    this.playerJet = j;
+    j.manned = true;
+    j.alt = 0; j.speed = 120; j.boost = 0; j.hp = Math.max(j.hp, j.maxHp * 0.8);
+    this.px = j.x; this.py = j.y; this.pvx = 0; this.pvy = 0;
+    for (const o of this.armyJets) {
+      if (o === j) continue;
+      o.state = 'parked'; o.alt = 0; o.speed = 0;
+    }
+    for (const h of this.helis) h.state = 'egress';
+    this.score += 1500;
+    this.setBanner('INTERCEPTOR SEIZED', 'MOUSE TO FLY · W/S THROTTLE · HOLD SHIFT FOR AFTERBURNER · LMB CANNON');
+    this.addText(j.x, j.y - 90, 'AIRSPACE IS YOURS — NOTHING ELSE FLIES', '#a9ecff', 17);
+    this.flash = 0.35; this.flashColor = '150,235,255';
+    sfx.rotor();
+  }
+
+  private exitJet() {
+    const j = this.playerJet;
+    if (!j) return;
+    if (j.speed > 320) {
+      this.addText(j.x, j.y - 90, 'THROTTLE DOWN TO EJECT', '#ffcf7a', 14);
+      return;
+    }
+    j.manned = false;
+    j.state = 'parked';
+    j.alt = 0; j.speed = 0; j.boost = 0;
+    this.playerJet = null;
+    this.px = j.x + 70; this.py = j.y + 70;
+    this.pvx = 0; this.pvy = 0;
+    this.setBanner('INTERCEPTOR ON THE APRON', 'PRESS F AGAIN TO FLY');
+    sfx.click();
+  }
+
+  /**
+   * Fast-jet flight model: always moving forwards, steered by the nose, with a
+   * afterburner that roughly triples the ground speed. Holding SHIFT is the whole point.
+   */
+  private updatePlayerJet(dt: number) {
+    const j = this.playerJet;
+    if (!j) return;
+    const m = this.moveVector();
+    if (j.hp <= 0) {
+      this.explode(j.x, j.y, 260, 90, true);
+      this.addText(j.x, j.y - 80, 'INTERCEPTOR DOWN', '#ff9d9d', 18);
+      j.manned = false; j.state = 'parked'; j.hp = 0;
+      this.playerJet = null;
+      this.px = j.x; this.py = j.y; this.pvx = 0; this.pvy = 0;
+      return;
+    }
+    let aim = j.ang, firing = false;
+    if (this.aimStick.active) {
+      const dx = this.aimStick.x - this.aimStick.ox, dy = this.aimStick.y - this.aimStick.oy;
+      if (Math.hypot(dx, dy) > 12) { aim = Math.atan2(dy, dx); firing = true; }
+    } else if (!this.isTouch) {
+      aim = Math.atan2(this.mouseY + this.camY - j.y, this.mouseX + this.camX - j.x);
+      firing = this.firing;
+    }
+    // A/D are also a rudder: at 1 700 m/s the mouse alone is too coarse.
+    if (m.x) aim = j.ang + m.x * 0.75;
+    let turn = aim - j.ang;
+    while (turn > Math.PI) turn -= TAU;
+    while (turn < -Math.PI) turn += TAU;
+    const agility = 2.3 - Math.min(1, j.speed / 1800) * 0.9;
+    j.ang += clamp(turn, -agility * dt, agility * dt);
+
+    const boost = !!(this.keys['shift'] || this.keys[' ']);
+    const throttle = m.y < -0.1 ? 1 : m.y > 0.1 ? -0.6 : 0;
+    const want = boost ? 1750 : 600 + throttle * 240;
+    j.speed += (want - j.speed) * Math.min(1, dt * (boost ? 1.7 : 2.4));
+    j.boost = lerp(j.boost || 0, boost ? 1 : 0, Math.min(1, dt * 4));
+    j.alt = clamp(j.alt + (boost ? 46 : 14) * dt, 0, 480);
+    j.cool = Math.max(0, j.cool - dt);
+
+    j.x += Math.cos(j.ang) * j.speed * dt;
+    j.y += Math.sin(j.ang) * j.speed * dt;
+    // the arena has walls; the jet slides along them instead of leaving the world
+    if (j.x < 220 || j.x > ARENA_W - 220) { j.x = clamp(j.x, 220, ARENA_W - 220); j.ang = Math.PI - j.ang; }
+    if (j.y < 220 || j.y > ARENA_H - 220) { j.y = clamp(j.y, 220, ARENA_H - 220); j.ang = -j.ang; }
+
+    if (j.boost > 0.15 && Math.random() < 0.9) {
+      for (const side of [-1, 1]) {
+        const ox = Math.cos(j.ang + Math.PI / 2) * side * 16 - Math.cos(j.ang) * 110;
+        const oy = Math.sin(j.ang + Math.PI / 2) * side * 16 - Math.sin(j.ang) * 110;
+        this.addParticle(ox + j.x, oy + j.y, rand(-30, 30), rand(-30, 30), 0.3, rand(2, 5),
+          j.boost > 0.6 ? '#9fe0ff' : '#c9d4c0', true);
+      }
+      this.addLight(j.x, j.y, 260, '150,225,255', 0.18);
+    }
+    if (firing && j.cool <= 0) {
+      j.cool = 0.06;
+      for (const side of [-1, 1]) {
+        const a = j.ang + rand(-0.012, 0.012);
+        const ox = Math.cos(j.ang + Math.PI / 2) * side * 14 + Math.cos(j.ang) * 74;
+        const oy = Math.sin(j.ang + Math.PI / 2) * side * 14 + Math.sin(j.ang) * 74;
+        this.bullets.push({
+          x: j.x + ox, y: j.y + oy, px: j.x + ox, py: j.y + oy,
+          vx: Math.cos(a) * 2100, vy: Math.sin(a) * 2100,
+          dmg: 24, life: 0.9, friendly: true, color: '#d6f6ff', r: 3.6, hits: [],
+        });
+      }
+      this.addLight(j.x, j.y, 200, '190,240,255', 0.1);
+      sfx.shoot('rifle');
+    }
+    this.px = j.x; this.py = j.y; this.pvx = Math.cos(j.ang) * j.speed; this.pvy = Math.sin(j.ang) * j.speed;
+    this.pang = j.ang;
+  }
+
   /** F on a suppressed emplacement: the crew is dead, the guns are yours. */
   private tryCaptureTurret() {
     const t = this.armyTurrets.find((q) =>
@@ -1983,7 +2180,9 @@ export class Game {
     }
     t.owner = 'player';
     t.hp = Math.max(t.hp, t.maxHp * 0.55);
-    t.cool = 1.2;
+    t.cool = 0.4; t.rounds = 0; t.gap = 0;
+    // The crew that held it is gone; the mount is ours and it tracks on its own.
+    this.setBanner('TWIN GUN SEIZED', 'IT COVERS GROUND AND AIR — LEAVE IT AND IT KEEPS FIRING');
     this.score += 900;
     this.addText(t.x, t.y - 66, 'TWIN GUN SEIZED · IT COVERS GROUND AND AIR', '#a9ecff', 16);
     sfx.click();
@@ -2622,6 +2821,7 @@ export class Game {
     this.updatePrisonHint();
     this.updatePrisonDoor(dt);
     if (this.status !== 'playing') return;
+    if (this.playerJet) { this.updatePlayerJet(dt); return; }
     if (this.flyingPlane) { this.updatePlane(dt); return; }
     if (this.drivingBoat) { this.updateDrivenBoat(dt); return; }
     if (this.drivingVan) { this.updateDrivenVan(dt); return; }
@@ -2736,6 +2936,9 @@ export class Game {
     if (this.tryCaptureTurret()) return;
     if (this.status !== 'playing') return;
     // exit whatever we are piloting first
+    if (this.playerJet) { this.exitJet(); return; }
+    const jet = this.nearArmyJet();
+    if (jet) { this.seizeJet(jet); return; }
     if (this.flyingPlane && this.plane) { this.exitPlane(); return; }
     if (this.playerTank) { this.exitTank(); return; }
     if (this.drivingBoat) { this.exitBoat(); return; }
@@ -3749,6 +3952,142 @@ export class Game {
     sfx.shoot('rocket');
   }
 
+  /* ---------------- the Cage crossing ---------------- */
+
+  /**
+   * A suspension bridge is a structure, not scenery: bombs near the deck cut into it, and
+   * when the span goes, it stays gone. Nobody crosses to the island after that.
+   */
+  private hurtBridge(x: number, y: number, dmg: number, radius: number) {
+    if (this.bridgeDown) return;
+    const onDeck = x > BRIDGE.x - 120 && x < BRIDGE.x + BRIDGE.w + 120
+      && y > BRIDGE.y - 260 && y < BRIDGE.y + BRIDGE.h + 260;
+    if (!onDeck) return;
+    // a near miss rattles the span, a direct hit tears it
+    const near = Math.hypot(x - (BRIDGE.x + BRIDGE.w / 2), y - (BRIDGE.y + BRIDGE.h / 2));
+    const bite = Math.max(40, dmg) * (1 + radius / 400) * (near < BRIDGE.w / 2 ? 1.4 : 0.8);
+    this.bridgeHp = Math.max(0, this.bridgeHp - bite);
+    if (this.bridgeHp <= 0) {
+      this.bridgeDown = true;
+      this.shocks.push({ x, y, r: 10, max: 420, life: 0.7, t: 0.7, color: '255,170,90', width: 14 });
+      for (let i = 0; i < 5; i++) {
+        const gx = BRIDGE.x + BRIDGE.w * (0.38 + i * 0.07), gy = BRIDGE.y + BRIDGE.h / 2;
+        this.explode(gx, gy, 120, 0, false);
+      }
+      this.setBanner('THE CROSSING IS DOWN', 'THE SPAN IS IN THE WATER — THE CAGE IS CUT OFF');
+      this.addText(BRIDGE.x + BRIDGE.w / 2, BRIDGE.y - 40, 'SUSPENSION SPAN SEVERED', '#ffd166', 18);
+      this.score += 2500;
+      sfx.explode();
+      return;
+    }
+    const frac = this.bridgeHp / this.bridgeMaxHp;
+    if (frac < 0.66 && this.bridgeWarn === 0) { this.bridgeWarn = 1; this.addText(x, y - 40, 'SPAN DAMAGED — KEEP HITTING IT', '#ffd166', 15); }
+    else if (frac < 0.33 && this.bridgeWarn === 1) { this.bridgeWarn = 2; this.addText(x, y - 40, 'SUSPENSION TOWERS BUCKING', '#ff9d7a', 15); }
+  }
+
+  /**
+   * The Golden Gate crossing: two orange towers, a catenary main cable, hangers down to a
+   * stiffened deck, and — if the operative has been busy — a very large hole in the middle.
+   */
+  private drawSuspensionBridge(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    const bx = BRIDGE.x, by = BRIDGE.y, bw = BRIDGE.w, bh = BRIDGE.h;
+    const cy = by + bh / 2;
+    if (bx + bw < camX - 200 || bx > camX + this.w + 200 || by + bh < camY - 400 || by > camY + this.h + 400) return;
+    const t = this.simulationTime;
+    const orange = '#c15a2e';
+    const orangeLit = '#e0783c';
+    const gap0 = bx + bw * 0.4, gap1 = bx + bw * 0.68;
+
+    ctx.save();
+    // the shadow of the deck on the water beneath
+    ctx.fillStyle = 'rgba(6,16,20,0.55)';
+    ctx.fillRect(bx - 10, by - 20, bw + 20, bh + 40);
+
+    // deck: asphalt with a lane line, drawn in two pieces once the span is down
+    const deck = (x0: number, x1: number) => {
+      ctx.fillStyle = '#232827';
+      ctx.fillRect(x0, by, x1 - x0, bh);
+      ctx.fillStyle = 'rgba(232,214,150,0.30)';
+      for (let x = x0 + 20; x < x1 - 20; x += 64) ctx.fillRect(x, cy - 3, 34, 6);
+      // orange kerbs
+      ctx.fillStyle = orange;
+      ctx.fillRect(x0, by - 6, x1 - x0, 8);
+      ctx.fillRect(x0, by + bh - 2, x1 - x0, 8);
+    };
+    if (!this.bridgeDown) deck(bx, bx + bw);
+    else { deck(bx, gap0); deck(gap1, bx + bw); }
+
+    // towers at the third points: legs, cross beams, warning lights
+    const towers = [bx + bw * 0.28, bx + bw * 0.72];
+    const topY = by - 300;
+    for (const tx of towers) {
+      const legTop = this.bridgeDown && tx > gap0 && tx < gap1 ? by - 40 : topY;
+      ctx.fillStyle = orange;
+      ctx.fillRect(tx - 34, legTop, 22, by - legTop + 10);
+      ctx.fillRect(tx + 12, legTop, 22, by - legTop + 10);
+      ctx.fillStyle = orangeLit;
+      ctx.fillRect(tx - 34, legTop, 68, 26);
+      ctx.fillRect(tx - 30, by - 150, 60, 16);
+      if (legTop < topY + 80) {
+        ctx.fillStyle = '#ff6a4a';
+        ctx.beginPath(); ctx.arc(tx, legTop - 6, 6 + Math.sin(t * 3) * 1.5, 0, TAU); ctx.fill();
+        ctx.fillStyle = 'rgba(255,90,60,0.22)';
+        ctx.beginPath(); ctx.arc(tx, legTop - 6, 18, 0, TAU); ctx.fill();
+      }
+    }
+
+    // main cables: catenary from anchorage to anchorage
+    const sag = (x: number) => {
+      const span = Math.abs(x - (towers[0] + towers[1]) / 2) / ((towers[1] - towers[0]) / 2);
+      const s = Math.min(1, span);
+      return by - 286 + s * s * 150;
+    };
+    ctx.strokeStyle = this.bridgeDown ? '#8a4b2e' : '#d9a45c';
+    ctx.lineWidth = 5;
+    for (const side of [-1, 1]) {
+      ctx.beginPath();
+      for (let x = bx; x <= bx + bw; x += 12) {
+        const y = side < 0 ? sag(x) : by + bh + 10 + (sag(x) - (by - 286));
+        if (x === bx) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    // hangers
+    ctx.strokeStyle = 'rgba(220,180,120,0.35)';
+    ctx.lineWidth = 2;
+    for (let x = bx + 20; x < bx + bw - 10; x += 46) {
+      if (this.bridgeDown && x > gap0 - 20 && x < gap1 + 20) continue;
+      ctx.beginPath(); ctx.moveTo(x, sag(x)); ctx.lineTo(x, by); ctx.stroke();
+    }
+
+    if (this.bridgeDown) {
+      // twisted deck ends and cables trailing in the water
+      ctx.strokeStyle = '#7a4526';
+      ctx.lineWidth = 4;
+      for (let i = 0; i < 6; i++) {
+        const x0 = gap0 - 30 + i * 12, x1 = x0 + 40 + i * 8;
+        ctx.beginPath();
+        ctx.moveTo(x0, by + i * 8);
+        ctx.lineTo(x1, by + 120 + i * 22);
+        ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(255,150,90,0.12)';
+      ctx.beginPath(); ctx.ellipse((gap0 + gap1) / 2, cy + 40, (gap1 - gap0) / 2, 90, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = 'rgba(255,120,90,0.75)';
+      ctx.font = 'bold 13px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('SPAN DESTROYED — NO WAY ACROSS', (gap0 + gap1) / 2, by - 340);
+      ctx.textAlign = 'left';
+    } else if (this.bridgeHp < this.bridgeMaxHp) {
+      const frac = Math.max(0, this.bridgeHp / this.bridgeMaxHp);
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(bx + bw / 2 - 90, by - 356, 180, 8);
+      ctx.fillStyle = frac > 0.5 ? '#e0a83c' : '#ff6a4a';
+      ctx.fillRect(bx + bw / 2 - 90, by - 356, 180 * frac, 8);
+    }
+    ctx.restore();
+  }
+
   /** Beam batteries: telegraphed charge, then a lethal lance. */
   private updateLasers(dt: number) {
     for (let i = this.lasers.length - 1; i >= 0; i--) {
@@ -3903,7 +4242,7 @@ export class Game {
         this.siege.active = false;
         this.score += 45000;
         this.setBanner('BASE SECURED', `${poi.name} HELD — +45000 · PERMANENT HOLD`);
-        this.objective = `SECTOR ${this.sector}/5 · ASSAULT THE MAIN FORTRESS`;
+        this.objective = `SECTOR ${this.sector}/6 · ASSAULT THE MAIN FORTRESS`;
         for (let i = 0; i < 8; i++)
           this.dropPickup(this.px + rand(-180, 180), this.py + rand(-180, 180),
             i % 4 === 0 ? 'health' : i % 4 === 1 ? 'shield' : i % 4 === 2 ? 'grenade' : 'aegis');
@@ -3933,7 +4272,7 @@ export class Game {
         this.score += 35000;
         sfx.wave();
         this.setBanner('BASE SECURED / OVERRIDE COMPLETE', `${poi.name} S.H.I.E.L.D. OUTPOST ACTIVE`);
-        this.objective = `SECTOR ${this.sector}/5 · ASSAULT THE MAIN FORTRESS`;
+        this.objective = `SECTOR ${this.sector}/6 · ASSAULT THE MAIN FORTRESS`;
         for (let i = 0; i < 4; i++) {
           this.allies.push({
             x: poi.x + rand(-80, 80), y: poi.y + rand(-80, 80), vx: 0, vy: 0, ang: 0,
@@ -4369,7 +4708,14 @@ export class Game {
     if (x > COAST.x && x < COAST.x + COAST.w && y > COAST.y && y < COAST.y + COAST.h) return true;
     if (x > BRIDGEHEAD.x && x < BRIDGEHEAD.x + BRIDGEHEAD.w && y > BRIDGEHEAD.y && y < BRIDGEHEAD.y + BRIDGEHEAD.h) return true;
     // keep a parapet's width clear so a beat never clips the railing
-    if (x > BRIDGE.x - 8 && x < BRIDGE.x + BRIDGE.w + 8 && y > BRIDGE.y + margin && y < BRIDGE.y + BRIDGE.h - margin) return true;
+    if (x > BRIDGE.x - 8 && x < BRIDGE.x + BRIDGE.w + 8 && y > BRIDGE.y + margin && y < BRIDGE.y + BRIDGE.h - margin) {
+      // a dropped span is a hole in the world: nothing walks across it
+      if (this.bridgeDown) {
+        const g0 = BRIDGE.x + BRIDGE.w * 0.4, g1 = BRIDGE.x + BRIDGE.w * 0.68;
+        if (x > g0 && x < g1) return false;
+      }
+      return true;
+    }
     const cx = LAND.x + LAND.w / 2, cy = LAND.y + LAND.h / 2;
     const ex = (x - cx) / (LAND.w / 2), ey = (y - cy) / (LAND.h / 2);
     return ex * ex + ey * ey <= 0.93;
@@ -7196,7 +7542,7 @@ export class Game {
     this.iFrames = 10;
     this.flash = 1; this.flashColor = '255,220,140';
     this.score += 18000 + this.sector * 7000;
-    this.objective = `HYDRA BASE ${this.sector}/5 DESTROYED`;
+    this.objective = `HYDRA BASE ${this.sector}/6 DESTROYED`;
     this.setBanner('DECAPITATION STRIKE', `HYDRA COMMAND ${this.sector}/5 ELIMINATED`);
     sfx.explode();
     for (let i = 0; i < 160; i++) {
@@ -7289,7 +7635,7 @@ export class Game {
     this.destination = '';
     this.intermission = 1.1;
     const theme = SECTORS[this.sector - 1];
-    this.setBanner(`SECTOR ${this.sector}/5 · ${theme.name}`, `${theme.codename} — HYDRA RESISTANCE ESCALATED`);
+    this.setBanner(`SECTOR ${this.sector}/6 · ${theme.name}`, `${theme.codename} — HYDRA RESISTANCE ESCALATED`);
     this.objective = `ASSAULT ${theme.name} · DESTROY 6 MAINFRAMES`;
     this.onTransit(0);
     sfx.siren();
@@ -7301,6 +7647,7 @@ export class Game {
 
   private explode(x: number, y: number, radius: number, dmg: number, sound: boolean, opts?: { ownBomb?: boolean; grenade?: boolean }) {
     if (sound) sfx.explode();
+    this.hurtBridge(x, y, dmg, radius);
     this.hitstop = Math.max(this.hitstop, 0.06);
     this.addLight(x, y, radius * 2.4, '255,180,90', 0.45);
     this.shocks.push({ x, y, r: 8, max: radius * 1.15, life: 0.4, t: 0.4, color: '255,170,80', width: 10 });
@@ -7776,6 +8123,7 @@ export class Game {
     this.drawLandmass(ctx, camX, camY);
     this.drawSnowCover(ctx, camX, camY);
     this.drawZones(ctx, camX, camY);
+    this.drawSuspensionBridge(ctx, camX, camY);
     this.drawSnowWorks(ctx, camX, camY);
     this.facilityPainter.drawGround(ctx, this.facilities, { x: camX, y: camY, w: this.w, h: this.h }, this.simulationTime);
     drawRuins(ctx, this.ruins, { x: camX, y: camY, w: this.w, h: this.h });
@@ -7974,7 +8322,8 @@ export class Game {
     if (near) {
       ctx.fillStyle = 'rgba(216,180,90,0.45)';
       ctx.font = '11px ui-monospace, monospace';
-      ctx.fillText('CAUSEWAY BRIDGE · 1.7 km', BRIDGE.x + BRIDGE.w / 2, BRIDGE.y - 24);
+      ctx.fillText(this.bridgeDown ? 'CROSSING SEVERED · NO ROUTE TO THE ISLAND' : 'SUSPENSION CROSSING · 1.5 km',
+        BRIDGE.x + BRIDGE.w / 2, BRIDGE.y - 400);
       ctx.fillStyle = 'rgba(216,180,90,0.5)';
       ctx.font = '11px ui-monospace, monospace';
       ctx.fillText('SALLY PORT · CROSS THE BRIDGE', PRISON_DOOR.x - 330, PRISON_DOOR.y - 250);
@@ -8963,6 +9312,89 @@ export class Game {
     }
   }
 
+  /**
+   * A fifth-generation interceptor in plan view: long chined nose, diamond wing with a
+   * cropped trailing edge, canted twin tails and two engines. Drawn at ~120 m long so it
+   * reads as an aircraft next to a 2 m soldier.
+   */
+  private drawFighter(ctx: CanvasRenderingContext2D, x: number, y: number, ang: number,
+    alt: number, scale: number, boost: number, friendly: boolean, parked: boolean) {
+    ctx.save();
+    ctx.translate(x, y - alt * 0.22);
+    ctx.rotate(ang);
+    ctx.scale(scale, scale);
+    const body = friendly ? '#7d8870' : parked ? '#63705a' : '#6d7860';
+    const dark = friendly ? '#4e5747' : '#414b3c';
+    // wings: diamond planform, leaning back from the intakes to the tail
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.moveTo(14, 9);
+    ctx.lineTo(-6, 62);
+    ctx.lineTo(-26, 60);
+    ctx.lineTo(-18, 10);
+    ctx.lineTo(-18, -10);
+    ctx.lineTo(-26, -60);
+    ctx.lineTo(-6, -62);
+    ctx.lineTo(14, -9);
+    ctx.closePath();
+    ctx.fill();
+    // trailing-edge flaps / tailplanes
+    ctx.fillStyle = dark;
+    ctx.beginPath();
+    ctx.moveTo(-30, 16); ctx.lineTo(-44, 40); ctx.lineTo(-54, 38); ctx.lineTo(-50, 14);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-30, -16); ctx.lineTo(-44, -40); ctx.lineTo(-54, -38); ctx.lineTo(-50, -14);
+    ctx.closePath(); ctx.fill();
+    // fuselage: chined forebody tapering to a point
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.moveTo(58, 0);
+    ctx.lineTo(30, -8);
+    ctx.lineTo(6, -13);
+    ctx.lineTo(-46, -11);
+    ctx.lineTo(-56, -7);
+    ctx.lineTo(-56, 7);
+    ctx.lineTo(-46, 11);
+    ctx.lineTo(6, 13);
+    ctx.lineTo(30, 8);
+    ctx.closePath(); ctx.fill();
+    // intakes
+    ctx.fillStyle = '#2b3329';
+    ctx.fillRect(8, -14, 18, 6);
+    ctx.fillRect(8, 8, 18, 6);
+    // canopy
+    ctx.fillStyle = 'rgba(196,236,246,0.78)';
+    ctx.beginPath();
+    ctx.ellipse(26, 0, 15, 6, 0, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillRect(16, -2, 16, 2);
+    // canted twin tails
+    ctx.fillStyle = dark;
+    ctx.save(); ctx.rotate(0.26); ctx.fillRect(-48, -20, 12, 20); ctx.restore();
+    ctx.save(); ctx.rotate(-0.26); ctx.fillRect(-48, 0, 12, 20); ctx.restore();
+    // engine nozzles
+    ctx.fillStyle = '#20261f';
+    ctx.fillRect(-60, -9, 6, 6);
+    ctx.fillRect(-60, 3, 6, 6);
+    if (!parked || boost > 0.05) {
+      const flame = 6 + boost * 34 + Math.sin(this.simulationTime * 34) * 3;
+      for (const sy of [-6, 6]) {
+        const g = ctx.createLinearGradient(-58, sy, -58 - flame, sy);
+        g.addColorStop(0, boost > 0.4 ? 'rgba(200,245,255,0.95)' : 'rgba(160,215,255,0.7)');
+        g.addColorStop(1, 'rgba(120,180,255,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(-58, sy - 5);
+        ctx.lineTo(-58 - flame, sy);
+        ctx.lineTo(-58, sy + 5);
+        ctx.closePath(); ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
   /** Emplacements, jets, the base banner: everything that belongs to the army. */
   private drawArmyWorks(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     if (!this.army) return;
@@ -9016,46 +9448,43 @@ export class Game {
       }
     }
 
-    // jets: swept wings, twin tails, afterburner while it is flying
+    // Interceptors: modelled on a real fifth-generation fighter — long nose, diamond
+    // wing, canted twin tails, twin engines — and big enough to read from the ground.
     for (const j of this.armyJets) {
-      if (!on(j.x, j.y)) continue;
-      const flying = j.state !== 'parked';
-      ctx.save();
-      ctx.translate(j.x, j.y - j.alt * (flying ? 0.22 : 0));
-      ctx.rotate(j.ang);
-      if (flying) {
-        ctx.fillStyle = 'rgba(0,0,0,0.25)';
-        ctx.beginPath(); ctx.ellipse(0, j.alt * 0.22, 40, 14, 0, 0, TAU); ctx.fill();
+      if (!on(j.x, j.y, 300)) continue;
+      const flying = j.state !== 'parked' && !j.manned;
+      const scale = 2.1;
+      if (this.playerJet === j || flying) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.28)';
+        ctx.beginPath();
+        ctx.ellipse(j.x, j.y + (j.alt * 0.22) + 6, 96, 34, j.ang, 0, TAU);
+        ctx.fill();
+        ctx.restore();
       }
-      // wings
-      ctx.fillStyle = '#5c6650';
-      ctx.beginPath();
-      ctx.moveTo(6, 0); ctx.lineTo(-16, -56); ctx.lineTo(-30, -52); ctx.lineTo(-14, 0);
-      ctx.lineTo(-30, 52); ctx.lineTo(-16, 56); ctx.closePath(); ctx.fill();
-      // fuselage
-      ctx.fillStyle = '#6d7860';
-      ctx.beginPath();
-      ctx.moveTo(46, 0); ctx.lineTo(6, -12); ctx.lineTo(-44, -10);
-      ctx.lineTo(-44, 10); ctx.lineTo(6, 12); ctx.closePath(); ctx.fill();
-      // canopy
-      ctx.fillStyle = 'rgba(190,230,240,0.7)';
-      ctx.beginPath(); ctx.ellipse(18, 0, 12, 6, 0, 0, TAU); ctx.fill();
-      // tails
-      ctx.fillStyle = '#4d5642';
-      ctx.fillRect(-40, -22, 12, 8);
-      ctx.fillRect(-40, 14, 12, 8);
-      if (flying) {
-        const flame = 12 + Math.sin(this.simulationTime * 30) * 6;
-        ctx.fillStyle = 'rgba(160,220,255,0.8)';
-        ctx.beginPath(); ctx.moveTo(-44, -5); ctx.lineTo(-44 - flame, 0); ctx.lineTo(-44, 5); ctx.fill();
-      }
-      ctx.restore();
-      if (flying) {
+      this.drawFighter(ctx, j.x, j.y, j.ang, this.playerJet === j ? j.alt : flying ? j.alt : 0,
+        scale, this.playerJet === j ? (j.boost || 0) : flying ? 0.35 : 0, this.playerJet === j,
+        !this.playerJet && !flying);
+      if (this.playerJet === j || flying) {
         const frac = Math.max(0, j.hp / j.maxHp);
         ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fillRect(j.x - 26, j.y - 70, 52, 5);
+        ctx.fillRect(j.x - 40, j.y - 96, 80, 6);
         ctx.fillStyle = frac > 0.4 ? '#ffd8a0' : '#ff7a6a';
-        ctx.fillRect(j.x - 26, j.y - 70, 52 * frac, 5);
+        ctx.fillRect(j.x - 40, j.y - 96, 80 * frac, 6);
+      }
+      if (this.playerJet === j) {
+        ctx.fillStyle = 'rgba(170,240,255,0.85)';
+        ctx.font = 'bold 12px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText((j.boost || 0) > 0.5 ? `AFTERBURNER · ${Math.round(j.speed)}` : `INTERCEPTOR · ${Math.round(j.speed)}`,
+          j.x, j.y - 108);
+        ctx.textAlign = 'left';
+      } else if (!flying && this.nearArmyJet() === j) {
+        ctx.fillStyle = 'rgba(200,240,255,0.9)';
+        ctx.font = 'bold 12px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('F · SEIZE', j.x, j.y - 96);
+        ctx.textAlign = 'left';
       }
     }
 
@@ -9082,6 +9511,272 @@ export class Game {
     }
   }
 
+  /**
+   * Army strongpoint props. These are not Hydra boxes with a coat of paint: a parked hull
+   * reads as a hull, a silo as a silo, a howitzer points somewhere. Returns false for
+   * anything it does not know, so the generic extruder still handles the rest.
+   */
+  private drawArmyProp(ctx: CanvasRenderingContext2D, o: Rect): boolean {
+    const H = o.h3d;
+    const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+    switch (o.kind) {
+      case 'tank': {
+        const k = Math.min(o.w, o.h) / 2;
+        ctx.save();
+        ctx.translate(cx, cy);
+        if (o.w > o.h) ctx.rotate(0); else ctx.rotate(Math.PI / 2);
+        const L = Math.max(o.w, o.h) / 2, Wd = Math.min(o.w, o.h) / 2;
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(-L + H * 0.3, -Wd + H * 0.5, L * 2, Wd * 2);
+        // tracks
+        ctx.fillStyle = '#20241e';
+        ctx.fillRect(-L, -Wd, L * 2, Wd * 0.34);
+        ctx.fillRect(-L, Wd - Wd * 0.34, L * 2, Wd * 0.34);
+        // hull
+        ctx.fillStyle = o.tint || '#4e5a44';
+        ctx.beginPath();
+        ctx.moveTo(L, 0); ctx.lineTo(L * 0.55, -Wd * 0.86); ctx.lineTo(-L * 0.92, -Wd * 0.86);
+        ctx.lineTo(-L, 0); ctx.lineTo(-L * 0.92, Wd * 0.86); ctx.lineTo(L * 0.55, Wd * 0.86);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = 'rgba(0,0,0,0.22)';
+        ctx.fillRect(-L * 0.9, -Wd * 0.2, L * 1.7, Wd * 0.4);
+        // turret + gun
+        ctx.fillStyle = '#59654b';
+        ctx.beginPath(); ctx.arc(L * 0.1, 0, Wd * 0.7, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#3b4335';
+        ctx.fillRect(L * 0.2, -Wd * 0.11, L * 0.95, Wd * 0.22);
+        ctx.fillStyle = 'rgba(214,224,170,0.55)';
+        ctx.fillRect(L * 0.95, -Wd * 0.09, L * 0.2, Wd * 0.18);
+        // stowage
+        ctx.fillStyle = 'rgba(20,24,18,0.5)';
+        ctx.fillRect(-L * 0.7, -Wd * 0.5, L * 0.32, Wd * 0.24);
+        void k;
+        ctx.restore();
+        return true;
+      }
+      case 'silo': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(o.x + 8, o.y + 12, o.w, o.h);
+        ctx.fillStyle = '#4a4f47';
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        ctx.strokeStyle = 'rgba(214,224,170,0.4)';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(o.x + 4, o.y + 4, o.w - 8, o.h - 8);
+        const r = Math.min(o.w, o.h) * 0.34;
+        ctx.fillStyle = '#2c312b';
+        ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,190,120,0.55)'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,190,120,0.18)';
+        ctx.beginPath(); ctx.arc(cx, cy, r * 0.7, 0, TAU); ctx.fill();
+        // hazard chevrons around the hatch
+        ctx.strokeStyle = 'rgba(255,205,120,0.5)'; ctx.lineWidth = 5;
+        for (let i = 0; i < 4; i++) {
+          const a = i * Math.PI / 2 + Math.PI / 4;
+          ctx.beginPath();
+          ctx.arc(cx, cy, r + 16, a - 0.35, a + 0.35);
+          ctx.stroke();
+        }
+        ctx.restore();
+        return true;
+      }
+      case 'launcher': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(o.x + 10, o.y + 16, o.w, o.h);
+        ctx.fillStyle = '#3a4238';
+        ctx.fillRect(o.x, o.y + o.h * 0.45, o.w, o.h * 0.55);
+        ctx.save();
+        ctx.translate(cx, o.y + o.h * 0.5);
+        ctx.rotate(-0.5);
+        ctx.fillStyle = o.tint || '#4a5246';
+        ctx.fillRect(-o.w * 0.34, -o.h * 0.26, o.w * 0.8, o.h * 0.52);
+        for (let i = 0; i < 3; i++) {
+          ctx.fillStyle = '#20241e';
+          ctx.fillRect(-o.w * 0.3, -o.h * 0.2 + i * o.h * 0.15, o.w * 0.62, o.h * 0.09);
+          ctx.fillStyle = 'rgba(255,170,120,0.75)';
+          ctx.fillRect(o.w * 0.28, -o.h * 0.2 + i * o.h * 0.15, 6, o.h * 0.09);
+        }
+        ctx.restore();
+        ctx.fillStyle = '#59654b';
+        ctx.beginPath(); ctx.arc(cx - o.w * 0.22, o.y + o.h * 0.62, o.h * 0.2, 0, TAU); ctx.fill();
+        ctx.restore();
+        return true;
+      }
+      case 'howitzer': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(o.x + 8, o.y + 12, o.w, o.h);
+        ctx.fillStyle = '#4a4f3f';
+        ctx.fillRect(o.x + o.w * 0.2, o.y + o.h * 0.45, o.w * 0.6, o.h * 0.45);
+        ctx.strokeStyle = '#20241e'; ctx.lineWidth = Math.max(3, o.h * 0.09);
+        ctx.beginPath();
+        ctx.moveTo(cx, o.y + o.h * 0.6); ctx.lineTo(o.x + o.w * 0.9, o.y + o.h * 0.12);
+        ctx.stroke();
+        ctx.fillStyle = '#59654b';
+        ctx.beginPath(); ctx.arc(cx, o.y + o.h * 0.55, o.h * 0.22, 0, TAU); ctx.fill();
+        ctx.fillStyle = 'rgba(255,205,120,0.6)';
+        ctx.beginPath(); ctx.arc(o.x + o.w * 0.9, o.y + o.h * 0.12, o.h * 0.07, 0, TAU); ctx.fill();
+        ctx.restore();
+        return true;
+      }
+      case 'crane': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.42)';
+        ctx.fillRect(o.x + 14, o.y + 18, o.w, o.h);
+        ctx.fillStyle = '#3d4438';
+        ctx.fillRect(o.x + o.w * 0.4, o.y + o.h * 0.4, o.w * 0.2, o.h * 0.6);
+        ctx.strokeStyle = '#8b937e'; ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(cx, o.y + o.h * 0.45); ctx.lineTo(o.x + o.w * 0.95, o.y + o.h * 0.05);
+        ctx.stroke();
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(o.x + o.w * 0.95, o.y + o.h * 0.05); ctx.lineTo(o.x + o.w * 0.95, o.y + o.h * 0.6);
+        ctx.stroke();
+        ctx.fillStyle = '#c9a24a';
+        ctx.fillRect(o.x + o.w * 0.95 - 7, o.y + o.h * 0.6, 14, 10);
+        ctx.fillStyle = '#a6b09a';
+        ctx.fillRect(cx - 8, o.y + o.h * 0.3, 16, o.h * 0.3);
+        ctx.restore();
+        return true;
+      }
+      case 'gantry': {
+        ctx.save();
+        ctx.strokeStyle = '#7d8a74'; ctx.lineWidth = 5;
+        for (const gx of [o.x + 10, o.x + o.w - 10]) {
+          ctx.beginPath(); ctx.moveTo(gx, o.y + o.h); ctx.lineTo(gx, o.y + 6); ctx.stroke();
+        }
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(o.x + 10, o.y + 8); ctx.lineTo(o.x + o.w - 10, o.y + 8);
+        ctx.moveTo(o.x + 10, o.y + o.h * 0.7); ctx.lineTo(o.x + o.w - 10, o.y + o.h * 0.25);
+        ctx.stroke();
+        for (let i = 1; i < 8; i++) {
+          const gx = o.x + 10 + (o.w - 20) * i / 8;
+          ctx.beginPath(); ctx.moveTo(gx, o.y + 8); ctx.lineTo(gx, o.y + 8 + o.h * 0.2); ctx.stroke();
+        }
+        ctx.fillStyle = 'rgba(214,224,170,0.35)';
+        ctx.fillRect(o.x + o.w * 0.3, o.y + o.h * 0.75, o.w * 0.4, 12);
+        ctx.restore();
+        return true;
+      }
+      case 'railcar': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.fillRect(o.x + 6, o.y + 12, o.w, o.h);
+        ctx.fillStyle = o.tint || '#4e5348';
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 2;
+        for (let i = 1; i < 5; i++) {
+          const gx = o.x + (o.w * i) / 5;
+          ctx.beginPath(); ctx.moveTo(gx, o.y + 4); ctx.lineTo(gx, o.y + o.h - 4); ctx.stroke();
+        }
+        ctx.fillStyle = '#22261f';
+        for (let i = 0; i < 4; i++) {
+          ctx.beginPath();
+          ctx.arc(o.x + o.w * (0.2 + i * 0.2), o.y + o.h + 4, 6, 0, TAU);
+          ctx.fill();
+        }
+        ctx.fillStyle = 'rgba(214,224,170,0.35)';
+        ctx.fillRect(o.x + 6, o.y + 6, o.w - 12, 5);
+        ctx.restore();
+        return true;
+      }
+      case 'tent': {
+        ctx.save();
+        const ridge = o.h * 0.55;
+        ctx.fillStyle = 'rgba(0,0,0,0.38)';
+        ctx.fillRect(o.x + 8, o.y + 12, o.w, o.h);
+        ctx.fillStyle = o.tint || '#7d8474';
+        ctx.beginPath();
+        ctx.moveTo(o.x, o.y + o.h);
+        ctx.lineTo(cx, o.y + o.h - ridge);
+        ctx.lineTo(o.x + o.w, o.y + o.h);
+        ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = 'rgba(30,36,28,0.5)'; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(o.x + o.w * 0.3, o.y + o.h); ctx.lineTo(cx, o.y + o.h - ridge);
+        ctx.moveTo(o.x + o.w * 0.7, o.y + o.h); ctx.lineTo(cx, o.y + o.h - ridge);
+        ctx.stroke();
+        ctx.restore();
+        return true;
+      }
+      case 'bladder': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.beginPath(); ctx.ellipse(cx + 6, cy + 10, o.w / 2, o.h / 2, 0, 0, TAU); ctx.fill();
+        ctx.fillStyle = o.tint || '#5c5c44';
+        ctx.beginPath(); ctx.ellipse(cx, cy, o.w / 2, o.h / 2, 0, 0, TAU); ctx.fill();
+        ctx.strokeStyle = 'rgba(20,24,18,0.5)'; ctx.lineWidth = 2;
+        for (const t of [-0.45, 0, 0.45]) {
+          ctx.beginPath();
+          ctx.ellipse(cx + t * o.w * 0.5, cy, o.w * 0.06, o.h / 2, 0, 0, TAU);
+          ctx.stroke();
+        }
+        ctx.restore();
+        return true;
+      }
+      case 'target': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.fillRect(o.x + 5, o.y + 8, o.w, o.h);
+        ctx.fillStyle = '#3a362c';
+        ctx.fillRect(cx - 4, o.y + o.h * 0.4, 8, o.h * 0.6);
+        ctx.fillStyle = o.tint || '#7d7460';
+        ctx.fillRect(o.x, o.y, o.w, o.h * 0.6);
+        // a painted silhouette and a hit ring
+        ctx.fillStyle = 'rgba(30,26,20,0.75)';
+        ctx.beginPath(); ctx.arc(cx, o.y + o.h * 0.22, o.h * 0.12, 0, TAU); ctx.fill();
+        ctx.fillRect(cx - o.w * 0.12, o.y + o.h * 0.32, o.w * 0.24, o.h * 0.26);
+        ctx.strokeStyle = 'rgba(255,120,100,0.8)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(cx, o.y + o.h * 0.3, o.h * 0.18, 0, TAU); ctx.stroke();
+        ctx.restore();
+        return true;
+      }
+      case 'dronebay': {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(o.x + 12, o.y + 18, o.w, o.h);
+        ctx.fillStyle = o.tint || '#44504a';
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        ctx.fillStyle = '#2b3530';
+        ctx.fillRect(o.x + o.w * 0.12, o.y + o.h * 0.55, o.w * 0.76, o.h * 0.4);
+        ctx.strokeStyle = 'rgba(150,235,205,0.45)'; ctx.lineWidth = 3;
+        for (let i = 0; i < 6; i++) {
+          const gx = o.x + o.w * 0.14 + (o.w * 0.72 * i) / 5;
+          ctx.beginPath(); ctx.moveTo(gx, o.y + o.h * 0.58); ctx.lineTo(gx, o.y + o.h * 0.93); ctx.stroke();
+        }
+        ctx.fillStyle = 'rgba(150,235,205,0.5)';
+        ctx.fillRect(o.x + o.w * 0.12, o.y + o.h * 0.45, o.w * 0.76, 6);
+        ctx.restore();
+        return true;
+      }
+      case 'rampart': {
+        // a low, thick concrete wall with a firing step cut into the top
+        const hh = Math.min(H, 40);
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(o.x + 6, o.y + 8, o.w, o.h);
+        ctx.fillStyle = o.tint || '#5b6053';
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        ctx.fillStyle = 'rgba(0,0,0,0.22)';
+        const horiz = o.w >= o.h;
+        if (horiz) {
+          for (let gx = o.x + 40; gx < o.x + o.w - 20; gx += 120) ctx.fillRect(gx, o.y, 8, o.h);
+        } else {
+          for (let gy = o.y + 40; gy < o.y + o.h - 20; gy += 120) ctx.fillRect(o.x, gy, o.w, 8);
+        }
+        ctx.fillStyle = 'rgba(214,224,170,0.18)';
+        ctx.fillRect(o.x, o.y, horiz ? o.w : hh * 0.4, horiz ? 6 : o.h);
+        ctx.restore();
+        return true;
+      }
+      default: return false;
+    }
+  }
+
   private drawStructures(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     this.grid.query(camX - 120, camY - 160, this.w + 240, this.h + 320, this.qset);
     const idxs = Array.from(this.qset);
@@ -9100,6 +9795,7 @@ export class Game {
       if (o.kind === 'cellblock') { this.drawCellBlock(ctx, o, o.h3d); continue; }
       if (o.kind === 'lighthouse') { this.drawLighthouse(ctx, o); continue; }
       if (o.kind === 'barrier') { this.drawBarrier(ctx, o); continue; }
+      if (this.drawArmyProp(ctx, o)) continue;
       const H = o.h3d;
       let top: string, side: string, edge: string;
       switch (o.kind) {
@@ -9126,6 +9822,17 @@ export class Game {
         case 'library': top = '#736958'; side = '#322b28'; edge = 'rgba(214,186,133,0.48)'; break;
         // ARMY DISTRICT: olive steel, tarmac, painted numbers
         case 'tank':    top = '#4e5a44'; side = '#2a3226'; edge = 'rgba(206,220,160,0.45)'; break;
+        case 'rampart': top = '#5b6053'; side = '#2c302a'; edge = 'rgba(214,224,170,0.40)'; break;
+        case 'silo':    top = '#565b52'; side = '#2a2e28'; edge = 'rgba(214,224,170,0.42)'; break;
+        case 'dronebay': top = '#44504a'; side = '#1e2624'; edge = 'rgba(150,235,205,0.40)'; break;
+        case 'railcar': top = '#4e5348'; side = '#262b24'; edge = 'rgba(214,224,170,0.30)'; break;
+        case 'crane':   top = '#5a5f50'; side = '#2a2e26'; edge = 'rgba(230,200,120,0.45)'; break;
+        case 'gantry':  top = '#57604f'; side = '#282f26'; edge = 'rgba(230,200,120,0.40)'; break;
+        case 'launcher': top = '#4a5246'; side = '#232a22'; edge = 'rgba(255,170,120,0.45)'; break;
+        case 'howitzer': top = '#4f5443'; side = '#262a20'; edge = 'rgba(255,190,120,0.45)'; break;
+        case 'tent':    top = '#7d8474'; side = '#3c423a'; edge = 'rgba(230,230,200,0.30)'; break;
+        case 'bladder': top = '#5c5c44'; side = '#2d2d20'; edge = 'rgba(230,200,120,0.35)'; break;
+        case 'target':  top = '#7d7460'; side = '#3a362c'; edge = 'rgba(255,140,110,0.55)'; break;
         case 'barrel':  top = '#6a5a2c'; side = '#332c14'; edge = 'rgba(230,200,120,0.4)'; break;
         case 'console': top = '#4a5952'; side = '#243029'; edge = 'rgba(160,235,205,0.45)'; break;
         default:        top = '#26362f'; side = '#131b17'; edge = 'rgba(140,220,190,0.20)'; break;

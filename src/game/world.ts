@@ -6,6 +6,7 @@
 import { PRISON_EAST } from './prisonIsland';
 import { ARMY_SOUTH, buildArmyDistrict, type ArmyPlan } from './army';
 import { dressSector, type SectorDressing } from './sectorKits';
+import { buildSectorAnnex } from './annex';
 import { populateFacilities, type Facility, type FacilityGuard } from './facilities';
 import {
   addCampaignSites, GOLIATH, MNEMOSYNE, HQ_YARD, KRAKEN_YARD, type CampaignSites, type PatrolRoute,
@@ -55,7 +56,10 @@ export type StructKind =
   // with the labels and textures of a legacy Hydra base.
   | 'pine' | 'rock' | 'boat' | 'bastion' | 'cellblock' | 'lighthouse' | 'barrier'
   // ARMY DISTRICT: its own vocabulary, so the base never reads like a Hydra outpost.
-  | 'tank' | 'barrel' | 'console';
+  | 'tank' | 'barrel' | 'console'
+  // ARMY STRONGPOINTS: a national army group builds very differently from Hydra.
+  | 'rampart' | 'silo' | 'dronebay' | 'railcar' | 'crane' | 'gantry'
+  | 'launcher' | 'howitzer' | 'tent' | 'bladder' | 'target';
 
 export interface Rect {
   x: number; y: number; w: number; h: number;
@@ -197,6 +201,8 @@ export interface WorldData {
   army: ArmyPlan | null;
   /** Massed ranks (the army parade): position plus unit type. */
   ranks: { x: number; y: number; type: string }[];
+  /** Soldiers holding named strongpoints, seeded as garrison enemies. */
+  armyGuards: { x: number; y: number; type: string }[];
   /** Every defended generator/server yard on the map, biggest first. */
   powerSites: PowerSite[];
   powerCells: PowerCell[];
@@ -233,6 +239,20 @@ export function generateWorld(sector = 1): WorldData {
     const r: Rect = { x, y, w, h, kind, h3d, tint };
     if (w > 0 && h > 0) rects.push(r);
     return r;
+  };
+  /** A soldier may not stand inside a wall. Nudge the post to the nearest clear spot. */
+  const freeGuardPost = (g: { x: number; y: number; type: string }) => {
+    const clear = (x: number, y: number) => !rects.some((r) =>
+      x > r.x - 18 && x < r.x + r.w + 18 && y > r.y - 18 && y < r.y + r.h + 18);
+    if (clear(g.x, g.y)) return g;
+    for (const r of [60, 110, 170, 240, 320]) {
+      for (let k = 0; k < 8; k++) {
+        const a = (k / 8) * Math.PI * 2;
+        const x = g.x + Math.cos(a) * r, y = g.y + Math.sin(a) * r;
+        if (clear(x, y)) return { x, y, type: g.type };
+      }
+    }
+    return null;
   };
   /* Map border ramparts are added after the westward expansion (see the tail of this
    * function): they have to enclose the widened arena, not the legacy frame. */
@@ -958,13 +978,10 @@ export function generateWorld(sector = 1): WorldData {
    * ================================================================== */
   const B2 = 60;
   add(0, 0, GEN_W, B2, 'curtain', 26);                     // north, legacy
-  if (sector >= 6) {
-    // The army causeway: the legacy south rampart is cut open either side of the road.
-    add(0, GEN_H - B2, 6000 - 220, B2, 'curtain', 26);
-    add(6000 + 220, GEN_H - B2, GEN_W - 6000 - 220, B2, 'curtain', 26);
-  } else {
-    add(0, GEN_H - B2, GEN_W, B2, 'curtain', 26);          // south, legacy
-  }
+  // The southern strip is reached by one road cut through the legacy south rampart, in
+  // every sector: the army uses it for its district, the other five for their annexes.
+  add(0, GEN_H - B2, 6000 - 220, B2, 'curtain', 26);       // south, legacy (west of the cut)
+  add(6000 + 220, GEN_H - B2, GEN_W - 6000 - 220, B2, 'curtain', 26);   // south, east of it
   add(0, 0, B2, GEN_H, 'curtain', 26);                     // west
   add(GEN_W, 0, PRISON_EAST, B2, 'curtain', 26);           // north, new ground
   add(GEN_W, GEN_H - B2, PRISON_EAST, B2, 'curtain', 26);   // south, new ground
@@ -993,6 +1010,29 @@ export function generateWorld(sector = 1): WorldData {
    * ================================================================== */
   let army: ArmyPlan | null = null;
   const ranks: { x: number; y: number; type: string }[] = [];
+  const armyGuards: { x: number; y: number; type: string }[] = [];
+
+  /* ---------------- SOUTHERN ANNEX (sectors 1–5) ----------------
+   * The new strip used to be empty concrete everywhere but the army district. Each
+   * sector now owns a district of its own down here, built differently from every other.
+   * Sectors 1-5 keep the outer border of the strip; sector 6 builds its own below.
+   */
+  if (sector < 6) {
+    add(0, GEN_H, B2, ARMY_SOUTH, 'curtain', 30);
+    add(ARENA_W - B2, GEN_H, B2, ARMY_SOUTH, 'curtain', 30);
+    add(0, ARENA_H - B2, ARENA_W, B2, 'curtain', 30);
+    const annex = buildSectorAnnex({ sector, y0: GEN_H, add, zone, rnd });
+    for (const g of annex.guards) {
+      const free = freeGuardPost(g);
+      if (free) armyGuards.push(free);
+    }
+    for (const sp of annex.strongpoints) {
+      pois.push({
+        id: `annex-${sp.id}`, kind: 'depot', x: sp.x + sp.w / 2, y: sp.y + sp.h / 2, r: 380,
+        name: sp.name, sub: annex.sub, secret: true, gates: [],
+      });
+    }
+  }
   if (sector >= 6) {
     army = buildArmyDistrict({ y0: GEN_H, add, zone, rnd });
     dressing.start = { x: army.spawn.x, y: army.spawn.y - 340 };
@@ -1007,6 +1047,14 @@ export function generateWorld(sector = 1): WorldData {
       'armyguard', 'armytrooper', 'armyengineer', 'armytrooper', 'armymedic'];
     for (let i = 0; i < army.parade.length; i++) {
       ranks.push({ ...army.parade[i], type: roster[i % roster.length] });
+    }
+    // The strongpoints are held by their own people — a few hundred men who never sleep,
+    // because they are not on parade: they are on duty. Anyone whose post would end up
+    // inside a wall, a silo or a parked hull is dropped: a garrison stuck in scenery is
+    // worse than no garrison at all.
+    for (const g of army.guards) {
+      const free = freeGuardPost(g);
+      if (free) armyGuards.push(free);
     }
 
     // Army gates are physical shutters; keep them in the world so collision and the
@@ -1060,6 +1108,6 @@ export function generateWorld(sector = 1): WorldData {
     hangars, vanSpots, paradeSpots, parkedHelis, laserSpots, pois, vaultSpot, planeSpot,
     facilities, facilityGuards, campaignSites,
     powerSites: campaignSites.powerSites, powerCells: campaignSites.powerCells,
-    dressing, army, ranks,
+    dressing, army, ranks, armyGuards,
   };
 }

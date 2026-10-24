@@ -25,7 +25,7 @@ const emptyHud: Hud = {
   heliStation: 0, heliAmmo: [-1, 8, 6] as [number, number, number], heliLock: false,
   armyAlarm: 0, armyAwake: 0, armyTotal: 0, turretsHeld: 0, turretsTotal: 0, turretPrompt: '',
   sector: 1, basesCleared: 0, sectorName: 'THE FALLEN HUB', destination: '', transitPct: 0,
-  driving: false, tank: false, flyingPlane: false, allies: 0, barricades: 0, siegeActive: false,
+  driving: false, tank: false, flyingPlane: false, jet: false, jetBoost: 0, allies: 0, barricades: 0, siegeActive: false,
   lasersHeld: 0, poisCaptured: 0, poisTotal: 5, vaultFound: false, nearPrompt: '',
   coords: 'X 6000  Y 6800', gatePrompt: '', aegisCharges: 0, aegisTime: 0, mouseSens: 1,
   vehicleHp: 0, vehicleMax: 1, vehicleFuel: 100,
