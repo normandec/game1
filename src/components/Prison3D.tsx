@@ -782,10 +782,14 @@ export default function Prison3D({ mode, onExit }: Props) {
             { t: 'cyl', s: [0.98, 0.08, 0.98], o: [0, 0.9, 0], m: 'stone' },
           ];
         case 'column':
+          // a poured pier: plinth, formwork seams, capital — reads as concrete, not a box
           return [
-            { t: 'box', s: [1, 1, 1], o: [0, 0.5, 0], m: 'concrete' },
-            { t: 'box', s: [1.22, 0.05, 1.22], o: [0, 0.02, 0], m: 'concrete' },            // plinth
-            { t: 'box', s: [1.18, 0.05, 1.18], o: [0, 0.97, 0], m: 'concrete' },            // capital
+            { t: 'box', s: [1.26, 0.03, 1.26], o: [0, 0.015, 0], m: 'concrete' },
+            { t: 'box', s: [1.0, 0.46, 1.0], o: [0, 0.24, 0], m: 'concrete' },
+            { t: 'box', s: [1.09, 0.015, 1.09], o: [0, 0.468, 0], m: 'darkSteel' },
+            { t: 'box', s: [0.96, 0.45, 0.96], o: [0, 0.715, 0], m: 'concrete' },
+            { t: 'box', s: [1.05, 0.015, 1.05], o: [0, 0.945, 0], m: 'darkSteel' },
+            { t: 'box', s: [1.22, 0.04, 1.22], o: [0, 0.96, 0], m: 'concrete' },
           ];
         case 'lamp':
           return [
