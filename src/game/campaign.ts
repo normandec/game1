@@ -22,6 +22,13 @@ export const PHASE_TACTICS: Record<OperationPhase, string[]> = {
   siege: ['turtle', 'phalanx', 'bombers', 'encircle'],
 };
 
+export const IRON_RESERVE: StoryEntry = {
+  id: 'iron-reserve',
+  channel: 'ARMY GROUP SOUTH / LAST TRANSMISSION BEFORE DARK',
+  title: 'The army that was never sent.',
+  text: 'They are not Hydra. No serpent on the colours, no black uniform. A thousand soldiers standing in ranks on new concrete, a motor pool full of hulls, and enough aircraft to close a whole sky. Somebody bought them, or somebody lied to them. It makes no difference now: cross the wire and the whole base answers. Kill the generators, drop the blast gate, and the parade ground is yours to walk across. Choose the moment carefully.',
+};
+
 export const LIBRARY_VOLUMES: StoryEntry[] = [
   { id: 'volume-1', channel: 'MNEMOSYNE / VOLUME I', title: 'The first oath.', text: '1946. Carter wrote that a uniform could be copied, but a promise could not. This volume holds the first half of an obsolete S.H.I.E.L.D. transponder handshake.' },
   { id: 'volume-2', channel: 'MNEMOSYNE / VOLUME II', title: 'The second dawn.', text: 'The last page is not paper. It is a thin encrypted wafer, warmed by the reading lamp. Read the watch, the oath, then the dawn. The sleeping network will open its eyes for you.' },

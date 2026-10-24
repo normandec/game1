@@ -362,6 +362,32 @@ export function HudLayer({
               ✈ S.H.I.E.L.D. BOMBER · G BOMB CARPET
             </div>
           )}
+          {/* IRON RESERVE: the parade, the guns and the alarm */}
+          {hud.armyTotal > 0 && (
+            <div className="mt-2 border-t border-lime-300/25 pt-1.5">
+              <div className="flex justify-between text-[9px] uppercase tracking-[0.25em] text-lime-200/80">
+                <span>Iron Reserve</span>
+                <span className="font-tech">{hud.armyAwake}/{hud.armyTotal} FALLEN IN</span>
+              </div>
+              <div className="mt-1 h-1.5 overflow-hidden rounded-sm bg-black/60">
+                <div
+                  className={`h-full ${hud.armyAlarm > 0.2 ? 'bg-gradient-to-r from-amber-300 to-rose-400' : 'bg-lime-300/70'}`}
+                  style={{ width: `${Math.min(100, (hud.armyAwake / Math.max(1, hud.armyTotal)) * 100)}%` }}
+                />
+              </div>
+              <div className="mt-1 flex justify-between text-[9px] uppercase tracking-[0.2em]">
+                <span className={hud.armyAlarm > 0.2 ? 'text-rose-200' : 'text-lime-200/50'}>
+                  {hud.armyAlarm > 0.2 ? '⚠ GENERAL QUARTERS' : 'PARADE AT REST'}
+                </span>
+                <span className="font-tech text-sky-200/70">TWIN GUNS {hud.turretsHeld}/{hud.turretsTotal}</span>
+              </div>
+            </div>
+          )}
+          {hud.turretPrompt && (
+            <div className="mt-1 rounded-sm border border-cyan-300/50 bg-cyan-400/10 px-2 py-1 text-center text-[10px] font-bold tracking-[0.16em] text-cyan-100">
+              {hud.turretPrompt}
+            </div>
+          )}
           {hud.nearPrompt && (
             <div className="animate-pulse-ring mt-2 rounded-sm border border-teal-300/60 bg-teal-400/15 px-2 py-1 text-center text-[10px] font-bold tracking-[0.18em] text-teal-100">
               {hud.nearPrompt}
