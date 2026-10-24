@@ -59,7 +59,13 @@ export type StructKind =
   | 'tank' | 'barrel' | 'console'
   // ARMY STRONGPOINTS: a national army group builds very differently from Hydra.
   | 'rampart' | 'silo' | 'dronebay' | 'railcar' | 'crane' | 'gantry'
-  | 'launcher' | 'howitzer' | 'tent' | 'bladder' | 'target';
+  | 'launcher' | 'howitzer' | 'tent' | 'bladder' | 'target'
+  // ARMY MEGASTRUCTURES: the base is a national installation, not a camp.
+  | 'megahangar' | 'towerblock' | 'watertower' | 'radome' | 'stockade' | 'kazemat'
+  // ARCTIC: the frozen gate that opens into the hidden ice base.
+  | 'icegate'
+  // Motor pool and the roads: civilian and military vehicles, parked and solid.
+  | 'car' | 'humvee' | 'bus' | 'tanker';
 
 export interface Rect {
   x: number; y: number; w: number; h: number;
@@ -203,6 +209,8 @@ export interface WorldData {
   ranks: { x: number; y: number; type: string }[];
   /** Soldiers holding named strongpoints, seeded as garrison enemies. */
   armyGuards: { x: number; y: number; type: string }[];
+  /** Sector 3: the glacier gate that leads into the hidden ice base, if present. */
+  glacier: { x: number; y: number } | null;
   /** Every defended generator/server yard on the map, biggest first. */
   powerSites: PowerSite[];
   powerCells: PowerCell[];
@@ -1011,6 +1019,7 @@ export function generateWorld(sector = 1): WorldData {
   let army: ArmyPlan | null = null;
   const ranks: { x: number; y: number; type: string }[] = [];
   const armyGuards: { x: number; y: number; type: string }[] = [];
+  let glacier: { x: number; y: number } | null = null;
 
   /* ---------------- SOUTHERN ANNEX (sectors 1–5) ----------------
    * The new strip used to be empty concrete everywhere but the army district. Each
@@ -1026,6 +1035,7 @@ export function generateWorld(sector = 1): WorldData {
       const free = freeGuardPost(g);
       if (free) armyGuards.push(free);
     }
+    glacier = annex.glacier;
     for (const sp of annex.strongpoints) {
       pois.push({
         id: `annex-${sp.id}`, kind: 'depot', x: sp.x + sp.w / 2, y: sp.y + sp.h / 2, r: 380,
@@ -1108,6 +1118,6 @@ export function generateWorld(sector = 1): WorldData {
     hangars, vanSpots, paradeSpots, parkedHelis, laserSpots, pois, vaultSpot, planeSpot,
     facilities, facilityGuards, campaignSites,
     powerSites: campaignSites.powerSites, powerCells: campaignSites.powerCells,
-    dressing, army, ranks, armyGuards,
+    dressing, army, ranks, armyGuards, glacier,
   };
 }

@@ -39,6 +39,8 @@ export interface AnnexPlan {
   entry: { x: number; y: number };
   strongpoints: AnnexStrongpoint[];
   guards: { x: number; y: number; type: string }[];
+  /** Sector 3 only: the glacier gate that opens into the hidden ice base. */
+  glacier: { x: number; y: number } | null;
 }
 
 /**
@@ -71,6 +73,8 @@ export function buildSectorAnnex(ctx: AnnexContext): AnnexPlan {
   zone(CX - 380, y0 + 620, 760, 120, 'concrete');
 
   const entry = { x: CX, y: y0 + 260 };
+  /** The glacier gate, in the middle of the north wall of the arctic annex. */
+  const glacierDoor = { x: 9700 + 3 * 290 + 140, y: y0 + 1620 };
 
   /* ================================================================== *
    * 1 · THE FALLEN HUB — rain, standing water, a district that drowned
@@ -198,11 +202,15 @@ export function buildSectorAnnex(ctx: AnnexContext): AnnexPlan {
     squad(8300, y0 + 1300, 7, T, 110);
 
     post('glacier-face', 'GLACIER WALL', 9600, y0 + 780, 2100, 1500);
-    // the mountain wall: the glacier itself rises here, pale and enormous
+    // The mountain wall: the glacier itself rises here, pale and enormous — and there is
+    // a way into it. The middle column of ice is a gate, not rock.
     for (let i = 0; i < 7; i++) {
+      if (i === 3) continue;
       add(9700 + i * 290, y0 + 850, 260, 520, 'rock', 150 + (i % 3) * 40, '#c9dde4');
       add(9700 + i * 290, y0 + 1420, 260, 400, 'rock', 120 + (i % 2) * 50, '#b6ccd4');
     }
+    // the gate: two frozen leaves and a lit seam between them
+    add(9700 + 3 * 290 + 10, y0 + 1360, 280, 120, 'icegate', 110, '#cfecf6');
     add(9800, y0 + 1900, 1800, 26, 'fence', 44, '#c8d8de');
     man(10500, y0 + 1850, 'shieldman');
     man(11000, y0 + 1880, 'sentinel');
@@ -329,7 +337,10 @@ export function buildSectorAnnex(ctx: AnnexContext): AnnexPlan {
     { name: 'HYDRA NEXUS / SERPENT FORGE', sub: 'REACTOR, OBELISKS, RELIQUARY' },
   ][Math.max(0, Math.min(4, sector - 1))];
 
-  return { name: meta.name, sub: meta.sub, entry, strongpoints, guards };
+  return {
+    name: meta.name, sub: meta.sub, entry, strongpoints, guards,
+    glacier: sector === 3 ? glacierDoor : null,
+  };
 }
 
 /** How many new metres of ground the annexes use south of the legacy border. */

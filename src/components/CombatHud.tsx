@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Hud } from '../game/engine';
 
 interface Props {
@@ -11,6 +11,17 @@ interface Props {
 export default function CombatHud(p: Props) {
   const h = p.hud;
   const [dismissedStory, setDismissedStory] = useState('');
+  const [invOpen, setInvOpen] = useState(false);
+  // I or TAB opens the kit; escape closes it before the pause menu ever sees it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const k = e.key.toLowerCase();
+      if (k === 'i' || k === 'tab') { e.preventDefault(); setInvOpen(v => !v); }
+      else if (k === 'escape' && invOpen) setInvOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [invOpen]);
   const [openedStory, setOpenedStory] = useState('');
   const storyExpanded = dismissedStory !== h.storyTitle && (h.storyTime > 0 || openedStory === h.storyTitle);
   const vehicle = h.flyingPlane || h.piloting || h.driving;
@@ -48,6 +59,41 @@ export default function CombatHud(p: Props) {
       </div>
     </div>
     {h.siegeActive && <div className="combat-warning">HYDRA COUNTER-ASSAULT <span>HOLD THE PERIMETER</span></div>}
+    {/* THE KIT: a real inventory, grouped the way it is packed, not a row of numbers */}
+    <div className={`combat-inventory ${invOpen ? 'open' : ''}`}>
+      <button className="inv-toggle" onClick={() => setInvOpen(v => !v)} title="Kit / I">
+        <kbd>I</kbd><span>KIT</span>
+      </button>
+      {invOpen && (
+        <div className="inv-panel">
+          <header>
+            <b>OPERATIVE LOADOUT</b>
+            <span>SECTOR {h.sector} · {h.sectorName}</span>
+          </header>
+          <div className="inv-groups">
+            {(h.inventory || []).map(group => (
+              <section key={group.group}>
+                <h4>{group.group}</h4>
+                <ul>
+                  {group.items.map((it, i) => (
+                    <li key={`${group.group}-${i}`} className={`tone-${it.tone}`}>
+                      <span>{it.label}</span>
+                      <b>{it.detail}</b>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+          <footer>
+            <span>HEALTH {h.hp}/{h.maxHp}</span>
+            <span>ARMOR {h.shieldHp}</span>
+            <span>FRAGS {h.grenades}</span>
+            <span>{h.frostwing ? 'FROSTWING CLEARANCE' : 'NO SPECIAL CLEARANCE'}</span>
+          </footer>
+        </div>
+      )}
+    </div>
     {h.storyTitle && <aside className={`combat-transmission ${storyExpanded ? 'expanded' : ''}`} aria-label="Mission transmission">
       <button onClick={() => { setDismissedStory(storyExpanded ? h.storyTitle : ''); setOpenedStory(storyExpanded ? '' : h.storyTitle); }}><span>{h.storyChannel}</span><b>{storyExpanded ? '-' : '+'}</b></button>
       {storyExpanded && <><strong>{h.storyTitle}</strong><p>{h.storyText}</p></>}
