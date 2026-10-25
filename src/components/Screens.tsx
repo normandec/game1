@@ -359,7 +359,7 @@ export function HudLayer({
           )}
           {hud.flyingPlane && (
             <div className="mt-2 rounded-sm border border-sky-300/60 bg-sky-400/15 px-2 py-1 text-center text-[10px] font-bold tracking-[0.18em] text-sky-100">
-              ✈ S.H.I.E.L.D. BOMBER · G BOMB CARPET
+              ✈ S.H.I.E.L.D. BOMBER · MOUSE FLIES IT · S TO LAND · G BOMB CARPET
             </div>
           )}
           {hud.jet && (

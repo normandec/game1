@@ -1208,7 +1208,7 @@ export class Game {
     // powerplant and a seeker that reaches further. The line ships keep their old numbers.
     this.armyJets = (world.army?.jets || []).map((j) => {
       const tier: JetTier = j.tier ?? 'standard';
-      const hp = tier === 'prototype' ? 1100 : 420;
+      const hp = tier === 'prototype' ? 1100 : tier === 'frostwing' ? 900 : 420;
       return {
         x: j.x, y: j.y, ang: j.ang, hp, maxHp: hp, tier,
         state: 'parked' as const, alt: 0, speed: 0, cool: 0, t: 0,
@@ -2048,7 +2048,8 @@ export class Game {
   private nearPrompt(): string {
     if (this.playerJet) return 'F · EJECT FROM INTERCEPTOR';
     const jetNear = this.nearArmyJet();
-    if (jetNear) return jetNear.tier === 'prototype' ? 'F · SEIZE PROTOTYPE INTERCEPTOR' : 'F · SEIZE THE INTERCEPTOR';
+    if (jetNear) return jetNear.tier === 'prototype' ? 'F · SEIZE PROTOTYPE INTERCEPTOR'
+      : jetNear.tier === 'frostwing' ? 'F · TAKE THE FROSTWING' : 'F · SEIZE THE INTERCEPTOR';
     if (this.flyingPlane) return 'F · LAND BOMBER';
     if (this.playerTank) return 'F · EXIT TANK';
     if (this.drivingBoat) return 'F · EXIT BOAT';
@@ -2069,7 +2070,7 @@ export class Game {
         Math.hypot(this.planeSpot.x - this.px, this.planeSpot.y - this.py) < 260) return 'F · CLAIM AIR WING';
     if (this.plane && Math.hypot(this.plane.x - this.px, this.plane.y - this.py) < 170) return 'F · BOARD BOMBER';
     if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 230) return 'F · ENTER THE CAGE';
-    if (this.glacierSpot && Math.hypot(this.glacierSpot.x - this.px, this.glacierSpot.y - this.py) < 200)
+    if (this.glacierSpot && Math.hypot(this.glacierSpot.x - this.px, this.glacierSpot.y - this.py) < 280)
       return this.glacierVisits ? 'F · RETURN TO THE GLACIER VAULT' : 'F · OPEN THE GLACIER GATE';
     if (this.stockadeSpot && !this.stockadeOpen) {
       const st = this.stockadeSpot;
@@ -3010,6 +3011,7 @@ export class Game {
     j.alt = 0; j.speed = 120; j.boost = 0;
     j.mode = 'cannon'; j.flares = 6; j.autopilot = false; j.lock = null;
     const ace = j.tier === 'prototype';
+    const frost = j.tier === 'frostwing';
     // Frostwing clearance: the airframe comes back ice-plated and with more countermeasures.
     // Applied once per airframe — re-boarding the same jet must never stack the bonus.
     if (this.frostwing && !j.tuned) {
@@ -3021,13 +3023,23 @@ export class Game {
       j.hp = Math.max(j.hp, j.maxHp * 0.8);
       if (ace) j.flares = Math.max(j.flares, 12);
     }
+    if (frost) j.flares = Math.max(j.flares, 20);
     this.px = j.x; this.py = j.y; this.pvx = 0; this.pvy = 0;
     for (const o of this.armyJets) {
       if (o === j) continue;
       o.state = 'parked'; o.alt = 0; o.speed = 0;
     }
     for (const h of this.helis) h.state = 'egress';
-    if (ace) {
+    if (frost) {
+      // The one airframe in the game with no squadron number: 900 hull, 2.2 km/s on the
+      // burner, twenty flares and an ice seeker that reaches further than anything else.
+      this.score += 4000;
+      this.setBanner('FROSTWING AIRBORNE',
+        'ICE INTERCEPTOR · 2.2 KM/S · 20 FLARES · ICE SEEKER 3200 M · TWIN CANNON');
+      this.addText(j.x, j.y - 90, 'THE GLACIER KEPT ONE AIRFRAME. IT IS YOURS.', '#c9f4ff', 18);
+      this.addText(j.x, j.y - 68, 'FROSTWING ON S.H.I.E.L.D. STRENGTH · +4000', '#a9ecff', 13);
+      this.flash = 0.45; this.flashColor = '190,245,255';
+    } else if (ace) {
       // The proving flight only ever built two of these, and neither was meant to leave
       // the apron. Taking one is the single biggest prize in the district.
       this.score += 6500;
@@ -3070,7 +3082,8 @@ export class Game {
     const consider = (x: number, y: number, label: string, air: boolean) => {
       const dx = x - j.x, dy = y - j.y;
       const d = Math.hypot(dx, dy);
-      if (d < 60 || d > (j.tier === 'prototype' ? 3400 : 2600)) return;
+      const reach = j.tier === 'prototype' ? 3400 : j.tier === 'frostwing' ? 3200 : 2600;
+      if (d < 60 || d > reach) return;
       const dot = (dx * nose.x + dy * nose.y) / d;
       if (dot < 0.55) return;                     // roughly 57 degrees off the nose
       const score = dot * 2 - d / 2600;
@@ -3181,14 +3194,16 @@ export class Game {
     }
 
     const ace = j.tier === 'prototype';
-    const agility = (2.5 - Math.min(1, j.speed / (ace ? 2400 : 1800)) * 0.9) * (brake ? 1.8 : 1) * (ace ? 1.12 : 1);
+    const frost = j.tier === 'frostwing';
+    const agility = (2.5 - Math.min(1, j.speed / (ace ? 2400 : 1800)) * 0.9)
+      * (brake ? 1.8 : 1) * (ace ? 1.12 : frost ? 1.08 : 1);
     j.ang += clamp(turn, -agility * dt, agility * dt);
 
     const throttle = m.y < -0.1 ? 1 : m.y > 0.1 ? -0.55 : 0;
     // Prototype airframe: 2 400 m/s on the burner, and it gets there sooner.
-    const topSpeed = ace ? 2400 : this.frostwing ? 2050 : 1750;
+    const topSpeed = ace ? 2400 : frost ? 2200 : this.frostwing ? 2050 : 1750;
     const want = brake ? 210 : boost ? topSpeed : 620 + throttle * 260;
-    j.speed += (want - j.speed) * Math.min(1, dt * (boost ? (ace ? 2.3 : 1.9) : brake ? 4.2 : 2.6));
+    j.speed += (want - j.speed) * Math.min(1, dt * (boost ? (ace ? 2.3 : frost ? 2.1 : 1.9) : brake ? 4.2 : 2.6));
     j.boost = lerp(j.boost || 0, boost && !brake ? 1 : 0, Math.min(1, dt * 4));
     j.alt = clamp(j.alt + (boost ? 46 : brake ? -30 : 14) * dt, 0, 480);
     j.cool = Math.max(0, j.cool - dt);
@@ -3213,7 +3228,7 @@ export class Game {
         j.cool = 1.6;
         this.fireJetMissile();
       } else {
-        j.cool = ace ? 0.045 : 0.055;
+        j.cool = ace ? 0.045 : frost ? 0.048 : 0.055;
         for (const side of [-1, 1]) {
           const a = j.ang + rand(-0.01, 0.01);
           const ox = Math.cos(j.ang + Math.PI / 2) * side * 14 + Math.cos(j.ang) * 74;
@@ -3221,8 +3236,8 @@ export class Game {
           this.bullets.push({
             x: j.x + ox, y: j.y + oy, px: j.x + ox, py: j.y + oy,
             vx: Math.cos(a) * 2100, vy: Math.sin(a) * 2100,
-            dmg: ace ? 38 : this.frostwing ? 30 : 24, life: 0.9, friendly: true,
-            color: ace ? '#ffe0a0' : this.frostwing ? '#c8f8ff' : '#d6f6ff', r: ace ? 4.2 : 3.6, hits: [],
+            dmg: ace ? 38 : frost ? 34 : this.frostwing ? 30 : 24, life: 0.9, friendly: true,
+            color: ace ? '#ffe0a0' : frost ? '#d8fbff' : this.frostwing ? '#c8f8ff' : '#d6f6ff', r: ace ? 4.2 : frost ? 4 : 3.6, hits: [],
           });
         }
         this.addLight(j.x, j.y, 200, '190,240,255', 0.1);
@@ -4067,7 +4082,7 @@ export class Game {
       return;
     }
     if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 230) { this.enterPrison('visit'); return; }
-    if (this.glacierSpot && Math.hypot(this.glacierSpot.x - this.px, this.glacierSpot.y - this.py) < 200) { this.enterGlacier(); return; }
+    if (this.glacierSpot && Math.hypot(this.glacierSpot.x - this.px, this.glacierSpot.y - this.py) < 280) { this.enterGlacier(); return; }
     if (this.stockadeSpot && !this.stockadeOpen) {
       const st = this.stockadeSpot;
       if (this.px > st.x - 90 && this.px < st.x + st.w + 90 && this.py > st.y - 90 && this.py < st.y + st.h + 90) {
@@ -4310,6 +4325,21 @@ export class Game {
   /* ================================================================== */
   /* THE CAGE — arrest, the van ride, the 3D prison                      */
   /* ================================================================== */
+
+  /**
+   * Is the operative inside a vehicle, an aircraft or a boat?
+   *
+   * Custody officers arrest a man on foot. They cannot reach through a hull, a canopy, a
+   * rotor disc or forty metres of air, and every one of these states means the operative
+   * is not standing on the ground next to them. One helper, used by every arrest test, so
+   * a new vehicle can never quietly forget to exclude itself again.
+   */
+  get inVehicleOrAir(): boolean {
+    // `playerHeli` and `plane` survive after the operative steps out, so they only count
+    // while he is actually flying them.
+    return !!(this.playerJet || (this.piloting && this.playerHeli) || this.flyingPlane
+      || this.drivingVan || this.drivingBoat || this.playerTank);
+  }
 
   /** A custody officer got his hands on the operative. */
   private beginArrest(e: Enemy) {
@@ -4672,9 +4702,14 @@ export class Game {
   leaveGlacier(stats: { kills: number; escorts: number; plane: boolean; time: number }, tookPlane: boolean) {
     if (this.status !== 'glacier') return;
     this.status = 'playing';
-    this.px = (this.glacierSpot?.x ?? this.px) + 60;
-    this.py = (this.glacierSpot?.y ?? this.py) + 260;
+    // Out onto the apron in front of the bulkhead, then pushed clear of anything solid:
+    // the old landing spot sat almost inside the perimeter fence.
+    this.px = this.glacierSpot?.x ?? this.px;
+    this.py = (this.glacierSpot?.y ?? this.py) + 150;
     this.pvx = 0; this.pvy = 0;
+    const safe = { x: this.px, y: this.py };
+    this.collide(safe, 34);
+    this.px = safe.x; this.py = safe.y;
     this.iFrames = 3;
     const kills = Number.isFinite(stats?.kills) ? stats.kills : 0;
     const escorts = Number.isFinite(stats?.escorts) ? stats.escorts : 0;
@@ -4728,8 +4763,9 @@ export class Game {
     }
     this.armyJets = this.armyJets.filter((j) => j.manned);
     this.armyJets.push({
-      x: sx, y: sy, ang: -Math.PI / 2, hp: 620, maxHp: 620,
+      x: sx, y: sy, ang: -Math.PI / 2, hp: 900, maxHp: 900,
       state: 'parked', alt: 0, speed: 0, cool: 0, t: 0,
+      tier: 'frostwing', tuned: true, flares: 20,
     });
     this.addText(sx, sy - 80, 'INTERCEPTOR ON THE ICE · PRESS F TO FLY', '#a9ecff', 17);
     this.addText(sx, sy - 58, 'LMB FIRE · G MISSILE · X STATION · E ORBIT · SPACE FLARES · SHIFT BURN', '#8be8ff', 12);
@@ -4967,14 +5003,14 @@ export class Game {
     this.flyingPlane = true;
     this.plane.active = true;
     this.px = this.plane.x; this.py = this.plane.y;
-    this.setBanner('S.H.I.E.L.D. STRATEGIC BOMBER', 'WASD FLY · LMB NOSE CANNONS · G BOMB CARPET · F LAND');
+    this.setBanner('S.H.I.E.L.D. STRATEGIC BOMBER', 'NOSE FOLLOWS THE MOUSE · W THROTTLE · SHIFT BURNER · S TO LAND · LMB GUNS · G BOMBS');
     sfx.rotor();
   }
 
   private exitPlane() {
     if (!this.plane) return;
     if (Math.hypot(this.plane.vx, this.plane.vy) > 140) {
-      this.addText(this.plane.x, this.plane.y - 90, 'THROTTLE DOWN TO DISEMBARK', '#ffcf7a', 13);
+      this.addText(this.plane.x, this.plane.y - 90, 'HOLD S TO SLOW FOR LANDING', '#ffcf7a', 13);
       return;
     }
     const landing = { x: this.plane.x, y: this.plane.y };
@@ -5238,6 +5274,16 @@ export class Game {
   }
 
   /** The vault bomber: heavy, slow to turn, devastating carpet bombs. */
+  /**
+   * THE BOMBER FLIES LIKE AN AIRCRAFT.
+   *
+   * It used to be a top-down twin-stick machine: the nose pointed at the mouse while the
+   * hull slid sideways wherever WASD pushed it, which is not flying, it is a shopping
+   * trolley with wings. It now uses the same model as the interceptor — the nose tracks
+   * the mouse, the hull always travels where the nose points, W throttles up, S throttles
+   * back to a landing approach, SHIFT is the burner — so the two aircraft in the game
+   * answer the controls the same way.
+   */
   private updatePlane(dt: number) {
     const p = this.plane;
     if (!p) { this.flyingPlane = false; return; }
@@ -5247,6 +5293,8 @@ export class Game {
     if (this.aimStick.active) {
       const dx = this.aimStick.x - this.aimStick.ox, dy = this.aimStick.y - this.aimStick.oy;
       if (Math.hypot(dx, dy) > 12) { aim = Math.atan2(dy, dx); firing = true; }
+      // On a touch screen the left stick is the nose: push it and the bomber turns.
+      if (m.x || m.y) aim = Math.atan2(m.y, m.x);
     } else if (!this.isTouch) {
       aim = Math.atan2(this.mouseY + this.camY - p.y, this.mouseX + this.camX - p.x);
       firing = this.firing;
@@ -5254,13 +5302,34 @@ export class Game {
     let turn = aim - p.ang;
     while (turn > Math.PI) turn -= TAU;
     while (turn < -Math.PI) turn += TAU;
-    p.ang += Math.sign(turn) * Math.min(Math.abs(turn), 1.25 * dt);
-    p.bank = lerp(p.bank, clamp(turn * 0.85, -0.7, 0.7), 1 - Math.pow(0.01, dt));
-    const thrust = p.fuel > 0 ? 640 : 95;
-    p.vx = lerp(p.vx, m.x * thrust, 1 - Math.pow(0.16, dt));
-    p.vy = lerp(p.vy, m.y * thrust, 1 - Math.pow(0.16, dt));
-    p.x = clamp(p.x + p.vx * dt, 120, ARENA_W - 120);
-    p.y = clamp(p.y + p.vy * dt, 120, ARENA_H - 120);
+    // A bomber is heavier than a fighter: wide, deliberate turns that tighten as it slows.
+    const speedNow = Math.hypot(p.vx, p.vy);
+    const agility = (2.0 - Math.min(1, speedNow / 1250) * 0.8) * (this.keys['s'] ? 1.7 : 1);
+    p.ang += clamp(turn, -agility * dt, agility * dt);
+    p.bank = lerp(p.bank, clamp(turn * 0.85, -0.8, 0.8), 1 - Math.pow(0.01, dt));
+
+    const brake = !!this.keys['s'] && !this.keys['w'];
+    const boost = !!this.keys['shift'] && !brake && p.fuel > 0;
+    const throttle = m.y < -0.1 ? 1 : m.y > 0.1 ? -0.45 : 0;
+    // No engine, no altitude: the bomber glides, slowly and badly.
+    const topSpeed = p.fuel > 0 ? (boost ? 1180 : 820 + throttle * 240) : 330;
+    const want = brake ? 120 : topSpeed;
+    const accel = boost ? 2.0 : brake ? 3.0 : 1.5;
+    const speed = speedNow + (want - speedNow) * Math.min(1, dt * accel);
+    // Forward flight: velocity is the nose, never the strafe vector.
+    p.vx = Math.cos(p.ang) * speed;
+    p.vy = Math.sin(p.ang) * speed;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    // Edges are flown around, not bounced off: turn the nose back into the arena.
+    if (p.x < 220 || p.x > ARENA_W - 220) {
+      p.x = clamp(p.x, 220, ARENA_W - 220);
+      p.ang = Math.atan2(Math.sin(p.ang), p.x < ARENA_W / 2 ? Math.abs(Math.cos(p.ang)) : -Math.abs(Math.cos(p.ang)));
+    }
+    if (p.y < 220 || p.y > ARENA_H - 220) {
+      p.y = clamp(p.y, 220, ARENA_H - 220);
+      p.ang = Math.atan2(p.y < ARENA_H / 2 ? Math.abs(Math.sin(p.ang)) : -Math.abs(Math.sin(p.ang)), Math.cos(p.ang));
+    }
     p.fuel = Math.max(0, p.fuel - dt * 0.75);
     p.gunCd = Math.max(0, p.gunCd - dt);
     p.bombCd = Math.max(0, p.bombCd - dt);
@@ -8143,14 +8212,16 @@ export class Game {
       }
 
       // Custody officers do not shoot: they walk you down and cuff you.
-      if (e.type === 'custodian' && !this.piloting && !this.flyingPlane && !this.drivingVan
-          && !this.playerTank && dist < def.r + 26 && this.status === 'playing') {
+      if (e.type === 'custodian' && !this.inVehicleOrAir
+          && dist < def.r + 26 && this.status === 'playing') {
         // A dash or the AEGIS shield still beats a pair of handcuffs.
         // The gate detail only steps in once the operative is past the sally port; on the
         // bridge and the forecourt they let him walk up to the door.
         // No handcuffs inside the S.H.I.E.L.D. compound: that ground belongs to the operative.
         const atShield = Math.hypot(this.px - VAULT_ENTRY.x, this.py - VAULT_ENTRY.y) < 760;
-        const mayCuff = (!e.policePost || this.px > PRISON_DOOR.x - 40) && !atShield;
+        // ...and nothing at altitude is cuffable, even if the shadow is right under him.
+        const overhead = !!(this.playerJet && this.playerJet.alt > 12);
+        const mayCuff = !overhead && (!e.policePost || this.px > PRISON_DOOR.x - 40) && !atShield;
         if (mayCuff && this.iFrames <= 0 && this.aegisTime <= 0 && this.dashT <= 0) { this.beginArrest(e); return; }
       }
       // contact damage
@@ -9865,7 +9936,50 @@ export class Game {
     ctx.restore();
   }
 
+  /**
+   * THE GLACIER GATE, seen from the ground.
+   *
+   * A door in a mountain has to announce itself: a cold pool of light spilling out of the
+   * forecourt, a lit lintel over the bulkhead, and the words on the ice. Without this the
+   * entrance was a gap between two white blocks with nothing to aim at.
+   */
+  private drawGlacierGateBeacon(ctx: CanvasRenderingContext2D) {
+    const spot = this.glacierSpot;
+    if (!spot) return;
+    const dx = spot.x - (this.camX + this.w / 2), dy = spot.y - (this.camY + this.h / 2);
+    if (Math.abs(dx) > this.w * 0.75 || Math.abs(dy) > this.h * 0.75) return;
+    const pulse = 0.55 + Math.sin(this.simulationTime * 1.7) * 0.25;
+    ctx.save();
+    ctx.translate(spot.x, spot.y);
+    // light on the apron
+    const g = ctx.createRadialGradient(0, 40, 10, 0, 40, 300);
+    g.addColorStop(0, `rgba(155,232,255,${0.3 * pulse})`);
+    g.addColorStop(1, 'rgba(155,232,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(0, 40, 300, 220, 0, 0, TAU); ctx.fill();
+    // the lintel lamp over the bulkhead
+    const lit = this.glacierVisits ? 'rgba(160,214,232,0.7)' : `rgba(190,246,255,${0.55 + pulse * 0.4})`;
+    ctx.fillStyle = lit;
+    ctx.fillRect(-90, -272, 180, 7);
+    ctx.beginPath(); ctx.moveTo(-90, -265); ctx.lineTo(90, -265); ctx.lineTo(60, -215); ctx.lineTo(-60, -215); ctx.closePath();
+    const beam = ctx.createLinearGradient(0, -265, 0, -150);
+    beam.addColorStop(0, this.glacierVisits ? 'rgba(150,200,220,0.16)' : `rgba(170,240,255,${0.3 * pulse})`);
+    beam.addColorStop(1, 'rgba(170,240,255,0)');
+    ctx.fillStyle = beam; ctx.fill();
+    // stencilled on the ice
+    ctx.fillStyle = this.glacierVisits ? 'rgba(180,214,226,0.75)' : 'rgba(215,248,255,0.92)';
+    ctx.font = 'bold 13px "Share Tech Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(this.glacierVisits ? 'GLACIER VAULT / OPEN' : 'GLACIER VAULT / ENTRY', 0, -300);
+    ctx.font = '10px "Share Tech Mono", monospace';
+    ctx.fillStyle = 'rgba(170,220,235,0.7)';
+    ctx.fillText(this.glacierVisits ? '[F] GO BACK INSIDE' : '[F] OPEN THE GATE', 0, 128);
+    ctx.textAlign = 'left';
+    ctx.restore();
+  }
+
   private drawStrategicSites(ctx: CanvasRenderingContext2D) {
+    this.drawGlacierGateBeacon(ctx);
     const sites = this.campaignSites;
     if (!sites) return;
     const d = sites.warehouse;
@@ -10649,7 +10763,66 @@ export class Game {
     ctx.beginPath(); ctx.ellipse(cx - s * 0.12, cy - s * 0.26, s * 0.3, s * 0.22, 0, 0, TAU); ctx.stroke();
   }
 
+  /** A block of glacier ice: the wall of the arctic annex, and its gate surround. */
+  private drawIceBlock(ctx: CanvasRenderingContext2D, o: Rect, tint: string) {
+    const lift = Math.min(34, o.h3d * 0.22);
+    ctx.save();
+    // what the block casts on the ground under it
+    ctx.fillStyle = 'rgba(0,0,0,0.38)';
+    ctx.fillRect(o.x + lift * 0.5, o.y + lift * 0.62, o.w, o.h);
+    // the cut face: pale blue at the top, deeper at the bottom
+    const face = ctx.createLinearGradient(o.x, o.y - lift, o.x, o.y + o.h);
+    face.addColorStop(0, '#f2fbff');
+    face.addColorStop(0.35, tint);
+    face.addColorStop(1, '#8fb6c6');
+    ctx.fillStyle = face;
+    ctx.fillRect(o.x, o.y - lift, o.w, o.h + lift);
+    // bevels: a lit top edge, a shaded foot
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillRect(o.x, o.y - lift, o.w, 4);
+    ctx.fillStyle = 'rgba(28,58,72,0.35)';
+    ctx.fillRect(o.x, o.y + o.h - 6, o.w, 6);
+    // fracture facets
+    const seed = Math.abs(Math.sin(o.x * 0.013 + o.y * 0.017));
+    ctx.strokeStyle = 'rgba(60,110,132,0.28)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+      const fx = o.x + o.w * (0.2 + ((seed * (i + 1)) % 0.6));
+      ctx.moveTo(fx, o.y - lift + 6);
+      ctx.lineTo(fx + (seed - 0.5) * 60, o.y + o.h * (0.45 + i * 0.16));
+    }
+    ctx.stroke();
+    // snow gathered on the top edge
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    for (let i = 0; i < 4; i++) {
+      const sx = o.x + o.w * ((i + seed) / 4.4);
+      ctx.beginPath();
+      ctx.ellipse(sx, o.y - lift + 5, o.w * 0.16, 5, 0, 0, TAU);
+      ctx.fill();
+    }
+    // outline keeps neighbouring blocks reading as one wall
+    ctx.strokeStyle = 'rgba(38,74,92,0.4)';
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(o.x + 0.5, o.y - lift + 0.5, o.w - 1, o.h + lift - 1);
+    ctx.restore();
+  }
+
   private drawRock(ctx: CanvasRenderingContext2D, o: Rect) {
+    // PALE ROCK IS ICE.
+    //
+    // The glacier wall was being drawn by the same dark-boulder code as a roadside rock,
+    // so a solid mountain of ice looked like a scattering of black blobs on grey ground
+    // and the gate read as a dead end. Pale tints are now drawn as cut ice blocks: hard
+    // facets, a snow cap, a cold shadow — and, crucially, as rectangles that tile into a
+    // wall, so the player can see exactly what is solid and where the opening is.
+    const tint = o.tint || '';
+    const pale = /^#[0-9a-f]{6}$/i.test(tint)
+      && (parseInt(tint.slice(1, 3), 16) + parseInt(tint.slice(3, 5), 16) + parseInt(tint.slice(5, 7), 16)) > 430;
+    if (pale) {
+      this.drawIceBlock(ctx, o, tint);
+      return;
+    }
     const cx = o.x + o.w / 2, cy = o.y + o.h / 2, s = Math.min(o.w, o.h) / 2;
     const seed = (Math.sin(o.x * 0.021 + o.y * 0.013) + 1) / 2;
     ctx.fillStyle = 'rgba(0,0,0,0.42)';
@@ -11003,16 +11176,20 @@ export class Game {
    */
   private drawFighter(ctx: CanvasRenderingContext2D, x: number, y: number, ang: number,
     alt: number, scale: number, boost: number, friendly: boolean, parked: boolean,
-    ace = false) {
+    tier: JetTier = 'standard') {
     ctx.save();
     ctx.translate(x, y - alt * 0.22);
     ctx.rotate(ang);
     ctx.scale(scale, scale);
     // A prototype is finished in graphite with sand-gold trim: recognisable on the apron
-    // from across the airfield, and recognisable in a dogfight from behind.
+    // from across the airfield, and recognisable in a dogfight from behind. The Frostwing
+    // is pale ice-blue with a lit spine.
+    const ace = tier === 'prototype';
+    const frost = tier === 'frostwing';
     const body = ace ? (friendly ? '#4b4a52' : parked ? '#3f3e46' : '#46454e')
+      : frost ? (parked ? '#b9d8e2' : '#cbe8f1')
       : friendly ? '#7d8870' : parked ? '#63705a' : '#6d7860';
-    const dark = ace ? '#26252c' : friendly ? '#4e5747' : '#414b3c';
+    const dark = ace ? '#26252c' : frost ? '#5d7f8c' : friendly ? '#4e5747' : '#414b3c';
     // wings: diamond planform, leaning back from the intakes to the tail
     ctx.fillStyle = body;
     ctx.beginPath();
@@ -11051,9 +11228,9 @@ export class Game {
     ctx.fillStyle = ace ? '#1b1a20' : '#2b3329';
     ctx.fillRect(8, -14, 18, 6);
     ctx.fillRect(8, 8, 18, 6);
-    if (ace) {
+    if (ace || frost) {
       // gold cheat line down the spine and two canard slivers ahead of the wing root
-      ctx.fillStyle = friendly ? '#9fe8ff' : '#dfbd78';
+      ctx.fillStyle = frost ? '#eafcff' : friendly ? '#9fe8ff' : '#dfbd78';
       ctx.fillRect(-42, -2.2, 62, 4.4);
       ctx.fillStyle = dark;
       ctx.beginPath(); ctx.moveTo(20, 11); ctx.lineTo(4, 22); ctx.lineTo(2, 12); ctx.closePath(); ctx.fill();
@@ -11219,7 +11396,7 @@ export class Game {
       }
       this.drawFighter(ctx, j.x, j.y, j.ang, this.playerJet === j ? j.alt : flying ? j.alt : 0,
         scale, this.playerJet === j ? (j.boost || 0) : flying ? 0.35 : 0, this.playerJet === j,
-        !this.playerJet && !flying, j.tier === 'prototype');
+        !this.playerJet && !flying, j.tier);
       if (this.playerJet === j || flying) {
         const frac = Math.max(0, j.hp / j.maxHp);
         ctx.fillStyle = 'rgba(0,0,0,0.5)';
@@ -11235,10 +11412,18 @@ export class Game {
           j.x, j.y - 108);
         ctx.textAlign = 'left';
       } else if (!flying && this.nearArmyJet() === j) {
-        ctx.fillStyle = j.tier === 'prototype' ? 'rgba(255,222,160,0.95)' : 'rgba(200,240,255,0.9)';
+        ctx.fillStyle = j.tier === 'prototype' ? 'rgba(255,222,160,0.95)'
+          : j.tier === 'frostwing' ? 'rgba(200,246,255,0.98)' : 'rgba(200,240,255,0.9)';
         ctx.font = 'bold 12px ui-monospace, monospace';
         ctx.textAlign = 'center';
-        ctx.fillText(j.tier === 'prototype' ? 'F · SEIZE PROTOTYPE' : 'F · SEIZE', j.x, j.y - 96);
+        ctx.fillText(j.tier === 'prototype' ? 'F · SEIZE PROTOTYPE'
+          : j.tier === 'frostwing' ? 'F · FLY THE FROSTWING' : 'F · SEIZE', j.x, j.y - 96);
+        ctx.textAlign = 'left';
+      } else if (!flying && j.tier === 'frostwing' && on(j.x, j.y, 60)) {
+        ctx.fillStyle = 'rgba(190,244,255,0.85)';
+        ctx.font = 'bold 10px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('FROSTWING', j.x, j.y - 92);
         ctx.textAlign = 'left';
       } else if (!flying && j.tier === 'prototype' && on(j.x, j.y, 60)) {
         // Even from a distance the experimental machine is marked, so it can be found.

@@ -66,7 +66,9 @@ const LINES: Record<string, Dialogue> = {
 
 const PLAYER_R = 22;
 const HALL_MIN_Z = -300, HALL_MAX_Z = 14;
-const HALL_HALF = 46;
+// Wide enough for two aircraft wells and a gantry, the way the brief sketches it: a cave
+// with a base built inside it, not a corridor.
+const HALL_HALF = 60;
 
 interface Foe {
   mesh: THREE.Group; x: number; z: number; hp: number; maxHp: number;
@@ -179,31 +181,109 @@ export default function Glacier3D({ onExit }: Props) {
     // ceiling
     const ceil = new THREE.Mesh(new THREE.PlaneGeometry(HALL_HALF * 2, HALL_MAX_Z - HALL_MIN_Z), ceilMat);
     ceil.rotation.x = Math.PI / 2;
-    ceil.position.set(0, 26, (HALL_MIN_Z + HALL_MAX_Z) / 2);
+    ceil.position.set(0, 32, (HALL_MIN_Z + HALL_MAX_Z) / 2);
     scene.add(ceil);
     // side walls
     for (const side of [-1, 1]) {
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(3, 30, HALL_MAX_Z - HALL_MIN_Z), wallMat);
-      wall.position.set(side * HALL_HALF, 14, (HALL_MIN_Z + HALL_MAX_Z) / 2);
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(3, 36, HALL_MAX_Z - HALL_MIN_Z), wallMat);
+      wall.position.set(side * HALL_HALF, 17, (HALL_MIN_Z + HALL_MAX_Z) / 2);
       scene.add(wall);
     }
-    // end walls
-    for (const [z, dir] of [[HALL_MAX_Z, 1], [HALL_MIN_Z, -1]] as const) {
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(HALL_HALF * 2, 30, 4), wallMat);
-      wall.position.set(0, 14, z);
-      scene.add(wall);
-      void dir;
+    // the far wall of the vault
+    const farWall = new THREE.Mesh(new THREE.BoxGeometry(HALL_HALF * 2, 36, 4), wallMat);
+    farWall.position.set(0, 17, HALL_MIN_Z);
+    scene.add(farWall);
+    /* THE GATE END.
+     *
+     * The vault has to let something bigger than a man out: the Frostwing launches down
+     * the hall and out through a 30-unit opening in the gate wall, so that wall is built
+     * as two shoulders and a lintel with daylight behind them.
+     */
+    for (const side of [-1, 1]) {
+      const shoulder = new THREE.Mesh(new THREE.BoxGeometry(HALL_HALF - 15, 36, 4), wallMat);
+      shoulder.position.set(side * (HALL_HALF / 2 + 7.5), 17, HALL_MAX_Z);
+      scene.add(shoulder);
     }
-    // the gate behind you: two frozen leaves with a lit seam
-    const gateSeam = new THREE.Mesh(new THREE.BoxGeometry(1.2, 8, 0.6), glowMat);
-    gateSeam.position.set(0, 4, HALL_MAX_Z - 2);
+    const lintel = new THREE.Mesh(new THREE.BoxGeometry(30, 17, 4), wallMat);
+    lintel.position.set(0, 27.5, HALL_MAX_Z);
+    scene.add(lintel);
+    // daylight beyond the gate: the ice shelf outside, the brightest thing in the room
+    const daylight = new THREE.Mesh(
+      new THREE.PlaneGeometry(30, 19),
+      new THREE.MeshBasicMaterial({ color: 0xe6f8ff }),
+    );
+    daylight.position.set(0, 9.5, HALL_MAX_Z - 3);
+    daylight.rotation.y = Math.PI;
+    scene.add(daylight);
+    // the gate itself: two frozen leaves meeting on a lit seam
+    const gateSeam = new THREE.Mesh(new THREE.BoxGeometry(1.2, 19, 0.6), glowMat);
+    gateSeam.position.set(0, 9.5, HALL_MAX_Z - 2);
     scene.add(gateSeam);
+    const gateLeaves: THREE.Mesh[] = [];
+    for (const side of [-1, 1]) {
+      const leaf = new THREE.Mesh(new THREE.BoxGeometry(15.6, 19, 2.2), wallMat);
+      leaf.position.set(side * 7.8, 9.5, HALL_MAX_Z - 1.4);
+      scene.add(leaf);
+      gateLeaves.push(leaf);
+    }
+
+    /* the launch rail: a lit centreline from the frost bay to the gate */
+    const rail = new THREE.Mesh(
+      new THREE.PlaneGeometry(9, HALL_MAX_Z - HALL_MIN_Z - 30),
+      new THREE.MeshStandardMaterial({ color: 0x9fd8ea, emissive: 0x4fb4d8, emissiveIntensity: 0.5, roughness: 0.5 }),
+    );
+    rail.rotation.x = -Math.PI / 2;
+    rail.position.set(0, 0.06, (HALL_MAX_Z + HALL_MIN_Z) / 2 - 8);
+    scene.add(rail);
+    for (let z = HALL_MIN_Z + 24; z < HALL_MAX_Z - 10; z += 16) {
+      for (const side of [-1, 1]) {
+        const stud = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.3, 0.7), glowMat);
+        stud.position.set(side * 5.2, 0.2, z);
+        scene.add(stud);
+      }
+    }
+
+    /* THE HANGAR GANTRY.
+     * A worked base, not a cave: a steel walkway down the east wall with railings, two
+     * lit bays and the division's banners hanging off it.
+     */
+    const gantryX = HALL_HALF - 9;
+    const gantry = new THREE.Mesh(new THREE.BoxGeometry(9, 0.6, 190), steelMat);
+    gantry.position.set(gantryX, 11, -120);
+    scene.add(gantry);
+    for (let i = 0; i <= 8; i++) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.4, 11, 0.4), steelMat);
+      post.position.set(gantryX - 4, 5.5, -30 - i * 23);
+      scene.add(post);
+    }
+    for (let i = 0; i < 36; i++) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.22, 1.5, 0.22), steelMat);
+      bar.position.set(gantryX - 4, 12, -28 - i * 5.2);
+      scene.add(bar);
+    }
+    const rail2 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 190), steelMat);
+    rail2.position.set(gantryX - 4, 12.7, -120);
+    scene.add(rail2);
+    for (const bz of [-64, -150]) {
+      const banner = new THREE.Mesh(
+        new THREE.PlaneGeometry(7, 12),
+        new THREE.MeshStandardMaterial({ color: 0x5f8fa8, emissive: 0x2c6076, emissiveIntensity: 0.5, side: THREE.DoubleSide }),
+      );
+      banner.position.set(gantryX - 6, 17, bz);
+      banner.rotation.y = Math.PI / 2;
+      scene.add(banner);
+    }
+    for (const lz of [-52, -120, -196]) {
+      const lamp = new THREE.Mesh(new THREE.SphereGeometry(1.1, 10, 8), glowMat);
+      lamp.position.set(gantryX - 5, 14.5, lz);
+      scene.add(lamp);
+    }
 
     // ice pillars down both sides, and crystal formations that catch the light
     const pillarGeo = new THREE.CylinderGeometry(2.6, 3.6, 26, 7);
     const crystalGeo = new THREE.ConeGeometry(2.2, 9, 5);
     for (let i = 0; i < 14; i++) {
-      const z = 0 - i * 21;
+      const z = -6 - i * 21;
       for (const side of [-1, 1]) {
         const p = new THREE.Mesh(pillarGeo, wallMat);
         p.position.set(side * (HALL_HALF - 12), 13, z);
@@ -223,7 +303,7 @@ export default function Glacier3D({ onExit }: Props) {
     const icicleGeo = new THREE.ConeGeometry(0.7, 6, 5);
     for (let i = 0; i < 90; i++) {
       const ic = new THREE.Mesh(icicleGeo, glowMat);
-      ic.position.set((Math.random() - 0.5) * (HALL_HALF * 1.7), 24 - Math.random() * 2,
+      ic.position.set((Math.random() - 0.5) * (HALL_HALF * 1.7), 30 - Math.random() * 2,
         HALL_MAX_Z - Math.random() * (HALL_MAX_Z - HALL_MIN_Z));
       ic.rotation.z = Math.PI;
       ic.scale.setScalar(0.4 + Math.random() * 1.5);
@@ -303,7 +383,9 @@ export default function Glacier3D({ onExit }: Props) {
     };
 
     const colliders: { x: number; z: number; r: number }[] = [];
-    for (let i = 0; i < 14; i++) for (const side of [-1, 1]) colliders.push({ x: side * (HALL_HALF - 12), z: -i * 21, r: 3.6 });
+    for (let i = 0; i < 14; i++) for (const side of [-1, 1]) colliders.push({ x: side * (HALL_HALF - 12), z: -6 - i * 21, r: 3.6 });
+    // the gantry legs are solid too
+    for (let i = 0; i <= 8; i++) colliders.push({ x: HALL_HALF - 13, z: -30 - i * 23, r: 2.2 });
 
     /* hostiles: an ice guard battalion spread down the hall */
     const foes: Foe[] = [];
@@ -417,8 +499,18 @@ export default function Glacier3D({ onExit }: Props) {
     }));
     canopy.position.set(0, 0.9, -2.6);
     plane.add(canopy);
+    // Nose to the gate: the Frostwing is parked pointing at the way out, because in four
+    // seconds that is exactly where it is going.
     plane.position.set(0, 3.2, -268);
+    plane.rotation.y = Math.PI;
     scene.add(plane);
+    // the bay it sits in: a raised cradle and a cold lamp
+    const cradle = new THREE.Mesh(
+      new THREE.BoxGeometry(20, 0.8, 15),
+      new THREE.MeshStandardMaterial({ color: 0x86a6b4, roughness: 0.5, metalness: 0.55 }),
+    );
+    cradle.position.set(0, 0.4, -268);
+    scene.add(cradle);
     const planeGlow = new THREE.PointLight(0x8fe8ff, 40, 90, 2);
     planeGlow.position.set(0, 5, -268);
     scene.add(planeGlow);
@@ -696,21 +788,45 @@ export default function Glacier3D({ onExit }: Props) {
         setTimeout(() => { if (!finished) { finished = true; exitRef.current({ kills: state.kills, escorts: escorts.filter((e) => e.alive).length, plane: false, time: state.t }, false); } }, 3200);
       }
 
-      // ---- plane takeoff
+      /* ---- THE LAUNCH.
+       *
+       * It used to be a model sliding forward for three seconds and a fade. Now it is a
+       * launch: the gate leaves sink into the ice, the bay lights come up, the Frostwing
+       * runs the length of the hall on the rail with the camera chasing it, and the white
+       * of the ice shelf takes the screen as it clears the mountain.
+       */
       if (state.takeoff > 0) {
         state.takeoff += dt;
-        const k = Math.min(1, state.takeoff / 3.4);
-        plane.position.z = -268 + k * 150;
-        plane.position.y = 3.2 + k * 26;
-        plane.rotation.x = -k * 0.22;
-        const flicker = 0.8 + Math.sin(state.t * 40) * 0.2;
-        planeGlow.intensity = 40 + k * 120 * flicker;
-        camera.position.set(0, 2.2, plane.position.z + 12);
-        camera.rotation.set(0, Math.PI, 0);
-        if (k >= 1 && !finished) {
+        const t = state.takeoff;
+        // 1) the gate opens (0 - 1.1 s)
+        const open = Math.min(1, t / 1.1);
+        gateLeaves.forEach((leaf, i) => {
+          const side = i === 0 ? -1 : 1;
+          leaf.position.x = side * (7.8 + open * 3.4);
+          leaf.position.y = 9.5 - open * 9.3;
+          leaf.scale.y = Math.max(0.04, 1 - open * 0.98);
+        });
+        (gateSeam.material as THREE.MeshStandardMaterial).emissiveIntensity = 1.2 + open * 2.4;
+        (daylight.material as THREE.MeshBasicMaterial).color.setScalar(0.82 + open * 0.18);
+        // 2) the run (1.1 - 3.6 s): 300 units of hall, accelerating all the way
+        const run = Math.max(0, Math.min(1, (t - 1.1) / 2.5));
+        const dist = 300 * run * run;
+        plane.position.z = -268 + dist;
+        plane.position.y = 3.2 + run * 5.5;
+        plane.rotation.x = -run * 0.16;
+        const flicker = 0.85 + Math.sin(state.t * 40) * 0.15;
+        planeGlow.intensity = 40 + run * 260 * flicker;
+        planeGlow.position.set(0, 5.4 + run * 3, plane.position.z + 2);
+        // the operative watches it go: camera behind and above the tail
+        camera.position.set(plane.position.x * 0.4, Math.max(2.4, plane.position.y + 2.2), plane.position.z - 17);
+        camera.lookAt(plane.position.x, plane.position.y, plane.position.z + 6);
+        if (run >= 1 && !finished) {
           finished = true;
-          setFade(0);
-          exitRef.current({ kills: state.kills, escorts: escorts.filter((e) => e.alive).length, plane: true, time: state.t }, true);
+          // hold the white for half a second, so the launch ends on the glare of the ice
+          // shelf instead of on a hard cut to the surface
+          setFade(1);
+          const stats = { kills: state.kills, escorts: escorts.filter((e) => e.alive).length, plane: true, time: state.t };
+          setTimeout(() => exitRef.current(stats, true), 520);
         }
       } else {
         // first person camera
