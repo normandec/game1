@@ -87,6 +87,8 @@ export interface Hud {
   jet: boolean; jetBoost: number;
   jetSpeed: number; jetAlt: number; jetMode: string; jetFlares: number;
   jetLock: string; jetAutopilot: boolean; frostwing: boolean;
+  /** Hostile fighters currently hunting the operative. */
+  airThreat: number;
   /** The kit: four groups of item chips, built every HUD tick. */
   inventory: { group: string; items: { label: string; detail: string; tone: string }[] }[];
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
@@ -124,6 +126,12 @@ export const WEAPONS: Record<string, WeaponDef> = {
   gl: { name: 'M79 THUMPER', short: 'GL', rate: 0.8, dmg: 105, pellets: 1, spread: 0.02, speed: 700, ammo: 14, kick: 9, sound: 'shotgun', color: '#ffca7a', len: 16 },
   // The sidearm that survives the intake search; the prison's only firearm.
   pistol: { name: 'M9 SIDEARM', short: 'PISTOL', rate: 0.19, dmg: 26, pellets: 1, spread: 0.02, speed: 1500, ammo: Infinity, kick: 2.4, sound: 'smg', color: '#dfe9ff', len: 12 },
+};
+
+/** What the operative calls each requisitioned body. */
+const VAN_LABEL: Record<string, string> = {
+  car: 'STAFF CAR', humvee: 'ARMOURED HUMMER', bus: 'TROOP BUS', tanker: 'FUEL TANKER',
+  truck: 'CARGO LORRY', ambulance: 'FIELD AMBULANCE',
 };
 
 interface EnemyDef {
@@ -257,7 +265,7 @@ interface Plough {
 /** A vehicle working a base circuit: convoy truck, staff car, fuel bowser, ambulance. */
 interface RoadCar {
   x: number; y: number; ang: number; speed: number;
-  kind: 'car' | 'humvee' | 'bus' | 'tanker' | 'ambulance';
+  kind: 'car' | 'humvee' | 'bus' | 'tanker' | 'ambulance' | 'truck';
   route: { x: number; y: number }[]; node: number;
   /** Metres of road held before the next one moves: convoys keep their spacing. */
   wait: number; dead: boolean; colour: string;
@@ -315,6 +323,11 @@ interface ArmyJet {
   autopilot?: boolean;
   /** Missile seeker: what the nose is currently holding. */
   lock?: { x: number; y: number; label: string; air: boolean } | null;
+  /** An air-defence hunter scrambled to answer a bombing run. These do not stand down
+   *  just because the operative is airborne — that is the whole point of them. */
+  hunter?: boolean;
+  /** Rockets left in the pods of a hunter. */
+  rockets?: number;
 }
 /** Attack gunship — strafes, hovers, rockets the player. */
 interface Heli {
@@ -341,6 +354,14 @@ interface Van {
   gunCd?: number; turretAng?: number; reserved?: boolean; blockT?: number;
   /** Grenade-hit ground vehicle: tyres blown, engine dead, it never moves again. */
   disabled?: boolean; skidT?: number;
+  /**
+   * Requisitioned street vehicle: an armoured Hydra transport by default, or the body of
+   * the car, lorry or bus the operative actually took. Drawn from that body style.
+   */
+  art?: RoadCar['kind'];
+  colour?: string;
+  /** Seconds of smoke off a burnt-out requisitioned vehicle. */
+  burning?: number;
 }
 /** Capturable Hydra beam battery. Two hits will erase you. */
 interface Laser {
@@ -573,6 +594,18 @@ export class Game {
   playerJet: ArmyJet | null = null;
   /** Air-to-air / air-to-ground missiles in flight from the interceptor. */
   jetMissiles: { x: number; y: number; vx: number; vy: number; life: number; air: boolean; dmg: number }[] = [];
+  /** Air-defence rockets fired at an airborne operative. Flares spoof them. */
+  enemyRockets: { x: number; y: number; vx: number; vy: number; life: number; dmg: number; spooked: number }[] = [];
+  /** How angry the air force currently is, in seconds of standing hostility. */
+  private airResponse = 0;
+  /** Accumulated provocation: every bomb and every strafing pass adds to it. */
+  private airResponseHeat = 0;
+  private airResponseWave = 0;
+  private airResponseT = 0;
+  /** Flare cloud still burning; hostile rockets lose lock while it lasts. */
+  private jetFlareT = 0;
+  /** Seconds the operative has been back on the ground with fighters still up. */
+  private airResponseIdle = 0;
   /** Afterburner trail positions, drawn as a heat plume. */
   jetTrail: { x: number; y: number; t: number }[] = [];
   /** Armour sortie clock and how many hulls the park has already sent. */
@@ -653,6 +686,12 @@ export class Game {
   // installations
   hangars: HangarState[] = [];
   vans: Van[] = [];
+  /**
+   * Parked vehicles painted into the world as solid scenery (car, humvee, bus, tanker and
+   * the motor-pool lorries). They are not decoration: stand next to one and press F and it
+   * stops being a prop and becomes a vehicle with a hull, a throttle and a driver.
+   */
+  private driveProps: { rect: Rect; kind: 'car' | 'humvee' | 'bus' | 'tanker' | 'truck'; colour: string }[] = [];
   /** Everything that floats: landing craft, patrol boats and the skiffs you can take. */
   boats: Boat[] = [];
   drivingBoat: Boat | null = null;
@@ -978,13 +1017,15 @@ export class Game {
     this.armyAlarm = 0; this.armyAlerted = false; this.armyWakeT = 0; this.armyWaves = 0;
     this.playerJet = null; this.armyTankWaveT = 0; this.armyTankSent = 0;
     this.jetMissiles = []; this.jetTrail = [];
+    this.enemyRockets = []; this.airResponse = 0; this.airResponseHeat = 0;
+    this.airResponseWave = 0; this.airResponseT = 0; this.jetFlareT = 0;
     this.bridgeHp = this.bridgeMaxHp; this.bridgeDown = false; this.bridgeWarn = 0;
     this.armyLaunchT = 0;
     // Traffic. The circuits themselves are sampled from the painted road network in
     // world.ts, so a car can only ever be sent down road that is genuinely open.
     this.roadCars = [];
     const useRoutes = world.trafficRoutes.length ? world.trafficRoutes : (world.army?.routes || []);
-    const carKinds: RoadCar['kind'][] = ['humvee', 'car', 'bus', 'tanker', 'ambulance', 'humvee', 'car'];
+    const carKinds: RoadCar['kind'][] = ['humvee', 'car', 'bus', 'tanker', 'ambulance', 'truck', 'car', 'humvee', 'truck'];
     const colours = ['#5a6349', '#8a8f7a', '#33474a', '#6a5f45', '#9a9f88', '#4e5743', '#7d7f6a'];
     for (let r = 0; r < useRoutes.length; r++) {
       const route = useRoutes[r];
@@ -997,7 +1038,7 @@ export class Game {
         const a = route[i], b = route[(i + 1) % n];
         lap += Math.hypot(b.x - a.x, b.y - a.y);
       }
-      const fleet = clamp(Math.round(lap / 900) + 1, 2, 4);
+      const fleet = clamp(Math.round(lap / 780) + 2, 2, 5);
       for (let i = 0; i < fleet; i++) {
         const t = (i + 0.5) / fleet;
         const seg = t * n;
@@ -1009,13 +1050,63 @@ export class Game {
           speed: 58 + rand(0, 44),
           kind: carKinds[(r * 3 + i) % carKinds.length],
           route, node: (Math.floor(seg) + 1) % n,
-          wait: i * 24 + rand(0, 18), dead: false,
+          wait: rand(0, 2.2), dead: false,
           colour: colours[(r * 3 + i) % colours.length],
           light: rand(0, TAU), brake: 0, lean: 0, jammed: 0,
           hp: carKinds[(r * 3 + i) % carKinds.length] === 'bus' || carKinds[(r * 3 + i) % carKinds.length] === 'tanker' ? 260 : 170,
           maxHp: carKinds[(r * 3 + i) % carKinds.length] === 'bus' || carKinds[(r * 3 + i) % carKinds.length] === 'tanker' ? 260 : 170,
           burning: 0, panic: 0,
         });
+      }
+    }
+    // Every parked vehicle in the district is requisitionable. Anything too big to be a
+    // vehicle, or already dead, is left alone; the list is capped so the F prompt stays
+    // cheap to evaluate.
+    this.driveProps = [];
+    const CAR_COLOURS: Record<string, string> = {
+      car: '#8a8f7a', humvee: '#5a6349', bus: '#33474a', tanker: '#6a5f45', truck: '#4e5743',
+    };
+    for (const o of this.obstacles) {
+      if (o.dead) continue;
+      const kind = o.kind as string;
+      if (kind !== 'car' && kind !== 'humvee' && kind !== 'bus' && kind !== 'tanker' && kind !== 'truck') continue;
+      if (o.w > 250 || o.h > 250 || o.w < 38 || o.h < 22) continue;
+      if (this.driveProps.length >= 90) break;
+      this.driveProps.push({ rect: o, kind: kind as 'car' | 'humvee' | 'bus' | 'tanker' | 'truck', colour: o.tint || CAR_COLOURS[kind] });
+    }
+    /* Parked street vehicles pull out and join the traffic. The district should not look like
+       a car park: a share of the machines painted into the streets get a driver, a route and a
+       speed, and the static body is retired so nothing is left standing in two places at once.
+       Quantity scales with the sector, so late sectors are noticeably busier. */
+    const pullOut = clamp(4 + this.sector * 2, 4, 14);
+    const lanes = useRoutes.filter((r) => r.length >= 3);
+    if (lanes.length) {
+      let converted = 0;
+      for (let i = this.driveProps.length - 1; i >= 0 && converted < pullOut; i--) {
+        if (i % 2 === 1 && this.sector < 3) continue;   // early sectors stay calmer
+        const prop = this.driveProps[i];
+        const route = lanes[(converted + this.sector) % lanes.length];
+        // nearest point on that circuit, so the car appears on tarmac instead of in a field
+        let bestD = Infinity, bx = 0, by = 0, bnode = 0, bang = 0;
+        for (let k = 0; k < route.length; k++) {
+          const a = route[k], b = route[(k + 1) % route.length];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const len2 = dx * dx + dy * dy || 1;
+          const t = clamp(((prop.rect.x + prop.rect.w / 2 - a.x) * dx + (prop.rect.y + prop.rect.h / 2 - a.y) * dy) / len2, 0, 1);
+          const px2 = a.x + dx * t, py2 = a.y + dy * t;
+          const d = Math.hypot(px2 - (prop.rect.x + prop.rect.w / 2), py2 - (prop.rect.y + prop.rect.h / 2));
+          if (d < bestD) { bestD = d; bx = px2; by = py2; bnode = (k + 1) % route.length; bang = Math.atan2(dy, dx); }
+        }
+        if (bestD > 900) continue;   // too far from any open road — leave it parked
+        const hp = prop.kind === 'bus' || prop.kind === 'tanker' ? 260 : 170;
+        this.roadCars.push({
+          x: bx, y: by, ang: bang, speed: 62 + rand(0, 40), kind: prop.kind,
+          route, node: bnode, wait: rand(0, 3), dead: false, colour: prop.colour,
+          light: rand(0, TAU), brake: 0, lean: 0, jammed: 0, hp, maxHp: hp, burning: 0, panic: 0,
+        });
+        prop.rect.dead = true;
+        this.driveProps.splice(i, 1);
+        converted++;
       }
     }
     this.routines = []; this.routineT = 6; this.routineSeq = 0;
@@ -1860,8 +1951,12 @@ export class Game {
     if (boatNear) return boatNear.faction === 'enemy' ? 'F · SEIZE HYDRA BOAT' : 'F · BOARD BOAT';
     const nearTank = this.tanks.find((q) => !q.dead && !q.captured && Math.hypot(q.x - this.px, q.y - this.py) < 170);
     if (nearTank) return 'F · SEIZE TANK';
+    const prop = this.nearDriveProp();
+    if (prop) return `F · DRIVE ${VAN_LABEL[prop.kind]}`;
+    const moving = this.nearTrafficCar();
+    if (moving) return `F · TAKE ${VAN_LABEL[moving.kind]}`;
     const v = this.vans.find((q) => !q.dead && !q.reserved && !q.disabled && Math.hypot(q.x - this.px, q.y - this.py) < 110);
-    if (v) return 'F · DRIVE TRANSPORT';
+    if (v) return v.art ? `F · DRIVE ${VAN_LABEL[v.art]}` : 'F · DRIVE TRANSPORT';
     if (this.playerHeli && Math.hypot(this.playerHeli.x - this.px, this.playerHeli.y - this.py) < 94) return 'F · BOARD GUNSHIP';
     return '';
   }
@@ -1957,6 +2052,7 @@ export class Game {
       jetMode: this.playerJet?.mode || 'cannon',
       jetFlares: this.playerJet?.flares ?? 0,
       jetLock: this.playerJet?.lock ? `${this.playerJet.lock.label}` : '',
+      airThreat: this.hunterCount(),
       jetAutopilot: !!this.playerJet?.autopilot,
       frostwing: this.frostwing,
       vehicleHp: this.playerJet ? this.playerJet.hp : this.flyingPlane ? this.plane?.hp || 0 : this.playerTank ? this.playerTank.hp : this.drivingVan ? this.drivingVan.hp : this.piloting ? this.playerHeli?.hp || 0 : 0,
@@ -2064,6 +2160,7 @@ export class Game {
     this.updateIslandDefence(dt);
     if (this.status !== 'playing') return;
     this.updateSupport(dt);
+    this.updateAirCombat(dt);
     this.updateHangars(dt);
     this.updateFacilities(dt);
     this.updateLasers(dt);
@@ -2256,8 +2353,13 @@ export class Game {
     }
 
     this.updateArmyTurrets(dt);
+  }
+
+  /** Jets, missiles in flight and the air-defence response. Runs in every sector. */
+  private updateAirCombat(dt: number) {
     this.updateArmyJets(dt);
     this.updateJetMissiles(dt);
+    this.updateAirResponse(dt);
   }
 
   /**
@@ -2447,11 +2549,140 @@ export class Game {
   }
 
   /** Send up the base's aircraft: a fast jet, and a gunship until the apron is empty. */
+  /* ---------------- the air answers back ---------------- *
+   * Bomb something from an aircraft and the sky stops being a private road. The heat keeps
+   * rising for as long as the operative keeps bombing, and every wave brings more fighters,
+   * closer together, until the airspace is genuinely contested. Flares are the answer to the
+   * rockets: a burning flare cloud spoofs every seeker in range.
+   */
+
+  /** Called whenever the operative's aircraft puts ordnance on the ground. */
+  provokeAirResponse(amount = 1) {
+    if (this.status !== 'playing') return;
+    if (!this.playerJet && !this.flyingPlane) return;
+    this.airResponseHeat = Math.min(14, this.airResponseHeat + amount);
+    this.airResponse = Math.max(this.airResponse, 55);
+    if (this.airResponseT <= 0) this.airResponseT = 1.4;
+    if (this.airResponseWave === 0) {
+      this.setBanner('AIR RESPONSE', 'THEY SAW THE BOMBS — INTERCEPTORS SCRAMBLING');
+      this.addText(this.px, this.py - 110, 'AIR DEFENCE ALERTED', '#ffb08a', 17);
+      sfx.rotor();
+    }
+  }
+
+  private hunterCount() {
+    let n = 0;
+    for (const j of this.armyJets) if (j.hunter && j.state !== 'parked' && j.hp > 0) n++;
+    return n;
+  }
+
+  private scrambleWave() {
+    const heat = this.airResponseHeat;
+    this.airResponseWave++;
+    const want = clamp(1 + Math.round(heat * 0.55), 2, 5);
+    let sent = 0;
+    for (let i = 0; i < want; i++) {
+      if (this.hunterCount() >= 8) break;
+      // They come from the edge of the map, not from the apron, so the fight starts in the sky.
+      const a = rand(0, TAU);
+      const x = clamp(this.px + Math.cos(a) * rand(1900, 2700), 400, ARENA_W - 400);
+      const y = clamp(this.py + Math.sin(a) * rand(1900, 2700), 400, ARENA_H - 400);
+      this.armyJets.push({
+        x, y, ang: Math.atan2(this.py - y, this.px - x),
+        hp: 480, maxHp: 480, state: 'attack', alt: 340, speed: 580,
+        cool: rand(0.5, 1.6), t: 0, hunter: true,
+        rockets: 2 + Math.round(heat * 0.4),
+      });
+      sent++;
+    }
+    if (sent > 0) {
+      this.setBanner('AIR RESPONSE', `${sent} INTERCEPTOR${sent === 1 ? '' : 'S'} ON YOUR SIX — FLARES SPOOF THEIR ROCKETS`);
+      this.addText(this.px, this.py - 110, `WAVE ${this.airResponseWave} · ${sent} HUNTERS INBOUND`, '#ff9d9d', 17);
+      sfx.rotor();
+    }
+  }
+
+  private updateAirResponse(dt: number) {
+    this.jetFlareT = Math.max(0, this.jetFlareT - dt);
+    // Hunters are there to fight an aircraft. Once the operative is on the ground they
+    // break off and go home rather than strafing a man in the mud.
+    if (this.playerJet || this.flyingPlane) this.airResponseIdle = 0;
+    else this.airResponseIdle += dt;
+    if (this.airResponseIdle > 6) {
+      this.airResponse = 0;
+      this.airResponseHeat = 0;
+      this.airResponseWave = 0;
+      this.enemyRockets = [];
+      const before = this.armyJets.length;
+      this.armyJets = this.armyJets.filter((j) => !j.hunter);
+      if (this.armyJets.length !== before) this.addText(this.px, this.py - 90, 'HUNTERS BREAKING OFF', '#a9ecff', 14);
+      this.airResponseIdle = 0;
+    }
+    this.updateEnemyRockets(dt);
+    if (this.airResponseHeat > 0) this.airResponseHeat = Math.max(0, this.airResponseHeat - dt * 0.2);
+    if (this.airResponse > 0) {
+      this.airResponse -= dt;
+      this.airResponseT -= dt;
+      if (this.airResponseT <= 0) {
+        // The hotter it gets, the shorter the breather between waves.
+        this.airResponseT = clamp(18 - this.airResponseHeat, 5, 18);
+        this.scrambleWave();
+      }
+    } else if (this.airResponseHeat <= 0.01 && this.airResponseWave > 0) {
+      // Heat has bled off: the standing patrol goes home and the sky is quiet again.
+      this.airResponseWave = 0;
+      this.armyJets = this.armyJets.filter((j) => !j.hunter);
+      this.enemyRockets = [];
+      if (this.playerJet || this.flyingPlane) this.addText(this.px, this.py - 100, 'AIR DEFENCE STANDS DOWN', '#a9ecff', 14);
+    }
+    // A hunter that has been shot down leaves the board for good.
+    this.armyJets = this.armyJets.filter((j) => !(j.hunter && (j.state === 'parked' || j.hp <= 0)));
+  }
+
+  /** Hostile air-to-air rockets: they home, they hurt, and flares break their lock. */
+  private updateEnemyRockets(dt: number) {
+    for (let i = this.enemyRockets.length - 1; i >= 0; i--) {
+      const r = this.enemyRockets[i];
+      r.life -= dt;
+      if (r.spooked > 0) r.spooked -= dt;
+      const tx = this.px, ty = this.py;
+      if (r.spooked <= 0) {
+        const cur = Math.atan2(r.vy, r.vx);
+        // Lead the target: aim where the aircraft will be when the rocket gets there.
+        const spd = Math.min(1650, Math.hypot(r.vx, r.vy) + dt * 420);
+        const flight = Math.hypot(tx - r.x, ty - r.y) / Math.max(200, spd);
+        const lx = tx + this.pvx * flight * 0.7, ly = ty + this.pvy * flight * 0.7;
+        let d = Math.atan2(ly - r.y, lx - r.x) - cur;
+        d = Math.atan2(Math.sin(d), Math.cos(d));
+        const na = cur + clamp(d, -2.6 * dt, 2.6 * dt);
+        r.vx = Math.cos(na) * spd; r.vy = Math.sin(na) * spd;
+      }
+      r.x += r.vx * dt; r.y += r.vy * dt;
+      if (Math.random() < 0.85)
+        this.addParticle(r.x - r.vx * 0.012, r.y - r.vy * 0.012,
+          rand(-16, 16), rand(-16, 16), rand(0.3, 0.7), rand(2, 5),
+          r.spooked > 0 ? '#8fa0a8' : '#ffd8a0', true);
+      const reach = this.playerJet ? 96 : this.flyingPlane ? 130 : 44;
+      const hit = r.spooked <= 0 && Math.hypot(r.x - tx, r.y - ty) < reach;
+      if (hit) {
+        this.damagePlayer(r.dmg, r.x, r.y);
+        this.explode(r.x, r.y, 150, 0, true);
+        this.addText(tx, ty - 70, 'MISSILE HIT', '#ff9d9d', 14);
+        this.enemyRockets.splice(i, 1);
+        continue;
+      }
+      if (r.life <= 0) {
+        this.explode(r.x, r.y, 120, 0, false);
+        this.enemyRockets.splice(i, 1);
+      }
+    }
+  }
+
   private launchArmyAir() {
     // The sky belongs to one aircraft at a time. While the operative is flying a seized
     // interceptor, the army keeps everything else on the apron.
-    if (this.playerJet) return;
-    const jet = this.armyJets.find((j) => j.state === 'parked' && !j.manned);
+    if (this.playerJet && this.airResponse <= 0) return;
+    const jet = this.armyJets.find((j) => j.state === 'parked' && !j.manned && !j.hunter);
     if (jet) {
       jet.state = 'launch';
       jet.alt = 40; jet.speed = 260; jet.t = 0; jet.cool = 1.2;
@@ -2543,7 +2774,9 @@ export class Game {
   private updateArmyJets(dt: number) {
     for (const j of this.armyJets) {
       if (j.manned) continue;
-      if (this.playerJet && j.state !== 'parked') { j.state = 'parked'; j.alt = 0; j.speed = 0; continue; }
+      if (this.playerJet && !j.hunter && this.airResponse <= 0 && j.state !== 'parked') {
+        j.state = 'parked'; j.alt = 0; j.speed = 0; continue;
+      }
       if (j.state === 'parked') continue;
       j.t += dt;
       j.cool = Math.max(0, j.cool - dt);
@@ -2551,7 +2784,7 @@ export class Game {
       const dist = Math.hypot(dx, dy) || 1;
       if (j.state === 'launch') {
         j.alt = Math.min(360, j.alt + dt * 190);
-        j.speed = Math.min(560, j.speed + dt * 220);
+        j.speed = Math.min(j.hunter ? 900 : 560, j.speed + dt * 220);
         j.x += Math.cos(j.ang) * j.speed * dt;
         j.y += Math.sin(j.ang) * j.speed * dt;
         if (j.alt >= 330) { j.state = 'attack'; j.t = 0; }
@@ -2570,14 +2803,29 @@ export class Game {
         continue;
       }
       // ATTACK: hold an altitude, close, fire, overshoot
-      j.alt = j.alt + (340 - j.alt) * Math.min(1, dt * 2);
-      j.speed = j.speed + (520 - j.speed) * Math.min(1, dt * 2);
+      const cruiseAlt = j.hunter ? 300 : 340;
+      // A hunter has the legs to run down a fleeing jet: fast on the ingress, slower in the fight.
+      const cruiseSpd = j.hunter ? (dist > 900 ? 1180 : 780) : 520;
+      j.alt = j.alt + (cruiseAlt - j.alt) * Math.min(1, dt * 2);
+      j.speed = j.speed + (cruiseSpd - j.speed) * Math.min(1, dt * 2);
       const want = Math.atan2(dy, dx);
       const turn = ((want - j.ang + Math.PI * 3) % TAU) - Math.PI;
       j.ang += Math.max(-1.6 * dt, Math.min(1.6 * dt, turn));
       j.x += Math.cos(j.ang) * j.speed * dt;
       j.y += Math.sin(j.ang) * j.speed * dt;
       const aligned = Math.abs(turn) < 0.16;
+      // A hunter has rocket pods as well as guns, and it uses them on an airborne operative.
+      if (j.hunter && aligned && j.cool <= 0 && (j.rockets ?? 0) > 0) {
+        j.rockets = (j.rockets ?? 0) - 1;
+        j.cool = 2.6;
+        this.enemyRockets.push({
+          x: j.x + Math.cos(j.ang) * 40, y: j.y + Math.sin(j.ang) * 40,
+          vx: Math.cos(j.ang) * 900, vy: Math.sin(j.ang) * 900,
+          life: 9, dmg: 26, spooked: 0,
+        });
+        this.addText(j.x, j.y - 50, 'MISSILE AWAY', '#ffb08a', 12);
+        sfx.shoot('rocket');
+      }
       if (aligned && dist < 1500 && j.cool <= 0) {
         j.cool = 0.9;
         for (let i = 0; i < 3; i++) {
@@ -2591,8 +2839,8 @@ export class Game {
         this.addLight(j.x, j.y, 220, '255,220,150', 0.1);
         sfx.shoot('smg');
       }
-      if (dist < 320) { j.state = 'egress'; j.t = 0; }
-      if (j.t > 22) { j.state = 'egress'; j.t = 0; }
+      if (dist < (j.hunter ? 190 : 320)) { j.state = 'egress'; j.t = 0; }
+      if (j.t > (j.hunter ? 30 : 22)) { j.state = 'egress'; j.t = 0; }
     }
   }
 
@@ -2600,7 +2848,6 @@ export class Game {
 
   /** A parked army jet within reach of the operative, if there is one. */
   private nearArmyJet(): ArmyJet | null {
-    if (!this.army) return null;
     let best: ArmyJet | null = null, bd = 240;
     for (const j of this.armyJets) {
       if (j.manned || j.state !== 'parked') continue;
@@ -2712,6 +2959,10 @@ export class Game {
     if (!j) return;
     if ((j.flares ?? 0) <= 0) { this.addText(j.x, j.y - 60, 'NO FLARES LEFT', '#ff9d9d', 13); return; }
     j.flares = (j.flares ?? 0) - 1;
+    this.jetFlareT = Math.max(this.jetFlareT, 2.8);
+    for (const r of this.enemyRockets) {
+      if (Math.hypot(r.x - j.x, r.y - j.y) < 1400) r.spooked = 3.4;
+    }
     for (let i = 0; i < 8; i++) {
       const a = j.ang + Math.PI + rand(-0.9, 0.9);
       this.addParticle(j.x, j.y, Math.cos(a) * rand(120, 320), Math.sin(a) * rand(120, 320),
@@ -2816,6 +3067,7 @@ export class Game {
           });
         }
         this.addLight(j.x, j.y, 200, '190,240,255', 0.1);
+        this.provokeAirResponse(0.08);   // sustained strafing heats the air defence up
         sfx.shoot('rifle');
       }
     }
@@ -2862,6 +3114,7 @@ export class Game {
       }
       if (hit || m.life <= 0) {
         this.explode(m.x, m.y, 170, m.dmg * 0.5, true);
+        if (!m.air) this.provokeAirResponse(1.3);   // a missile into the ground is a bombing run
         this.jetMissiles.splice(i, 1);
       }
     }
@@ -3118,7 +3371,7 @@ export class Game {
   }
 
   private dispatchTruck(comp: string[], id: number, target: Point, mission?: string, stagger = 0) {
-    const parking = this.vans.filter(v => !v.dead && !v.reserved && !v.driving)
+    const parking = this.vans.filter(v => !v.dead && !v.reserved && !v.driving && !v.art)
       .sort((a, b) => Math.hypot(a.x - target.x, a.y - target.y) - Math.hypot(b.x - target.x, b.y - target.y))[0];
     if (parking) parking.reserved = true;
     let departure = this.routes.nearest(parking || { x: GOLIATH.x + (id % 2 ? 90 : -90), y: GOLIATH.y - 620 + (id % 9) * 150 });
@@ -3140,7 +3393,7 @@ export class Game {
    * break: they soak enormous damage, hit like a siege gun, and can be captured.
    */
   private dispatchTank(target: Point) {
-    const parking = this.vans.filter(v => !v.dead && !v.reserved && !v.driving && !v.disabled)
+    const parking = this.vans.filter(v => !v.dead && !v.reserved && !v.driving && !v.disabled && !v.art)
       .sort((a, b) => Math.hypot(a.x - target.x, a.y - target.y) - Math.hypot(b.x - target.x, b.y - target.y))[0];
     let departure = this.routes.nearest(parking || {
       x: GOLIATH.x + (this.tankSeq % 2 ? 260 : -260),
@@ -3737,7 +3990,12 @@ export class Game {
       .filter((b) => b.state !== 'sunk')
       .sort((a, b) => Math.hypot(a.x - this.px, a.y - this.py) - Math.hypot(b.x - this.px, b.y - this.py))[0];
     if (boat && Math.hypot(boat.x - this.px, boat.y - this.py) < 160) { this.enterBoat(boat); return; }
-    // 6) drive a van
+    // 6) requisition a parked vehicle, or stop and take one already on the road
+    const prop = this.nearDriveProp();
+    if (prop) { this.requisitionVehicle(prop); return; }
+    const moving = this.nearTrafficCar();
+    if (moving) { this.commandeerTraffic(moving); return; }
+    // 7) drive a van
     const van = this.vans.find((v) => !v.dead && !v.reserved && !v.disabled && Math.hypot(v.x - this.px, v.y - this.py) < 110);
     if (van) { this.enterVan(van); return; }
     // 7) fall back to the personal gunship
@@ -4275,6 +4533,9 @@ export class Game {
     }
     this.addText(this.px, this.py - 46, `+${reward}`, '#8be8ff', 18);
     this.hp = Math.max(60, Math.min(this.maxHp, this.hp + 40));
+    // The interceptor rolls out of the hangar with you: it is parked on the ice shelf where
+    // the operative can walk up to it and fly it without waiting for IRON RESERVE.
+    if (tookPlane) this.parkGlacierInterceptor();
     this.tellStory({
       id: 'glacier-vault',
       channel: 'S.H.I.E.L.D. / GLACIER WATCH',
@@ -4285,6 +4546,36 @@ export class Game {
     }, 13);
     sfx.wave();
     this.pushHud();
+  }
+
+  /**
+   * The Frostwing on the ice: a real, flyable interceptor parked beside the vault gate.
+   * It is the same airframe the army flies, so every control, the seeker, the missile
+   * stations and the countermeasures work exactly as they do over IRON RESERVE.
+   */
+  private parkGlacierInterceptor() {
+    const base = this.glacierSpot ?? { x: this.px, y: this.py };
+    let sx = base.x + 260, sy = base.y + 120;
+    let found = false;
+    for (let ring = 0; ring < 5 && !found; ring++) {
+      for (let k = 0; k < 12; k++) {
+        const a = (k / 12) * TAU;
+        const tx = base.x + Math.cos(a) * (240 + ring * 70);
+        const ty = base.y + Math.sin(a) * (240 + ring * 70) + 90;
+        if (!this.pointBlocked(tx, ty) && !this.pointBlocked(tx + 60, ty) && !this.pointBlocked(tx - 60, ty)) {
+          sx = tx; sy = ty; found = true; break;
+        }
+      }
+    }
+    this.armyJets = this.armyJets.filter((j) => j.manned);
+    this.armyJets.push({
+      x: sx, y: sy, ang: -Math.PI / 2, hp: 620, maxHp: 620,
+      state: 'parked', alt: 0, speed: 0, cool: 0, t: 0,
+    });
+    this.addText(sx, sy - 80, 'INTERCEPTOR ON THE ICE · PRESS F TO FLY', '#a9ecff', 17);
+    this.addText(sx, sy - 58, 'LMB FIRE · G MISSILE · X STATION · E ORBIT · SPACE FLARES · SHIFT BURN', '#8be8ff', 12);
+    this.flash = Math.max(this.flash, 0.25); this.flashColor = '150,235,255';
+    sfx.rotor();
   }
 
   /** Step through the sally port on the island, or wake up here after an arrest. */
@@ -4409,8 +4700,95 @@ export class Game {
     v.driving = true;
     this.px = v.x; this.py = v.y;
     this.pvx = 0; this.pvy = 0;
-    this.setBanner('TRANSPORT COMMANDEERED', 'W/S THROTTLE · A/D STEER · SHIFT RAM · F EXIT');
+    const label = v.art ? VAN_LABEL[v.art] : 'TRANSPORT';
+    this.setBanner(`${label} COMMANDEERED`, 'W/S THROTTLE · A/D STEER · SHIFT RAM · F EXIT');
     sfx.rotor();
+  }
+
+  /** The nearest parked vehicle the operative could take, if any. */
+  private nearDriveProp() {
+    let best: { rect: Rect; kind: 'car' | 'humvee' | 'bus' | 'tanker' | 'truck'; colour: string } | null = null;
+    let bestD = 130;
+    for (const p of this.driveProps) {
+      if (p.rect.dead) continue;
+      const cx = p.rect.x + p.rect.w / 2, cy = p.rect.y + p.rect.h / 2;
+      const d = Math.hypot(cx - this.px, cy - this.py);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    return best;
+  }
+
+  /**
+   * A parked lorry stops being scenery. The painted prop is retired (so the world is not
+   * left with a solid box where the vehicle used to be), and a real vehicle takes its
+   * place — same body, same colour, full throttle, and a hull that can be shot off.
+   */
+  private requisitionVehicle(p: { rect: Rect; kind: 'car' | 'humvee' | 'bus' | 'tanker' | 'truck'; colour: string }) {
+    if (p.rect.dead) return;
+    const cx = p.rect.x + p.rect.w / 2, cy = p.rect.y + p.rect.h / 2;
+    const horiz = p.rect.w >= p.rect.h;
+    p.rect.dead = true;
+    this.navigationDirty = true;
+    this.grid.build(this.obstacles);
+    const hp = p.kind === 'bus' || p.kind === 'tanker' ? 300 : p.kind === 'truck' ? 260 : 210;
+    // Vehicles park nose-in against walls and between crates. If the hull would start the
+    // drive buried in scenery, roll it out to the nearest gap instead of leaving the
+    // operative stuck at the wheel of a car that cannot move.
+    let sx = cx, sy = cy;
+    if (this.pointBlocked(sx, sy)) {
+      let found = false;
+      for (let ring = 1; ring <= 4 && !found; ring++) {
+        for (let k = 0; k < 12; k++) {
+          const a = (k / 12) * TAU;
+          const tx = cx + Math.cos(a) * ring * 46, ty = cy + Math.sin(a) * ring * 46;
+          if (!this.pointBlocked(tx, ty)) { sx = tx; sy = ty; found = true; break; }
+        }
+      }
+    }
+    const v: Van = {
+      x: sx, y: sy, ang: horiz ? 0 : Math.PI / 2, speed: 0, lean: 0,
+      hp, maxHp: hp, dead: false, driving: false, boost: 0,
+      art: p.kind, colour: p.colour,
+    };
+    this.vans.push(v);
+    this.enemies.forEach((e) => { if (Math.hypot(e.x - cx, e.y - cy) < 200) e.alert = true; });
+    this.sparks(cx, cy, '#c8cbb4', 14);
+    this.addText(cx, cy - 56, `${VAN_LABEL[p.kind]} REQUISITIONED`, '#a9ecff', 15);
+    this.score += 120;
+    sfx.click();
+    this.enterVan(v);
+  }
+
+  /** The nearest moving car, so traffic can be stopped and taken like anything else. */
+  private nearTrafficCar() {
+    let best: RoadCar | null = null;
+    let bestD = 120;
+    for (const c of this.roadCars) {
+      if (c.dead) continue;
+      const d = Math.hypot(c.x - this.px, c.y - this.py);
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    return best;
+  }
+
+  /**
+   * Stopping a moving car and taking it. The driver is long gone; the operative gets the
+   * body, the hull it had left and the road it was already on.
+   */
+  private commandeerTraffic(c: RoadCar) {
+    if (c.dead) return;
+    c.dead = true; c.burning = 0; c.panic = 0;
+    const v: Van = {
+      x: c.x, y: c.y, ang: c.ang, speed: 0, lean: 0,
+      hp: Math.max(60, c.hp), maxHp: c.maxHp, dead: false, driving: false, boost: 0,
+      art: c.kind, colour: c.colour,
+    };
+    this.vans.push(v);
+    this.sparks(c.x, c.y, '#c8cbb4', 12);
+    this.addText(c.x, c.y - 56, `${VAN_LABEL[c.kind]} TAKEN`, '#a9ecff', 15);
+    this.score += 150;
+    sfx.click();
+    this.enterVan(v);
   }
 
   private exitVan() {
@@ -4600,11 +4978,20 @@ export class Game {
     const fwd = this.isTouch ? -joystick.y : (k['w'] || k['arrowup'] ? 1 : 0) - (k['s'] || k['arrowdown'] ? 1 : 0);
     const steer = this.isTouch ? joystick.x : (k['d'] || k['arrowright'] ? 1 : 0) - (k['a'] || k['arrowleft'] ? 1 : 0);
     v.boost = k['shift'] ? Math.min(1, v.boost + dt * 2) : Math.max(0, v.boost - dt * 1.5);
-    const top = 451.5 + v.boost * 210;   // +5 % top speed, enemy transports and captured vans alike
-    const target = fwd > 0 ? top : fwd < 0 ? -150 : 0;
-    v.speed = lerp(v.speed, target, 1 - Math.pow(fwd !== 0 ? 0.22 : 0.05, dt));
-    // steering authority scales with speed, like a real heavy transport
-    const grip = clamp(Math.abs(v.speed) / 260, 0, 1);
+    // A requisitioned staff car is not an armoured personnel carrier. Each body has its own
+    // top speed and its own weight in a collision; the Hydra transport keeps its old figure.
+    const profile = v.art === 'car' ? { top: 640, rev: -210, accel: 0.34, grip: 320, ram: 0.8 }
+      : v.art === 'humvee' ? { top: 540, rev: -180, accel: 0.3, grip: 300, ram: 1 }
+      : v.art === 'ambulance' ? { top: 520, rev: -170, accel: 0.28, grip: 290, ram: 0.9 }
+      : v.art === 'truck' ? { top: 360, rev: -120, accel: 0.18, grip: 240, ram: 1.35 }
+      : v.art === 'bus' ? { top: 395, rev: -130, accel: 0.2, grip: 250, ram: 1.25 }
+      : v.art === 'tanker' ? { top: 345, rev: -110, accel: 0.17, grip: 230, ram: 1.5 }
+      : { top: 451.5, rev: -150, accel: 0.22, grip: 260, ram: 1 };
+    const top = profile.top + v.boost * profile.top * 0.45;
+    const target = fwd > 0 ? top : fwd < 0 ? profile.rev : 0;
+    v.speed = lerp(v.speed, target, 1 - Math.pow(fwd !== 0 ? profile.accel : 0.05, dt));
+    // steering authority scales with speed, like a real heavy vehicle
+    const grip = clamp(Math.abs(v.speed) / profile.grip, 0, 1);
     v.ang += steer * 1.5 * grip * dt * Math.sign(v.speed || 1);
     v.lean = lerp(v.lean, steer * grip * 0.4, 1 - Math.pow(0.01, dt));
 
@@ -4675,6 +5062,14 @@ export class Game {
       const a = v.turretAng, x = v.x + Math.cos(a) * 36, y = v.y + Math.sin(a) * 36;
       this.bullets.push({ x, y, px: x, py: y, vx: Math.cos(a) * 1400, vy: Math.sin(a) * 1400, dmg: 23, life: 0.9, friendly: true, color: '#92edff', r: 3, hits: [] });
       this.addLight(x, y, 150, '120,235,255', 0.1); sfx.shoot('rifle');
+    }
+    // a knocked-about street vehicle starts smoking long before it dies
+    if (v.art && v.hp < v.maxHp * 0.45 && Math.random() < 0.5) {
+      const ember = v.hp < v.maxHp * 0.2;
+      this.addParticle(v.x + rand(-8, 8), v.y - 10 + rand(-6, 6),
+        rand(-24, 24), rand(-70, -26), rand(0.5, 1.1), rand(3, 7),
+        ember ? '#ff9a5c' : '#5c635a', true);
+      if (ember) this.addLight(v.x, v.y, 90, '255,140,70', 0.12);
     }
     if (Math.abs(v.speed) > 60 && Math.random() < 0.7)
       this.addParticle(v.x - Math.cos(v.ang) * 84, v.y - Math.sin(v.ang) * 84,
@@ -4752,6 +5147,7 @@ export class Game {
       });
     }
     this.addText(p.x, p.y - 110, 'BOMBS AWAY', '#cdf6ff', 18);
+    this.provokeAirResponse(2.2);
     sfx.shoot('rocket');
   }
 
@@ -8075,7 +8471,7 @@ export class Game {
             dead = true; a.hp -= b.dmg; a.flash = 0.12; this.sparks(b.x, b.y, '#9fd8ff', 6); break;
           }
         }
-        const hitRadius = this.flyingPlane ? 115 : this.piloting ? 49 : this.playerTank ? 56 : this.drivingVan ? 52 : 16;
+        const hitRadius = this.flyingPlane ? 115 : this.playerJet ? 74 : this.piloting ? 49 : this.playerTank ? 56 : this.drivingVan ? 52 : 16;
         if (!dead && segmentCircle({ x: b.px, y: b.py }, b, { x: this.px, y: this.py }, hitRadius)) {
           dead = true; this.damagePlayer(b.dmg, b.x - b.vx * 0.12, b.y - b.vy * 0.12); this.sparks(b.x, b.y, '#ff8f8f', 8);
         }
@@ -8827,6 +9223,16 @@ export class Game {
     const difference = Math.abs(Math.atan2(Math.sin(sourceAngle - this.pang), Math.cos(sourceAngle - this.pang)));
     if (this.aegisTime > 0 && difference < 1.18) {
       this.sparks(this.px + Math.cos(this.pang) * 43, this.py + Math.sin(this.pang) * 43, '#b1f5ff', 5);
+      return;
+    }
+    // Flying a fast jet, the airframe eats the fire; the pilot only dies when it does.
+    if (this.playerJet) {
+      const j = this.playerJet;
+      j.hp = Math.max(0, j.hp - dmg * 0.85);
+      this.sparks(j.x, j.y, '#cfe8ff', 7);
+      this.flash = Math.max(this.flash, 0.12); this.flashColor = '200,235,255';
+      sfx.hit();
+      if (j.hp <= 0) this.addText(j.x, j.y - 80, 'AIRFRAME FAILING', '#ff9d9d', 15);
       return;
     }
     if (this.flyingPlane && this.plane) {
@@ -10498,7 +10904,8 @@ export class Game {
 
   /** Emplacements, jets, the base banner: everything that belongs to the army. */
   private drawArmyWorks(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
-    if (!this.army) return;
+    // Interceptors are not tied to a base: a jet taken out of the glacier flies wherever it
+    // is parked, so the aircraft, its ordnance and its seeker are drawn in every sector.
     const on = (x: number, y: number, pad = 220) =>
       x > camX - pad && x < camX + this.w + pad && y > camY - pad && y < camY + this.h + pad;
 
@@ -10568,6 +10975,20 @@ export class Game {
       ctx.beginPath(); ctx.moveTo(-12, -3); ctx.lineTo(-26, 0); ctx.lineTo(-12, 3); ctx.fill();
       ctx.restore();
     }
+    // hostile air-to-air rockets coming the other way
+    for (const m of this.enemyRockets) {
+      if (!on(m.x, m.y)) continue;
+      const a = Math.atan2(m.vy, m.vx);
+      const live = m.spooked <= 0;
+      ctx.save();
+      ctx.translate(m.x, m.y);
+      ctx.rotate(a);
+      ctx.fillStyle = live ? '#e6d2c4' : '#8b8f94';
+      ctx.beginPath(); ctx.roundRect(-14, -3.5, 26, 7, 3); ctx.fill();
+      ctx.fillStyle = live ? 'rgba(255,140,80,0.95)' : 'rgba(150,150,150,0.5)';
+      ctx.beginPath(); ctx.moveTo(-14, -4); ctx.lineTo(-32, 0); ctx.lineTo(-14, 4); ctx.fill();
+      ctx.restore();
+    }
     // seeker box on whatever the nose is holding
     const pj = this.playerJet;
     if (pj && pj.lock) {
@@ -10633,6 +11054,7 @@ export class Game {
 
     // base signage on the approach and over the parade ground
     const a = this.army;
+    if (!a) return;
     if (on(a.base.x + a.base.w / 2, a.base.y, 900)) {
       ctx.save();
       ctx.fillStyle = 'rgba(214,224,170,0.5)';
@@ -11428,8 +11850,9 @@ export class Game {
    * silhouette so a fuel bowser never reads as a staff car from a distance.
    */
   private drawRoadCar(ctx: CanvasRenderingContext2D, c: RoadCar) {
-    const L = c.kind === 'bus' ? 62 : c.kind === 'tanker' ? 56 : c.kind === 'humvee' ? 44 : c.kind === 'ambulance' ? 46 : 38;
-    const Wd = c.kind === 'bus' ? 20 : c.kind === 'tanker' ? 18 : 17;
+    const L = c.kind === 'bus' ? 62 : c.kind === 'tanker' ? 56 : c.kind === 'truck' ? 60
+      : c.kind === 'humvee' ? 44 : c.kind === 'ambulance' ? 46 : 38;
+    const Wd = c.kind === 'bus' ? 20 : c.kind === 'tanker' ? 18 : c.kind === 'truck' ? 19 : 17;
     const dark = this.blackout.active || this.sector >= 5;
     ctx.save();
     ctx.translate(c.x, c.y);
@@ -11497,6 +11920,23 @@ export class Game {
       ctx.fillRect(-L * 0.18, -Wd + 6, 9, 7);
       ctx.fillStyle = '#12201d';
       ctx.fillRect(-L * 0.18 + 2, -Wd + 8, 5, 3);
+    } else if (c.kind === 'truck') {
+      // cab forward, canvas tilt over a ribbed cargo bed, tailgate and mud flaps
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.beginPath(); ctx.roundRect(-L, -Wd + 1, L * 1.5, Wd * 2 - 2, 3); ctx.fill();
+      ctx.fillStyle = 'rgba(58,66,50,0.9)';
+      ctx.beginPath(); ctx.roundRect(-L + 2, -Wd + 2, L * 1.25, Wd * 2 - 4, 3); ctx.fill();
+      ctx.strokeStyle = 'rgba(24,30,22,0.55)'; ctx.lineWidth = 2;
+      for (let bx = -L + 8; bx < L * 0.25; bx += 16) {
+        ctx.beginPath(); ctx.moveTo(bx, -Wd + 3); ctx.lineTo(bx, Wd - 3); ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(30,36,28,0.75)';
+      ctx.fillRect(L * 0.26, -Wd + 1, 4, Wd * 2 - 2);
+      ctx.fillStyle = '#2b3a33';
+      ctx.beginPath(); ctx.roundRect(L * 0.3, -Wd + 1, L * 0.52, Wd * 2 - 2, 3); ctx.fill();
+      ctx.fillStyle = 'rgba(255,196,96,0.55)';
+      ctx.fillRect(-L + 3, -Wd + 4, 5, 6);
+      ctx.fillRect(-L + 3, Wd - 10, 5, 6);
     } else if (c.kind === 'ambulance') {
       // box body with a red cross on the roof and a light bar
       ctx.fillStyle = 'rgba(236,240,232,0.9)';
@@ -12505,10 +12945,49 @@ export class Game {
   }
 
   /** Hydra transport vans: parked in ranks, drivable, wreckable. */
+  /**
+   * A requisitioned street vehicle is drawn with the body it actually has, not with the
+   * Hydra transport shell. The road-car renderer already knows every one of these shapes,
+   * so the van borrows it and only supplies the state it lacks.
+   */
+  private roadCarView(v: Van): RoadCar {
+    return {
+      x: v.x, y: v.y, ang: v.ang, speed: v.speed,
+      kind: v.art || 'car', route: [], node: 0, wait: 0,
+      dead: false, colour: v.colour || '#7a7f6a', light: this.simulationTime * 2 + v.x * 0.01,
+      brake: 0, lean: v.lean, jammed: 0, hp: v.hp, maxHp: v.maxHp, burning: 0, panic: 0,
+    };
+  }
+
+  /** The burnt shell of a requisitioned vehicle: it stays where it died. */
+  private drawVanWreck(ctx: CanvasRenderingContext2D, v: Van) {
+    const ghost: RoadCar = { ...this.roadCarView(v), dead: true, burning: 0, speed: 0 };
+    this.drawRoadWreck(ctx, ghost);
+  }
+
   private drawVans(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     for (const v of this.vans) {
-      if (v.dead || v.reserved) continue;
+      if (v.reserved) continue;
       if (v.x < camX - 160 || v.x > camX + this.w + 160 || v.y < camY - 160 || v.y > camY + this.h + 160) continue;
+      if (v.dead) { if (v.art) this.drawVanWreck(ctx, v); continue; }
+      if (v.art) {
+        const near2 = !v.driving && Math.hypot(v.x - this.px, v.y - this.py) < 130
+          && !this.piloting && !this.flyingPlane && !this.playerTank && !this.drivingVan;
+        this.drawRoadCar(ctx, this.roadCarView(v));
+        if (v.hp < v.maxHp) {
+          const frac = Math.max(0, v.hp / v.maxHp);
+          ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(v.x - 32, v.y - 46, 64, 5);
+          ctx.fillStyle = frac > 0.35 ? '#8fe4c0' : '#f69a83'; ctx.fillRect(v.x - 32, v.y - 46, 64 * frac, 5);
+        }
+        if (near2) {
+          ctx.font = '900 9px ui-monospace, monospace';
+          ctx.fillStyle = 'rgba(169,236,255,0.9)';
+          ctx.textAlign = 'center';
+          ctx.fillText(`[F] DRIVE ${VAN_LABEL[v.art] || 'VEHICLE'}`, v.x, v.y - 54);
+          ctx.textAlign = 'left';
+        }
+        continue;
+      }
       const near = !v.driving && !v.disabled && Math.hypot(v.x - this.px, v.y - this.py) < 130 && !this.piloting && !this.flyingPlane && !this.playerTank;
       drawTransport(ctx, v, this.simulationTime, 0, near ? '[F] ARMED TRANSPORT' : '');
       if (v.disabled) {
