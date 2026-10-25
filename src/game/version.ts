@@ -20,10 +20,10 @@ export interface GameVersion {
 
 export const GAME_VERSION: GameVersion = {
   major: 1,
-  minor: 40,
+  minor: 41,
   patch: 0,
-  round: 40,
-  codename: 'QUIET WATER',
+  round: 41,
+  codename: 'GLACIER VAULT LIT',
   date: '2026-10-25',
 };
 
