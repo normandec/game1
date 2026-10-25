@@ -108,7 +108,7 @@ export function HudLayer({
         </div>
 
         <div className="hud-panel clip-corner px-3 py-2 text-center md:px-6 md:py-3">
-          <div className="text-[9px] uppercase tracking-[0.35em] text-teal-300/70">Sector {hud.sector}/5 · Wave</div>
+          <div className="text-[9px] uppercase tracking-[0.35em] text-teal-300/70">Sector {hud.sector}/6 · Wave</div>
           <div className="font-tech text-xl leading-none font-bold text-teal-200 md:text-3xl">
             {String(hud.wave).padStart(2, '0')}
           </div>
@@ -554,6 +554,7 @@ export function MenuScreen({
                   <li>◈ G or RMB — frag grenade</li>
                   <li>◈ F — interact · seize a vehicle · break the stockade</li>
                   <li>◈ I / TAB — the kit (loadout, cipher keys, airframes)</li>
+                  <li>◈ 1–7 — shoulder a carried weapon · R — reload from reserve</li>
                   <li>◈ L — hydraulic gate · C — AEGIS cell · V — vault guide</li>
                   <li>◈ ESC / P — pause</li>
                 </>
@@ -561,7 +562,7 @@ export function MenuScreen({
               <li className="text-amber-300/80">◈ Loot 🛡 SHIELDS block frontal fire</li>
               <li className="text-amber-300/80">◈ M79 THUMPER lobs 190-radius blasts</li>
               <li className="text-amber-300/80">◈ Upgrade after every wave · 1/2/3 keys</li>
-              <li className="text-amber-300/80">◈ Shoot green CACHES for loot</li>
+              <li className="text-amber-300/80">◈ Shoot green CACHES for loot · gold AMMO cans refill every tube</li>
             </ul>
           </div>
           <div className="hud-panel clip-corner p-4 text-left">
@@ -895,7 +896,7 @@ export function VictoryScreen({
         <div className="hud-panel clip-corner grid w-full max-w-lg grid-cols-4 gap-2 p-4 text-center">
           <Stat label="Score" value={hud.score.toLocaleString()} />
           <Stat label="Wave" value={String(hud.wave)} />
-          <Stat label="Bases" value="5/5" />
+          <Stat label="Bases" value="6/6" />
           <Stat label="Combo" value={`x${hud.mult}`} />
         </div>
 

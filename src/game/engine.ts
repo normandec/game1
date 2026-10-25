@@ -274,6 +274,12 @@ interface RoadCar {
   /** Seconds of panic: gunfire nearby stops the car and turns its hazards on. */
   panic: number;
 }
+/** A pedestrian on the shoulder: dock workers, clerks, a courier. They are not targets. */
+interface Ped {
+  x: number; y: number; ang: number; speed: number;
+  route: { x: number; y: number }[]; node: number;
+  panic: number; kind: 'worker' | 'clerk' | 'courier'; phase: number;
+}
 /** A routine the garrison performs on a timer: PT, shift change, refuel, alarm test. */
 interface ArmyRoutine {
   kind: 'pt' | 'shift' | 'siren' | 'drill' | 'crane' | 'colors' | 'fuel' | 'muster' | 'wash' | 'k9';
@@ -399,7 +405,10 @@ interface Wounded {
   x: number; y: number; type: string; t: number; squadId: number;
   beingCarried: boolean; carrier: number;
 }
-interface Pickup { kind: 'health' | 'grenade' | 'weapon' | 'shield' | 'aegis'; weapon?: string; x: number; y: number; t: number; life: number; }
+interface Pickup {
+  kind: 'health' | 'grenade' | 'weapon' | 'shield' | 'aegis' | 'ammo';
+  weapon?: string; x: number; y: number; t: number; life: number;
+}
 interface FloatText { x: number; y: number; vy: number; life: number; max: number; text: string; color: string; size: number; }
 interface Grenade { x: number; y: number; vx: number; vy: number; t: number; z: number; vz: number; dmg: number; big?: boolean; bomb?: boolean; }
 interface EGrenade {
@@ -527,6 +536,13 @@ export class Game {
   airTransports: AirTransport[] = [];
   airTroops: AirborneTrooper[] = [];
   ruins: Ruin[] = [];
+  /** People on the shoulders. The district is worked, not just garrisoned. */
+  private peds: Ped[] = [];
+  /** Pylon heads and the sagging spans between them: the district has a power line. */
+  private pylons: { x: number; y: number; h: number; links: number[] }[] = [];
+  /** Birds: gulls over the water, crows over the prison, whatever the district has. */
+  private birds: { ax: number; ay: number; a: number; r: number; speed: number; alt: number; flap: number; kind: 'gull' | 'crow' }[] = [];
+
   /* ---------------- sector dressing: weather that is really there ---------------- */
   private dressing: SectorDressing | null = null;
   /** Snowploughs working their lanes (Arctic only). */
@@ -1023,6 +1039,68 @@ export class Game {
     this.simulationTime = 0; this.vaultResupplied = false; this.aegisCharges = 0; this.aegisTime = 0;
     this.vaultNav = false; this.navigationDirty = true;
     this.grid.build(this.obstacles);
+    // The power line: every pylon head, wired to its nearest neighbour once, so the spans
+    // never change and nothing has to be recomputed per frame.
+    this.pylons = this.obstacles.filter((o) => o.kind === 'pylon' && !o.dead)
+      .map((o) => ({ x: o.x + o.w / 2, y: o.y + o.h / 2, h: Math.min(o.h3d, 210), links: [] as number[] }));
+    for (let i = 0; i < this.pylons.length; i++) {
+      let best = -1, bestD = 1e9;
+      for (let j = 0; j < this.pylons.length; j++) {
+        if (i === j) continue;
+        const d = Math.hypot(this.pylons[i].x - this.pylons[j].x, this.pylons[i].y - this.pylons[j].y);
+        if (d < bestD) { bestD = d; best = j; }
+      }
+      if (best >= 0 && bestD < 1500 && i < best) { this.pylons[i].links.push(best); this.pylons[best].links.push(i); }
+    }
+    // Birds: three flocks per district, anchored to open ground and water so they are
+    // always visible from somewhere. The Arctic gets none — nothing lives up there.
+    this.birds = [];
+    if (this.sector !== 3) {
+      const crow = this.sector === 5 || this.sector >= 6;
+      for (let f = 0; f < 3; f++) {
+        const ax = rand(1200, ARENA_W - 1200), ay = rand(900, ARENA_H - 900);
+        const n = 5 + Math.floor(rand(0, 5));
+        for (let i = 0; i < n; i++) {
+          this.birds.push({
+            ax, ay, a: rand(0, TAU), r: rand(120, 380), speed: rand(0.22, 0.5) * (Math.random() < 0.5 ? 1 : -1),
+            alt: rand(60, 190), flap: rand(0, TAU), kind: crow ? 'crow' : 'gull',
+          });
+        }
+      }
+    }
+    // Pedestrians: two shifts walking the shoulders of the longest roads. They keep to the
+    // verge, they never enter a lane, and gunfire sends them running.
+    this.peds = [];
+    {
+      const roads = this.zones.filter((z) => z.kind === 'road' && Math.max(z.w, z.h) > 700);
+      const kinds: Ped['kind'][] = ['worker', 'clerk', 'courier'];
+      for (const [ri, z] of roads.entries()) {
+        const horiz = z.w >= z.h;
+        const len = horiz ? z.w : z.h;
+        const thick = horiz ? z.h : z.w;
+        const count = ri < 4 ? 4 : 2;
+        for (let i = 0; i < count; i++) {
+          const side = (i % 2 === 0 ? -1 : 1) * (thick / 2 - 16);
+          const a = side > 0 ? 0 : Math.PI;
+          const offX = horiz ? 0 : side, offY = horiz ? side : 0;
+          const p0 = horiz
+            ? { x: z.x + 120, y: z.y + z.h / 2 + offY }
+            : { x: z.x + z.w / 2 + offX, y: z.y + 120 };
+          const p1 = horiz
+            ? { x: z.x + len - 120, y: z.y + z.h / 2 + offY }
+            : { x: z.x + z.w / 2 + offX, y: z.y + len - 120 };
+          // A shoulder is only a pavement if it is clear: a building that grew out over the
+          // verge turns that stretch of road into a wall, and a pedestrian walking through
+          // it reads as a bug. Trim to the clear span, or skip the walker entirely.
+          if (this.pointBlocked(p0.x, p0.y) || this.pointBlocked(p1.x, p1.y)) continue;
+          this.peds.push({
+            x: p0.x + rand(0, 60), y: p0.y + rand(-6, 6), ang: horiz ? a : Math.PI / 2,
+            speed: rand(44, 68), route: [p0, p1], node: 1, panic: 0,
+            kind: kinds[(ri + i) % 3], phase: rand(0, TAU),
+          });
+        }
+      }
+    }
     this.garrisonSpots = world.garrisonSpots;
     this.coderSpots = world.coderSpots;
     this.generalSpot = world.generalSpot;
@@ -1080,7 +1158,12 @@ export class Game {
     this.pang = -Math.PI / 2;
     this.hp = this.maxHp = 100;
     this.shieldHp = 0; this.shieldMax = 0;
-    this.weapon = 'rifle'; this.ammo = Infinity; this.weaponAmmo.clear();
+    // The kit is the operative's, not the sector's: swapping worlds keeps the tubes, the
+    // magazines and the morale of the person carrying them.
+    const carried = new Map(this.weaponAmmo);
+    if (WEAPONS[this.weapon]?.ammo !== Infinity) carried.set(this.weapon, this.ammo);
+    this.weapon = 'rifle'; this.ammo = Infinity;
+    this.weaponAmmo = carried;
     this.fireCd = 0; this.dashCd = 0; this.dashT = 0; this.iFrames = 0;
     this.grenades = 4; this.recoil = 0;
     this.score = 0; this.wave = 0; this.streak = 0; this.streakT = 0; this.mult = 1; this.bestMult = 1;
@@ -1470,7 +1553,7 @@ export class Game {
     // Number keys shoulder a carried weapon; the same key twice puts it away for the carbine.
     if (!this.playerJet && !this.playerTank && !this.drivingVan && !this.flyingPlane && !this.piloting && !this.drivingBoat) {
       const slot = Number(k);
-      if (slot >= 1 && slot <= 6) {
+      if (slot >= 1 && slot <= 7) {
         const list = this.carriedWeapons();
         const target = list[slot - 1];
         if (target) {
@@ -1480,6 +1563,7 @@ export class Game {
       }
     }
     if (k === 'l') this.toggleGate();
+    if (k === 'r') this.reloadWeapon();
     if (k === 'c') this.activateAegis();
     if (k === 'v') this.toggleVaultRoute();
   };
@@ -1953,6 +2037,26 @@ export class Game {
     this.updateArmy(dt);
     this.updateTraffic(dt);
     this.updateRoutines(dt);
+    for (const b of this.birds) { b.a += b.speed * dt; b.flap += dt * (b.kind === 'crow' ? 9 : 6); }
+    for (const p of this.peds) {
+      p.phase += dt * 6;
+      if (p.panic > 0) p.panic = Math.max(0, p.panic - dt);
+      const t = p.route[p.node];
+      const dx = t.x - p.x, dy = t.y - p.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const sp = p.speed * (p.panic > 0 ? 2.6 : 1);
+      const nx = p.x + (dx / d) * sp * dt, ny = p.y + (dy / d) * sp * dt;
+      p.ang = Math.atan2(dy, dx);
+      if (this.pointBlocked(nx, ny)) {
+        // Something is in the way — a grown building, a parked transport, a crate someone
+        // dropped on the verge. Turn round and walk the other way.
+        p.node = (p.node + 1) % p.route.length;
+        p.x -= (dx / d) * 10; p.y -= (dy / d) * 10;
+      } else {
+        p.x = nx; p.y = ny;
+      }
+      if (d < 24) p.node = (p.node + 1) % p.route.length;
+    }
     if (this.status !== 'playing') return;
     this.updateSquads(dt);
     this.updateEnemies(dt);
@@ -2160,6 +2264,18 @@ export class Game {
    * Base traffic. Vehicles hold their spacing in a convoy, brake for the operative and
    * for each other, and go round their circuit all day whether anyone is watching or not.
    */
+  /**
+   * A vehicle stops being a vehicle: the hull is lost, the wreck burns for a while, and the
+   * blast it makes is real. Everything that can damage traffic funnels through here.
+   */
+  private wreckRoadCar(c: RoadCar) {
+    if (c.dead) return;
+    c.dead = true; c.burning = 26; c.panic = 0;
+    this.score += 120;
+    this.explode(c.x, c.y, 74, 0, true);
+    this.addText(c.x, c.y - 60, 'VEHICLE LOST', '#ffb08a', 13);
+  }
+
   private updateTraffic(dt: number) {
     for (const c of this.roadCars) {
       if (c.dead) {
@@ -5570,7 +5686,10 @@ export class Game {
 
   /** Everything the operative could shoulder right now, in kit order. */
   private carriedWeapons(): { id: string; ammo: number }[] {
-    const order = ['rifle', 'shotgun', 'smg', 'rocket', 'gl'];
+    // The DMR and the heavy MG are real pickups (armoury crates, sniper lockers, drops), but
+    // they were missing from this list, which meant that carrying one took a slot away from
+    // the carbine and left the gun unreachable from the number keys.
+    const order = ['rifle', 'shotgun', 'smg', 'rocket', 'gl', 'dmr', 'hmg'];
     const out: { id: string; ammo: number }[] = [];
     for (const id of order) {
       if (!WEAPONS[id]) continue;
@@ -5611,6 +5730,31 @@ export class Game {
     return true;
   }
 
+  /**
+   * R tops the gun up from the reserve: the tube in your hands pulls rounds out of the
+   * banked pile for the same weapon, so a half-empty magazine is never thrown away by a
+   * careless pickup. The carbine needs nothing, and a tube with no reserve says so.
+   */
+  reloadWeapon() {
+    if (this.status !== 'playing') return;
+    if (this.playerJet || this.playerTank || this.drivingVan || this.flyingPlane || this.piloting || this.drivingBoat) return;
+    const W = WEAPONS[this.weapon];
+    if (!W || this.ammo === Infinity) {
+      this.addText(this.px, this.py - 34, 'NO RESERVE — UNLIMITED', '#9fb3c8', 13);
+      return;
+    }
+    const banked = this.weaponAmmo.get(this.weapon) ?? 0;
+    const want = W.ammo - this.ammo;
+    if (want <= 0.5) { this.addText(this.px, this.py - 34, `${W.short} — FULL`, '#9fb3c8', 13); return; }
+    if (banked <= 0) { this.addText(this.px, this.py - 34, `${W.short} — NO SPARE`, '#ff9d80', 13); return; }
+    const take = Math.min(want, banked);
+    this.ammo += take;
+    const left = banked - take;
+    if (left > 0.5) this.weaponAmmo.set(this.weapon, left); else this.weaponAmmo.delete(this.weapon);
+    sfx.click();
+    this.addText(this.px, this.py - 40, `RELOAD ${W.short} +${Math.floor(take)}`, W.color, 14);
+  }
+
   /** The next weapon with rounds in it, or the carbine when everything is dry. */
   private fallbackWeapon(): string {
     const list = this.carriedWeapons().filter((w) => w.id !== this.weapon);
@@ -5627,7 +5771,11 @@ export class Game {
     const by = this.py + Math.sin(this.pang) * muzzle;
     const dmg = W.dmg * M.damageMul, spread = W.spread * M.spreadMul;
 
-    // The street reacts: anything within earshot stops and puts its hazards on.
+    // The street reacts: anything within earshot stops and puts its hazards on, and the
+    // people on the verge run for the nearest cover they can find.
+    for (const p of this.peds) {
+      if (Math.abs(p.x - this.px) < 900 && Math.abs(p.y - this.py) < 900) p.panic = 2.4 + rand(0, 1.8);
+    }
     for (const c of this.roadCars) {
       if (c.dead || c.panic > 0) continue;
       if (Math.abs(c.x - this.px) < 900 && Math.abs(c.y - this.py) < 900) c.panic = 2.6 + rand(0, 1.4);
@@ -6169,7 +6317,8 @@ export class Game {
     else this.dropPickup(t.x, t.y, 'shield');
     // A convoy is worth the ambush: whatever it never delivered spills out as heavy
     // ordnance. More riders still aboard means more crates scattered on the road.
-    const haul = t.rescue ? ['health', 'health', 'aegis', 'shield'] : ['rocket', 'hmg', 'shotgun', 'smg', 'grenade', 'shield'];
+    const haul = t.rescue ? ['health', 'health', 'aegis', 'shield', 'ammo']
+      : ['rocket', 'hmg', 'shotgun', 'smg', 'grenade', 'shield', 'ammo', 'ammo'];
     const crates = Math.min(3, 1 + Math.floor(remaining / 3));
     for (let k = 0; k < crates; k++) {
       const a = rand(0, TAU), d = rand(28, 78);
@@ -6518,7 +6667,7 @@ export class Game {
         // payload: 2-3 pickups
         const n = 2 + (Math.random() < 0.5 ? 1 : 0);
         const pool: (Pickup['kind'] | [Pickup['kind'], string])[] = [
-          'health', 'shield', 'grenade', ['weapon', 'shotgun'], ['weapon', 'dmr'], ['weapon', 'smg'],
+          'health', 'shield', 'grenade', 'ammo', ['weapon', 'shotgun'], ['weapon', 'dmr'], ['weapon', 'smg'],
         ];
         for (let k = 0; k < n; k++) {
           const pick = pool[Math.floor(Math.random() * pool.length)];
@@ -7789,6 +7938,18 @@ export class Game {
               break;
             }
           }
+          // a staff car on the ring road is not an armoured transport
+          if (!dead) for (const c of this.roadCars) {
+            if (c.dead || c.x < bx0 || c.x > bx1 || c.y < by0 || c.y > by1) continue;
+            if (segmentCircle({ x: b.px, y: b.py }, b, c, 26 + b.r)) {
+              dead = true;
+              c.hp -= b.dmg;
+              this.sparks(b.x, b.y, '#ffd166', 5);
+              if (c.hp <= 0) this.wreckRoadCar(c);
+              else c.panic = Math.max(c.panic, 3.2);
+              break;
+            }
+          }
           // beam batteries can be destroyed instead of captured
           if (!dead) for (const l of this.lasers) {
             if (l.captured || l.x < bx0 || l.x > bx1 || l.y < by0 || l.y > by1) continue;
@@ -8279,7 +8440,7 @@ export class Game {
       if (r < 0.34) this.dropPickup(e.x, e.y, 'health');
       else if (r < 0.56) this.dropPickup(e.x, e.y, 'grenade');
       else {
-        const pool = ['shotgun', 'smg', 'smg', 'dmr', 'shotgun', 'rocket', 'gl', 'dmr', 'gl'];
+        const pool = ['shotgun', 'smg', 'smg', 'dmr', 'shotgun', 'rocket', 'gl', 'dmr', 'gl', 'ammo', 'ammo'];
         this.dropPickup(e.x, e.y, 'weapon', pool[Math.floor(Math.random() * pool.length)]);
       }
     }
@@ -8291,7 +8452,7 @@ export class Game {
     this.flash = 1; this.flashColor = '255,220,140';
     this.score += 18000 + this.sector * 7000;
     this.objective = `HYDRA BASE ${this.sector}/6 DESTROYED`;
-    this.setBanner('DECAPITATION STRIKE', `HYDRA COMMAND ${this.sector}/5 ELIMINATED`);
+    this.setBanner('DECAPITATION STRIKE', `HYDRA COMMAND ${Math.min(this.sector, 6)}/6 ELIMINATED`);
     sfx.explode();
     for (let i = 0; i < 160; i++) {
       const a = rand(0, TAU), v = rand(60, 780);
@@ -8443,15 +8604,8 @@ export class Game {
       const d = Math.hypot(c.x - x, c.y - y);
       if (d > radius + 46) continue;
       c.hp -= dmg * (1.4 - Math.min(1, d / (radius + 46)));
-      if (c.hp <= 0) {
-        c.dead = true; c.burning = 26;
-        this.score += 120;
-        this.explode(c.x, c.y, 74, 0, true);
-        this.addText(c.x, c.y - 60, 'VEHICLE LOST', '#ffb08a', 13);
-      } else {
-        c.wait = Math.max(c.wait, 2.4);
-        c.panic = Math.max(c.panic, 3.2);
-      }
+      if (c.hp <= 0) this.wreckRoadCar(c);
+      else { c.wait = Math.max(c.wait, 2.4); c.panic = Math.max(c.panic, 3.2); }
     }
     if (dmg > 0) {
       const sitesExplosion = this.campaignSites;
@@ -8624,15 +8778,42 @@ export class Game {
           }
         }
         else if (p.kind === 'grenade') { this.grenades = Math.min(this.mods.grenadeCap, this.grenades + 2); this.addText(this.px, this.py - 34, '+2 FRAG', '#9ad8ff', 20); }
+        else if (p.kind === 'ammo') {
+          // A resupply can fills every tube the operative is carrying, the one in their
+          // hands included. This is what makes carrying five weapons a plan, not a chore.
+          let given = 0;
+          for (const [id, def] of Object.entries(WEAPONS)) {
+            if (def.ammo === Infinity) continue;
+            if (id === this.weapon) {
+              const add = Math.ceil(def.ammo * 0.6);
+              this.ammo = Math.min(def.ammo * 2, this.ammo + add);
+              given += add;
+            } else if (this.weaponAmmo.has(id) || id === 'pistol') {
+              const add = Math.ceil(def.ammo * 0.6);
+              this.weaponAmmo.set(id, (this.weaponAmmo.get(id) ?? 0) + add);
+              given += add;
+            }
+          }
+          this.addText(this.px, this.py - 34, `RESUPPLY +${given} ROUNDS`, '#ffd166', 18);
+        }
         else {
           const w = p.weapon!;
-          // Bank what we are holding, then take the better of the crate's load and whatever
-          // this weapon still had stored - spare rockets survive swapping tubes.
-          if (this.ammo !== Infinity) this.weaponAmmo.set(this.weapon, this.ammo);
-          const fresh = WEAPONS[w].ammo;
-          this.weapon = w;
-          this.ammo = fresh === Infinity ? Infinity : Math.max(fresh, this.weaponAmmo.get(w) ?? 0);
-          this.addText(this.px, this.py - 34, WEAPONS[w].name + (fresh !== Infinity && (this.weaponAmmo.get(w) ?? 0) > fresh ? ` / ${this.ammo} ROUNDS KEPT` : ''), WEAPONS[w].color, 20);
+          // Bank what we are holding, then ADD the crate's load to whatever this weapon still
+          // had stored. The old code took the larger of the two, which deleted the spare pile
+          // every time the same weapon was picked up a second time.
+          if (this.weapon === w) {
+            this.ammo = WEAPONS[w].ammo === Infinity ? Infinity : this.ammo + WEAPONS[w].ammo;
+          } else {
+            if (this.ammo !== Infinity) this.weaponAmmo.set(this.weapon, this.ammo);
+            const fresh = WEAPONS[w].ammo;
+            const stored = this.weaponAmmo.get(w) ?? 0;
+            this.weapon = w;
+            this.ammo = fresh === Infinity ? Infinity : fresh + stored;
+          }
+          this.weaponAmmo.delete(w);
+          this.addText(this.px, this.py - 34,
+            WEAPONS[w].ammo === Infinity ? WEAPONS[w].name : `${WEAPONS[w].name} / ${Math.floor(this.ammo)} ROUNDS`,
+            WEAPONS[w].color, 20);
         }
         continue;
       }
@@ -8890,12 +9071,14 @@ export class Game {
     this.drawZones(ctx, camX, camY);
     this.drawSuspensionBridge(ctx, camX, camY);
     this.drawSnowWorks(ctx, camX, camY);
+    this.drawPowerLines(ctx, camX, camY);
     this.drawTrafficAndRoutines(ctx, camX, camY);
     this.facilityPainter.drawGround(ctx, this.facilities, { x: camX, y: camY, w: this.w, h: this.h }, this.simulationTime);
     drawRuins(ctx, this.ruins, { x: camX, y: camY, w: this.w, h: this.h });
     this.drawDecals(ctx, camX, camY);
     this.drawHQFloor(ctx, camX, camY);
     this.drawStructures(ctx, camX, camY);
+    this.drawBirds(ctx, camX, camY);
     this.drawPrisonDecor(ctx, camX, camY);
     drawDetails(ctx, this.details, { x: camX, y: camY, w: this.w, h: this.h }, this.simulationTime);
     this.drawBarrels(ctx, camX, camY);
@@ -9302,7 +9485,7 @@ export class Game {
     ctx.textAlign = 'center';
     ctx.fillStyle = next.accent;
     ctx.font = `900 ${clamp(this.w * 0.035, 24, 52)}px "Chakra Petch", sans-serif`;
-    ctx.fillText(`DEPLOYING TO SECTOR ${this.sector + 1}/5`, this.w / 2, this.h * 0.16);
+    ctx.fillText(`DEPLOYING TO SECTOR ${this.sector + 1}/6`, this.w / 2, this.h * 0.16);
     ctx.fillStyle = '#f5fbfa';
     ctx.font = `900 ${clamp(this.w * 0.025, 19, 36)}px "Chakra Petch", sans-serif`;
     ctx.fillText(next.name, this.w / 2, this.h * 0.22);
@@ -9612,16 +9795,101 @@ export class Game {
     for (const z of this.zones) {
       if (z.x + z.w < camX - 60 || z.x > camX + this.w + 60 || z.y + z.h < camY - 60 || z.y > camY + this.h + 60) continue;
       switch (z.kind) {
-        case 'road':
+        case 'road': {
           ctx.fillStyle = this.sector === 2 ? '#2a2019' : this.sector === 3 ? '#1e292d' : this.sector === 5 ? '#24151a' : '#171d1c';
           ctx.fillRect(z.x, z.y, z.w, z.h);
-          ctx.strokeStyle = 'rgba(230,200,120,0.16)';
+          const horiz = z.w >= z.h;
+          const len = horiz ? z.w : z.h;
+          const thick = horiz ? z.h : z.w;
+          const cxR = z.x + z.w / 2, cyR = z.y + z.h / 2;
+          // Resurfacing patches and oil: a road is never one flat colour.
+          const seed = Math.abs(Math.floor(z.x * 0.37 + z.y * 0.71)) % 97;
+          ctx.fillStyle = 'rgba(255,255,255,0.028)';
+          for (let p = 0; p < 5; p++) {
+            const t = ((seed + p * 31) % 100) / 100;
+            const pw = 70 + ((seed + p * 17) % 90), ph = Math.min(thick * 0.6, 40 + ((seed + p * 13) % 60));
+            ctx.fillRect(horiz ? z.x + t * (len - pw) : cxR - ph / 2,
+              horiz ? cyR - ph / 2 : z.y + t * (len - pw), horiz ? pw : ph, horiz ? ph : pw);
+          }
+          // Edge lines: the painted shoulder line on both sides.
+          ctx.strokeStyle = 'rgba(228,232,220,0.14)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          if (horiz) {
+            ctx.moveTo(z.x, z.y + 7); ctx.lineTo(z.x + z.w, z.y + 7);
+            ctx.moveTo(z.x, z.y + z.h - 7); ctx.lineTo(z.x + z.w, z.y + z.h - 7);
+          } else {
+            ctx.moveTo(z.x + 7, z.y); ctx.lineTo(z.x + 7, z.y + z.h);
+            ctx.moveTo(z.x + z.w - 7, z.y); ctx.lineTo(z.x + z.w - 7, z.y + z.h);
+          }
+          ctx.stroke();
+          // Centre line, doubled where the road is wide enough to have two lanes each way.
+          ctx.strokeStyle = 'rgba(230,200,120,0.20)';
           ctx.lineWidth = 4; ctx.setLineDash([46, 42]);
           ctx.beginPath();
-          if (z.w > z.h) { ctx.moveTo(z.x, z.y + z.h / 2); ctx.lineTo(z.x + z.w, z.y + z.h / 2); }
-          else { ctx.moveTo(z.x + z.w / 2, z.y); ctx.lineTo(z.x + z.w / 2, z.y + z.h); }
+          if (horiz) { ctx.moveTo(z.x, cyR); ctx.lineTo(z.x + z.w, cyR); }
+          else { ctx.moveTo(cxR, z.y); ctx.lineTo(cxR, z.y + z.h); }
           ctx.stroke(); ctx.setLineDash([]);
+          if (thick > 150) {
+            ctx.strokeStyle = 'rgba(230,200,120,0.13)';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            if (horiz) {
+              ctx.moveTo(z.x, cyR - 12); ctx.lineTo(z.x + z.w, cyR - 12);
+              ctx.moveTo(z.x, cyR + 12); ctx.lineTo(z.x + z.w, cyR + 12);
+            } else {
+              ctx.moveTo(cxR - 12, z.y); ctx.lineTo(cxR - 12, z.y + z.h);
+              ctx.moveTo(cxR + 12, z.y); ctx.lineTo(cxR + 12, z.y + z.h);
+            }
+            ctx.stroke();
+          }
+          // Zebra crossing every ~880 px, with the stop line before it.
+          const zebraStep = 880;
+          for (let d = 380 + (seed % 5) * 40; d < len - 240; d += zebraStep) {
+            const bars = Math.max(4, Math.min(9, Math.floor(thick / 22)));
+            ctx.fillStyle = 'rgba(232,238,228,0.22)';
+            for (let b = 0; b < bars; b++) {
+              const off = (b - (bars - 1) / 2) * (thick / bars);
+              if (horiz) ctx.fillRect(z.x + d, cyR + off - thick / bars * 0.3, 26, thick / bars * 0.6);
+              else ctx.fillRect(cxR + off - thick / bars * 0.3, z.y + d, thick / bars * 0.6, 26);
+            }
+            ctx.fillStyle = 'rgba(232,238,228,0.18)';
+            if (horiz) ctx.fillRect(z.x + d - 26, z.y + 10, 6, z.h - 20);
+            else ctx.fillRect(z.x + 10, z.y + d - 26, z.w - 20, 6);
+          }
+          // Lane arrows, pointing the way the block is signed.
+          ctx.fillStyle = 'rgba(232,238,228,0.16)';
+          for (let d = 620 + (seed % 7) * 60; d < len - 200; d += 1240) {
+            const ax = horiz ? z.x + d : cxR - 8, ay = horiz ? cyR - 8 : z.y + d;
+            ctx.beginPath();
+            if (horiz) {
+              ctx.moveTo(ax, ay); ctx.lineTo(ax + 26, ay + 8); ctx.lineTo(ax, ay + 16);
+            } else {
+              ctx.moveTo(ax, ay); ctx.lineTo(ax + 8, ay + 26); ctx.lineTo(ax + 16, ay);
+            }
+            ctx.closePath(); ctx.fill();
+          }
+          // Skid marks and a manhole or two.
+          ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+          ctx.lineWidth = 3;
+          for (let k = 0; k < 3; k++) {
+            const t = ((seed + k * 41) % 100) / 100;
+            const sx = horiz ? z.x + t * len : cxR + (k - 1) * 18;
+            const sy = horiz ? cyR + (k - 1) * 18 : z.y + t * len;
+            ctx.beginPath();
+            if (horiz) { ctx.moveTo(sx, sy); ctx.quadraticCurveTo(sx + 60, sy + 12, sx + 130, sy + 4); }
+            else { ctx.moveTo(sx, sy); ctx.quadraticCurveTo(sx + 12, sy + 60, sx + 4, sy + 130); }
+            ctx.stroke();
+          }
+          ctx.fillStyle = 'rgba(120,130,124,0.22)';
+          for (let k = 0; k < 2; k++) {
+            const t = ((seed + k * 53) % 100) / 100;
+            const mx = horiz ? z.x + t * len : cxR + (k ? 26 : -26);
+            const my = horiz ? cyR + (k ? 26 : -26) : z.y + t * len;
+            ctx.beginPath(); ctx.arc(mx, my, 9, 0, TAU); ctx.fill();
+          }
           break;
+        }
         case 'concrete': ctx.fillStyle = 'rgba(120,140,132,0.055)'; ctx.fillRect(z.x, z.y, z.w, z.h); break;
         case 'plaza':
           ctx.fillStyle = 'rgba(255,209,102,0.05)'; ctx.fillRect(z.x, z.y, z.w, z.h);
@@ -10434,6 +10702,156 @@ export class Game {
   }
 
   /**
+   * Roadside infrastructure. Fifty of these per district used to be nothing at all; now the
+   * road has lighting, signage, hoardings and a power line, which is most of what makes a
+   * highway read as a highway from a zoomed-out camera. Everything is drawn on the shoulder,
+   * out of the carriageway, and every lamp still throws a pool of light on the tarmac.
+   */
+  private drawStreetProp(ctx: CanvasRenderingContext2D, o: Rect): boolean {
+    const H = Math.min(o.h3d, 210);
+    const cx = o.x + o.w / 2;
+    const footY = o.y + o.h;
+    const night = this.sector === 3 || this.sector === 5 || this.blackout?.active;
+    const olive = this.sector >= 6;
+    const side = (Math.floor(o.x / 7) % 2 === 0) ? 1 : -1;
+    switch (o.kind) {
+      case 'lamp': {
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.beginPath(); ctx.ellipse(cx + 3, footY, 9, 4, 0, 0, TAU); ctx.fill();
+        ctx.strokeStyle = '#26303a'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(cx, footY); ctx.lineTo(cx, footY - H); ctx.stroke();
+        // arm and head, leaning over the carriageway
+        ctx.strokeStyle = '#2e3a44'; ctx.lineWidth = 3.5;
+        ctx.beginPath(); ctx.moveTo(cx, footY - H); ctx.quadraticCurveTo(cx + side * 16, footY - H - 8, cx + side * 30, footY - H - 4); ctx.stroke();
+        const hx = cx + side * 30, hy = footY - H - 2;
+        const glow = ctx.createRadialGradient(hx, hy + 6, 2, hx, hy + 6, night ? 70 : 34);
+        glow.addColorStop(0, night ? 'rgba(255,238,190,0.55)' : 'rgba(255,238,190,0.24)');
+        glow.addColorStop(1, 'rgba(255,238,190,0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath(); ctx.ellipse(hx, hy + 10, night ? 62 : 30, night ? 34 : 16, 0, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#f6edc6';
+        ctx.beginPath(); ctx.roundRect(hx - 6, hy, 12, 5, 2); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.12)';
+        ctx.fillRect(cx - 1, footY - H, 2, H * 0.4);
+        return true;
+      }
+      case 'sign': {
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath(); ctx.ellipse(cx, footY, 14, 4, 0, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#39423d';
+        ctx.fillRect(cx - 14, footY - 26, 3, 26);
+        ctx.fillRect(cx + 11, footY - 26, 3, 26);
+        ctx.fillStyle = olive ? '#3f4a36' : '#2b3b40';
+        ctx.beginPath(); ctx.roundRect(cx - 24, footY - 52, 48, 26, 3); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,230,160,0.5)'; ctx.lineWidth = 2;
+        ctx.strokeRect(cx - 22, footY - 50, 44, 22);
+        ctx.fillStyle = 'rgba(255,230,160,0.8)';
+        ctx.beginPath();
+        ctx.moveTo(cx - 14, footY - 46); ctx.lineTo(cx - 4, footY - 39); ctx.lineTo(cx - 14, footY - 32);
+        ctx.closePath(); ctx.fill();
+        ctx.fillRect(cx - 2, footY - 41, 16, 4);
+        return true;
+      }
+      case 'billboard': {
+        // A hoarding is the loudest thing in a HYDRA district: two legs, one message.
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.beginPath(); ctx.ellipse(cx, footY, 58, 8, 0, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#20272b';
+        ctx.fillRect(cx - 44, footY - H, 7, H);
+        ctx.fillRect(cx + 37, footY - H, 7, H);
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(cx - 50, footY - H - 5, 104, 8);
+        // panel, leaning back slightly for perspective
+        const pw = 118, ph = 58, px = cx - pw / 2, py = footY - H - ph - 2;
+        ctx.fillStyle = olive ? '#39412f' : '#1d2b33';
+        ctx.beginPath();
+        ctx.moveTo(px, py); ctx.lineTo(px + pw, py + 4); ctx.lineTo(px + pw, py + ph + 4); ctx.lineTo(px, py + ph);
+        ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,209,102,0.45)'; ctx.lineWidth = 2;
+        ctx.stroke();
+        // octagonal sigil
+        ctx.strokeStyle = olive ? 'rgba(214,224,170,0.85)' : 'rgba(255,120,110,0.85)';
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * TAU + Math.PI / 8;
+          const rx = px + 26 + Math.cos(a) * 15, ry = py + 30 + Math.sin(a) * 14;
+          if (i === 0) ctx.moveTo(rx, ry); else ctx.lineTo(rx, ry);
+        }
+        ctx.closePath(); ctx.stroke();
+        ctx.fillStyle = olive ? 'rgba(226,232,190,0.75)' : 'rgba(255,190,180,0.75)';
+        ctx.font = '900 11px ui-monospace, monospace';
+        ctx.fillText(olive ? 'IRON RESERVE' : 'HYDRA IS ORDER', px + 48, py + 26);
+        ctx.fillStyle = 'rgba(255,255,255,0.35)';
+        ctx.fillRect(px + 48, py + 32, 58, 2);
+        ctx.fillStyle = olive ? 'rgba(226,232,190,0.5)' : 'rgba(255,190,180,0.5)';
+        ctx.font = '700 8px ui-monospace, monospace';
+        ctx.fillText(olive ? 'REPORT ALL MOVEMENT' : 'TRUST THE NETWORK', px + 48, py + 44);
+        // maintenance catwalk
+        ctx.fillStyle = 'rgba(20,26,28,0.8)';
+        ctx.fillRect(px - 4, py + ph + 4, pw + 8, 4);
+        return true;
+      }
+      case 'pylon': {
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath(); ctx.ellipse(cx, footY, 26, 7, 0, 0, TAU); ctx.fill();
+        const top = footY - H;
+        // A-frame legs with lattice bracing, tapering as they climb
+        ctx.strokeStyle = '#4a5258'; ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(cx - 26, footY); ctx.lineTo(cx - 8, top + 12);
+        ctx.moveTo(cx + 26, footY); ctx.lineTo(cx + 8, top + 12);
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(120,132,138,0.85)'; ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        for (let h = 0; h < 6; h++) {
+          const t0 = h / 6, t1 = (h + 1) / 6;
+          const y0 = footY - H * t0, y1 = footY - H * t1;
+          const w0 = 26 * (1 - t0) + 8 * t0, w1 = 26 * (1 - t1) + 8 * t1;
+          ctx.moveTo(cx - w0, y0); ctx.lineTo(cx + w1, y1);
+          ctx.moveTo(cx + w0, y0); ctx.lineTo(cx - w1, y1);
+        }
+        ctx.stroke();
+        // cross arms and insulators
+        ctx.strokeStyle = '#5a646a'; ctx.lineWidth = 3;
+        for (const [t, span] of [[0.24, 30], [0.46, 24], [0.66, 18]] as [number, number][]) {
+          const y = footY - H * t;
+          ctx.beginPath(); ctx.moveTo(cx - span, y); ctx.lineTo(cx + span, y); ctx.stroke();
+          ctx.fillStyle = '#8d9aa0';
+          ctx.fillRect(cx - span - 2, y - 3, 4, 6);
+          ctx.fillRect(cx + span - 2, y - 3, 4, 6);
+        }
+        const blink = Math.sin(performance.now() / 900 + o.x * 0.01) > 0.4;
+        ctx.fillStyle = blink ? 'rgba(255,90,80,0.95)' : 'rgba(120,40,38,0.6)';
+        ctx.beginPath(); ctx.arc(cx, top + 6, 3.4, 0, TAU); ctx.fill();
+        return true;
+      }
+      case 'busstop': {
+        // shelter: roof on four posts, a bench, and a lit advertising pane
+        ctx.fillStyle = 'rgba(0,0,0,0.32)';
+        ctx.fillRect(o.x + 6, o.y + o.h - 4, o.w - 12, 6);
+        ctx.fillStyle = 'rgba(120,150,160,0.22)';
+        ctx.fillRect(o.x + 5, o.y + 4, o.w - 10, o.h - 12);
+        for (const [px2, py2] of [[o.x + 5, o.y + 4], [o.x + o.w - 8, o.y + 4],
+          [o.x + 5, o.y + o.h - 12], [o.x + o.w - 8, o.y + o.h - 12]]) {
+          ctx.fillStyle = '#2b3338'; ctx.fillRect(px2, py2, 3, Math.min(H * 0.5, 24));
+        }
+        ctx.fillStyle = '#38424a';
+        ctx.beginPath(); ctx.roundRect(o.x + 2, o.y - 4, o.w - 4, 12, 3); ctx.fill();
+        ctx.fillStyle = 'rgba(230,240,235,0.35)';
+        ctx.fillRect(o.x + 6, o.y, o.w - 12, 4);
+        ctx.fillStyle = '#4b3a2a';
+        ctx.fillRect(o.x + 12, o.y + o.h - 20, o.w - 24, 6);
+        ctx.fillStyle = 'rgba(255,214,140,0.55)';
+        ctx.fillRect(o.x + 8, o.y + 8, 14, 18);
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  /**
    * Army strongpoint props. These are not Hydra boxes with a coat of paint: a parked hull
    * reads as a hull, a silo as a silo, a howitzer points somewhere. Returns false for
    * anything it does not know, so the generic extruder still handles the rest.
@@ -10937,6 +11355,41 @@ export class Game {
     }
   }
 
+  /** One pedestrian: shadow, coat, head, and a stride while they walk. */
+  private drawPed(ctx: CanvasRenderingContext2D, p: Ped) {
+    const coat = p.kind === 'worker' ? '#6b6a4e' : p.kind === 'clerk' ? '#4b5a63' : '#7a5334';
+    const stride = p.panic > 0 ? 1 : 0.55;
+    const bob = Math.sin(p.phase * stride) * 1.6;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath(); ctx.ellipse(2, 6, 8, 3.2, 0, 0, TAU); ctx.fill();
+    ctx.rotate(p.ang + Math.PI / 2);
+    // legs
+    ctx.strokeStyle = '#22262a'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-2.5, 2); ctx.lineTo(-3.5, 7 + bob);
+    ctx.moveTo(2.5, 2); ctx.lineTo(3.5, 7 - bob);
+    ctx.stroke();
+    // torso and shoulders
+    ctx.fillStyle = coat;
+    ctx.beginPath(); ctx.roundRect(-5, -6, 10, 10, 3); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(-5, -6, 3, 10);
+    // head, angled the way they are looking
+    ctx.fillStyle = '#c9a98a';
+    ctx.beginPath(); ctx.arc(0, -9, 3.4, 0, TAU); ctx.fill();
+    // a satchel for the courier, a clipboard for the clerk
+    if (p.kind === 'courier') { ctx.fillStyle = '#3b2c1e'; ctx.fillRect(3, -4, 4, 6); }
+    if (p.kind === 'clerk') { ctx.fillStyle = '#d8d2c0'; ctx.fillRect(-7, -3, 4, 5); }
+    if (p.panic > 0) {
+      ctx.fillStyle = 'rgba(255,220,160,0.85)';
+      ctx.font = '900 9px ui-monospace, monospace';
+      ctx.fillText('!', 0, -18);
+    }
+    ctx.restore();
+  }
+
   /** A burnt-out chassis: the road keeps its history. */
   private drawRoadWreck(ctx: CanvasRenderingContext2D, c: RoadCar) {
     const L = c.kind === 'bus' ? 58 : c.kind === 'tanker' ? 52 : 36;
@@ -11108,6 +11561,54 @@ export class Game {
     ctx.restore();
   }
 
+  /** High-tension spans: two catenaries between neighbouring pylon heads. */
+  private drawPowerLines(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    if (!this.pylons.length) return;
+    ctx.save();
+    ctx.lineWidth = 1.6;
+    for (const p of this.pylons) {
+      for (const j of p.links) {
+        const q = this.pylons[j];
+        if (!q) continue;
+        const x0 = Math.min(p.x, q.x), x1 = Math.max(p.x, q.x);
+        const y0 = x0 === p.x ? p.y : q.y, y1 = x0 === p.x ? q.y : p.y;
+        if (x1 < camX - 200 || x0 > camX + this.w + 200) continue;
+        if (Math.max(y0, y1) < camY - 400 || Math.min(y0, y1) > camY + this.h + 400) continue;
+        const sag = Math.min(70, Math.hypot(x1 - x0, y1 - y0) * 0.12);
+        const lift0 = p.h * 0.46, lift1 = q.h * 0.46;
+        ctx.strokeStyle = 'rgba(168,182,190,0.30)';
+        for (const off of [-9, 9]) {
+          ctx.beginPath();
+          ctx.moveTo(x0, y0 - lift0 + off);
+          ctx.quadraticCurveTo((x0 + x1) / 2, (y0 + y1) / 2 - Math.min(lift0, lift1) + sag + off, x1, y1 - lift1 + off);
+          ctx.stroke();
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  /** Birds, high enough to pass over buildings: a district with nothing alive reads dead. */
+  private drawBirds(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    if (!this.birds.length) return;
+    ctx.save();
+    for (const b of this.birds) {
+      const x = b.ax + Math.cos(b.a) * b.r;
+      const y = b.ay + Math.sin(b.a) * b.r * 0.7 - b.alt;
+      if (x < camX - 60 || x > camX + this.w + 60 || y < camY - 60 || y > camY + this.h + 60) continue;
+      const flap = Math.sin(b.flap) * 0.55;
+      ctx.strokeStyle = b.kind === 'crow' ? 'rgba(24,22,26,0.75)' : 'rgba(226,232,230,0.72)';
+      ctx.lineWidth = b.kind === 'crow' ? 2.2 : 1.8;
+      const s2 = b.kind === 'crow' ? 6 : 8;
+      ctx.beginPath();
+      ctx.moveTo(x - s2, y + flap * s2 * 0.6);
+      ctx.quadraticCurveTo(x - s2 * 0.4, y - s2 * 0.3, x, y);
+      ctx.quadraticCurveTo(x + s2 * 0.4, y - s2 * 0.3, x + s2, y + flap * s2 * 0.6);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   /** Traffic and garrison routines, drawn under the structures so they read as passing. */
   private drawTrafficAndRoutines(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     const on = (x: number, y: number, pad = 160) =>
@@ -11117,6 +11618,10 @@ export class Game {
       if (!on(c.x, c.y)) continue;
       if (c.dead) { this.drawRoadWreck(ctx, c); continue; }
       this.drawRoadCar(ctx, c);
+    }
+    for (const p of this.peds) {
+      if (!on(p.x, p.y, 60)) continue;
+      this.drawPed(ctx, p);
     }
 
     for (const r of this.routines) {
@@ -11332,6 +11837,7 @@ export class Game {
       if (o.kind === 'lighthouse') { this.drawLighthouse(ctx, o); continue; }
       if (o.kind === 'barrier') { this.drawBarrier(ctx, o); continue; }
       if (this.drawArmyProp(ctx, o)) continue;
+      if (this.drawStreetProp(ctx, o)) continue;
       const H = o.h3d;
       let top: string, side: string, edge: string;
       switch (o.kind) {
@@ -11377,7 +11883,9 @@ export class Game {
 
       // ground shadow
       ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fillRect(o.x + H * 0.5, o.y + H * 0.7, o.w, o.h);
+      // The shadow is capped: a 320 px extrusion would otherwise throw a shadow longer
+      // than the building, which reads as a second building.
+      ctx.fillRect(o.x + Math.min(H * 0.5, 84), o.y + Math.min(H * 0.7, 110), o.w, o.h);
 
       // extruded side faces (light comes from upper-left)
       ctx.fillStyle = side;
@@ -11687,6 +12195,55 @@ export class Game {
         ctx.moveTo(o.x + o.w / 2, o.y + o.h / 2); ctx.lineTo(o.x + o.w + 26, o.y + o.h + 14);
         ctx.moveTo(o.x + o.w / 2, o.y + o.h / 2); ctx.lineTo(o.x + o.w / 2, o.y - 30);
         ctx.stroke();
+      }
+
+      // ---- roof furniture --------------------------------------------------
+      // A flat roof is not a plane. Access housings, plant, water tanks and aerials are
+      // what a real installation looks like from the air, and they cost nothing to draw.
+      if (o.w > 150 && o.h > 130 && H > 55 && o.kind !== 'sandbag' && o.kind !== 'curtain'
+        && o.kind !== 'tower' && o.kind !== 'keep') {
+        const seed2 = Math.abs(Math.floor(o.x * 0.17 + o.y * 0.29));
+        const inX = (f: number) => o.x + 18 + f * Math.max(0, o.w - 60);
+        const inY = (f: number) => o.y + 18 + f * Math.max(0, o.h - 60);
+        // access housing with a steel door
+        const hx2 = inX((seed2 % 5) / 10), hy2 = inY(((seed2 >> 2) % 5) / 10);
+        ctx.fillStyle = 'rgba(0,0,0,0.28)';
+        ctx.fillRect(hx2 + 3, hy2 + 4, 38, 30);
+        ctx.fillStyle = shade(top, -14);
+        ctx.fillRect(hx2, hy2, 38, 30);
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1.5;
+        ctx.strokeRect(hx2, hy2, 38, 30);
+        ctx.fillStyle = 'rgba(200,210,205,0.22)';
+        ctx.fillRect(hx2 + 7, hy2 + 8, 10, 14);
+        // plant: two condenser boxes with fan rings
+        for (let k = 0; k < 2; k++) {
+          const ax = inX(0.45 + k * 0.2), ay = inY(0.28 + ((seed2 + k) % 3) * 0.18);
+          ctx.fillStyle = shade(top, -22);
+          ctx.fillRect(ax, ay, 26, 20);
+          ctx.strokeStyle = 'rgba(180,200,200,0.30)'; ctx.lineWidth = 1.4;
+          ctx.beginPath(); ctx.arc(ax + 13, ay + 10, 7, 0, TAU); ctx.stroke();
+          ctx.beginPath(); ctx.arc(ax + 13, ay + 10, 3, 0, TAU); ctx.stroke();
+        }
+        // water tank on some roofs
+        if (seed2 % 3 === 0) {
+          const tx = inX(0.72), ty = inY(0.6);
+          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          ctx.beginPath(); ctx.ellipse(tx + 3, ty + 4, 13, 13, 0, 0, TAU); ctx.fill();
+          ctx.fillStyle = '#5c6a63';
+          ctx.beginPath(); ctx.arc(tx, ty, 12, 0, TAU); ctx.fill();
+          ctx.fillStyle = 'rgba(220,235,225,0.22)';
+          ctx.beginPath(); ctx.arc(tx - 3, ty - 3, 6, 0, TAU); ctx.fill();
+        }
+        // aerial mast with a beacon on the taller structures
+        if (H > 110) {
+          const mx = inX(0.35), my = inY(0.82);
+          ctx.strokeStyle = '#8a969b'; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(mx, my - 34); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(mx - 8, my - 22); ctx.lineTo(mx + 8, my - 22); ctx.stroke();
+          const blink2 = Math.sin(performance.now() / 620 + o.x * 0.01) > 0.35;
+          ctx.fillStyle = blink2 ? 'rgba(255,80,70,0.95)' : 'rgba(110,36,32,0.7)';
+          ctx.beginPath(); ctx.arc(mx, my - 36, 2.6, 0, TAU); ctx.fill();
+        }
       }
 
       ctx.strokeStyle = edge; ctx.lineWidth = 2;
@@ -12750,7 +13307,9 @@ export class Game {
       ctx.save();
       ctx.translate(p.x, p.y + bob);
       ctx.rotate(Math.sin(p.t * 2) * 0.2);
-      const col = p.kind === 'health' ? '#5dff9b' : p.kind === 'grenade' ? '#8fd0ff' : p.kind === 'shield' || p.kind === 'aegis' ? '#7fd8ff' : WEAPONS[p.weapon!].color;
+      const col = p.kind === 'health' ? '#5dff9b' : p.kind === 'grenade' ? '#8fd0ff'
+        : p.kind === 'ammo' ? '#ffd166'
+        : p.kind === 'shield' || p.kind === 'aegis' ? '#7fd8ff' : WEAPONS[p.weapon!].color;
       ctx.shadowColor = col; ctx.shadowBlur = 20;
       ctx.fillStyle = 'rgba(10,20,18,0.92)'; ctx.fillRect(-13, -13, 26, 26);
       ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.strokeRect(-13, -13, 26, 26);
@@ -12767,6 +13326,12 @@ export class Game {
         ctx.fillRect(-2, -4, 4, 7);
       }
       else if (p.kind === 'grenade') { ctx.beginPath(); ctx.arc(0, 1, 6, 0, TAU); ctx.fill(); ctx.fillRect(-2, -9, 4, 4); }
+      else if (p.kind === 'ammo') {
+        // a bandolier: three rounds and a belt link
+        ctx.fillRect(-9, -6, 5, 13); ctx.fillRect(-1, -6, 5, 13); ctx.fillRect(7, -6, 5, 13);
+        ctx.fillStyle = 'rgba(10,20,18,0.9)';
+        ctx.fillRect(-9, 1, 5, 3); ctx.fillRect(-1, 1, 5, 3); ctx.fillRect(7, 1, 5, 3);
+      }
       else { ctx.fillRect(-9, -2, 18, 4); ctx.fillRect(3, -6, 4, 5); ctx.fillRect(-7, 2, 4, 6); }
       if (p.kind === 'aegis') { ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center'; ctx.fillStyle = '#a8efff'; ctx.fillText('C / 3s', 0, 26); ctx.textAlign = 'left'; }
       ctx.restore();
