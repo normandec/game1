@@ -91,6 +91,9 @@ export interface Hud {
   airThreat: number;
   /** Flying one of the two experimental airframes. */
   jetAce: boolean;
+  /** Cockpit systems: rounds on the rails, cannon heat, camera view, inbound warning. */
+  jetMissiles: number; jetRockets: number; jetLance: number;
+  jetHeat: number; jetJam: boolean; jetView: string; jetRwr: boolean; jetTier: string;
   /** The kit: four groups of item chips, built every HUD tick. */
   inventory: { group: string; items: { label: string; detail: string; tone: string }[] }[];
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
@@ -334,7 +337,31 @@ interface ArmyJet {
   rockets?: number;
   /** The Frostwing upgrade has already been applied to this airframe once. */
   tuned?: boolean;
+  /* ---- gunship-grade systems, only meaningful while the operative is flying ---- */
+  /** Cannon heat, 0..1. At 1 the gun jams until it has cooled. */
+  heat?: number;
+  /** Seconds the cannon stays jammed. */
+  jam?: number;
+  /** Air-to-air missiles on the wing stations. */
+  missiles?: number;
+  /** Unguided rockets in the pods. */
+  rocketsPlayer?: number;
+  /** Charges left in the experimental lance (prototype and Frostwing only). */
+  lance?: number;
+  /** Lance charge, 0..1, while the trigger is held. */
+  charge?: number;
+  /** Camera view: 0 chase, 1 tactical, 2 close. */
+  view?: number;
+  /** Radar-warning receiver: seconds left on an inbound-missile warning. */
+  rwr?: number;
+  /** A gold-trimmed squadron ace (enemy hunters only). */
+  ace?: boolean;
+  /** Airframe damage flash, 0..1. */
+  hitFlash?: number;
 }
+/** Unguided salvo rockets and piercing lance shots fired from the interceptor. */
+interface JetRocket { x: number; y: number; vx: number; vy: number; life: number; dmg: number; }
+interface LanceBeam { x: number; y: number; ang: number; life: number; max: number; dmg: number; }
 /** Attack gunship — strafes, hovers, rockets the player. */
 interface Heli {
   x: number; y: number; tx: number; ty: number; ang: number; rotor: number;
@@ -602,6 +629,9 @@ export class Game {
   playerJet: ArmyJet | null = null;
   /** Air-to-air / air-to-ground missiles in flight from the interceptor. */
   jetMissiles: { x: number; y: number; vx: number; vy: number; life: number; air: boolean; dmg: number }[] = [];
+  /** Player salvo rockets and lance beams. */
+  jetRockets: JetRocket[] = [];
+  lanceBeams: LanceBeam[] = [];
   /** Air-defence rockets fired at an airborne operative. Flares spoof them. */
   enemyRockets: { x: number; y: number; vx: number; vy: number; life: number; dmg: number; spooked: number }[] = [];
   /** How angry the air force currently is, in seconds of standing hostility. */
@@ -1104,7 +1134,7 @@ export class Game {
     this.armyGuardsData = world.armyGuards || [];
     this.armyAlarm = 0; this.armyAlerted = false; this.armyWakeT = 0; this.armyWaves = 0;
     this.playerJet = null; this.armyTankWaveT = 0; this.armyTankSent = 0;
-    this.jetMissiles = []; this.jetTrail = [];
+    this.jetMissiles = []; this.jetTrail = []; this.jetRockets = []; this.lanceBeams = [];
     this.enemyRockets = []; this.airResponse = 0; this.airResponseHeat = 0;
     this.airResponseWave = 0; this.airResponseT = 0; this.jetFlareT = 0;
     this.bridgeHp = this.bridgeMaxHp; this.bridgeDown = false; this.bridgeWarn = 0;
@@ -1749,6 +1779,9 @@ export class Game {
       const j = this.playerJet;
       if (k === 'x') j.mode = j.mode === 'missile' ? 'cannon' : 'missile';
       else if (k === 'g' || k === 'q') this.fireJetMissile();
+      else if (k === 'h') this.fireJetRockets();
+      else if (k === 'r') this.fireLanceCharge();
+      else if (k === 'v') this.cycleJetView();
       else if (k === 'e') {
         j.autopilot = !j.autopilot;
         this.addText(j.x, j.y - 80, j.autopilot ? 'AUTOPILOT · ORBITING' : 'MANUAL CONTROL', '#a9ecff', 14);
@@ -1771,9 +1804,9 @@ export class Game {
       }
     }
     if (k === 'l') this.toggleGate();
-    if (k === 'r') this.reloadWeapon();
+    if (k === 'r' && !this.playerJet) this.reloadWeapon();
     if (k === 'c') this.activateAegis();
-    if (k === 'v') this.toggleVaultRoute();
+    if (k === 'v' && !this.playerJet) this.toggleVaultRoute();
   };
   private onKeyUp = (e: KeyboardEvent) => { this.keys[e.key.toLowerCase()] = false; };
 
@@ -2196,6 +2229,15 @@ export class Game {
       jetLock: this.playerJet?.lock ? `${this.playerJet.lock.label}` : '',
       airThreat: this.hunterCount(),
       jetAce: this.playerJet?.tier === 'prototype',
+      jetMissiles: this.playerJet?.missiles ?? 0,
+      jetRockets: this.playerJet?.rocketsPlayer ?? 0,
+      jetLance: this.playerJet?.lance ?? 0,
+      jetHeat: this.playerJet?.heat ?? 0,
+      jetJam: (this.playerJet?.jam ?? 0) > 0,
+      jetView: this.playerJet?.view === 1 ? 'TACTICAL' : this.playerJet?.view === 2 ? 'GUN CAM' : 'CHASE',
+      jetRwr: (this.playerJet?.rwr ?? 0) > 0,
+      jetTier: this.playerJet?.tier === 'prototype' ? 'PROTOTYPE'
+        : this.playerJet?.tier === 'frostwing' ? 'FROSTWING' : 'INTERCEPTOR',
       jetAutopilot: !!this.playerJet?.autopilot,
       frostwing: this.frostwing,
       vehicleHp: this.playerJet ? this.playerJet.hp : this.flyingPlane ? this.plane?.hp || 0 : this.playerTank ? this.playerTank.hp : this.drivingVan ? this.drivingVan.hp : this.piloting ? this.playerHeli?.hp || 0 : 0,
@@ -2502,7 +2544,70 @@ export class Game {
   private updateAirCombat(dt: number) {
     this.updateArmyJets(dt);
     this.updateJetMissiles(dt);
+    this.updateJetRockets(dt);
+    this.updateLanceBeams(dt);
     this.updateAirResponse(dt);
+  }
+
+  /** Salvo rockets: fast, unguided, and they take a chunk of ground with them. */
+  private updateJetRockets(dt: number) {
+    for (let i = this.jetRockets.length - 1; i >= 0; i--) {
+      const r = this.jetRockets[i];
+      r.life -= dt;
+      r.x += r.vx * dt; r.y += r.vy * dt;
+      if (Math.random() < 0.8) {
+        this.addParticle(r.x, r.y, rand(-14, 14), rand(-14, 14), 0.3, rand(2, 4), '#ffd2a0', true);
+      }
+      let hit = false;
+      for (const e of this.enemies) {
+        if (e.hp <= 0 || e.spawnT > 0 || e.def.civilian) continue;
+        if (Math.hypot(e.x - r.x, e.y - r.y) < 40) { this.hurtEnemy(e, r.dmg); hit = true; break; }
+      }
+      if (!hit) for (const t of this.tanks) {
+        if (t.dead || t.captured) continue;
+        if (Math.hypot(t.x - r.x, t.y - r.y) < 60) { t.hp -= r.dmg; hit = true; break; }
+      }
+      if (!hit) for (const t of this.armyTurrets) {
+        if (t.owner === 'player') continue;
+        if (Math.hypot(t.x - r.x, t.y - r.y) < 52) { t.hp -= r.dmg; hit = true; break; }
+      }
+      if (!hit) for (const o of this.armyJets) {
+        if (o.manned || o.state === 'parked' || o.hp <= 0) continue;
+        if (Math.hypot(o.x - r.x, o.y - r.y) < 80) { o.hp -= r.dmg; hit = true; if (o.hp <= 0) this.downJet(o, 'ROCKETS'); break; }
+      }
+      if (hit || r.life <= 0) {
+        this.explode(r.x, r.y, 120, r.dmg * 0.45, true);
+        this.jetRockets.splice(i, 1);
+      }
+    }
+  }
+
+  /** Lance beams burn for a fraction of a second — the damage is applied on the shot. */
+  private updateLanceBeams(dt: number) {
+    for (let i = this.lanceBeams.length - 1; i >= 0; i--) {
+      this.lanceBeams[i].life -= dt;
+      if (this.lanceBeams[i].life <= 0) this.lanceBeams.splice(i, 1);
+    }
+  }
+
+  /**
+   * An enemy fighter goes down. Losing one is worth real points, it is announced, and the
+   * wreck falls out of the sky instead of simply disappearing.
+   */
+  private downJet(j: ArmyJet, cause: string) {
+    j.hp = 0; j.state = 'parked'; j.alt = 0; j.speed = 0;
+    const worth = j.ace ? 4200 : j.hunter ? 1800 : 1400;
+    this.score += worth;
+    this.explode(j.x, j.y, 220, 90, true);
+    for (let i = 0; i < 3; i++) {
+      this.addParticle(j.x, j.y, rand(-120, 120), rand(-120, 120), rand(0.5, 1.1), rand(3, 7), i ? '#ffb27a' : '#fff0c0', true);
+    }
+    this.shocks.push({ x: j.x, y: j.y, r: 12, max: 240, life: 0.5, t: 0.5, color: '255,220,170', width: 6 });
+    this.addText(j.x, j.y - 70, j.ace ? 'ACE DOWN' : 'SPLASH ONE', j.ace ? '#ffe0a0' : '#ffd8a8', j.ace ? 20 : 16);
+    this.addText(j.x, j.y - 48, `${cause} · +${worth}`, '#ffd8a8', 12);
+    this.flash = Math.max(this.flash, 0.22); this.flashColor = '255,220,170';
+    this.hitstop = Math.max(this.hitstop, 0.05);
+    sfx.wave();
   }
 
   /**
@@ -2725,17 +2830,21 @@ export class Game {
     const want = clamp(1 + Math.round(heat * 0.55), 2, 5);
     let sent = 0;
     for (let i = 0; i < want; i++) {
-      if (this.hunterCount() >= 8) break;
+      if (this.hunterCount() >= 6) break;
       // They come from the edge of the map, not from the apron, so the fight starts in the sky.
       const a = rand(0, TAU);
       const x = clamp(this.px + Math.cos(a) * rand(1900, 2700), 400, ARENA_W - 400);
       const y = clamp(this.py + Math.sin(a) * rand(1900, 2700), 400, ARENA_H - 400);
+      // Every third wave the squadron sends its ace: a heavier, gold-trimmed airframe that
+      // turns harder, shoots straighter and carries two more missiles.
+      const isAce = this.airResponseWave % 3 === 0 && i === 0 && !this.armyJets.some((q) => q.ace && q.hp > 0);
       this.armyJets.push({
         x, y, ang: Math.atan2(this.py - y, this.px - x),
-        hp: 480, maxHp: 480, state: 'attack', alt: 340, speed: 580,
-        cool: rand(0.5, 1.6), t: 0, hunter: true,
-        rockets: 2 + Math.round(heat * 0.4),
+        hp: isAce ? 900 : 480, maxHp: isAce ? 900 : 480, state: 'attack', alt: 340, speed: 580,
+        cool: rand(0.5, 1.6), t: 0, hunter: true, ace: isAce,
+        rockets: (isAce ? 4 : 2) + Math.round(heat * 0.4),
       });
+      if (isAce) this.addText(x, y - 80, 'SQUADRON ACE AIRBORNE', '#ffe0a0', 17);
       sent++;
     }
     if (sent > 0) {
@@ -2957,30 +3066,53 @@ export class Game {
       j.x += Math.cos(j.ang) * j.speed * dt;
       j.y += Math.sin(j.ang) * j.speed * dt;
       const aligned = Math.abs(turn) < 0.16;
-      // A hunter has rocket pods as well as guns, and it uses them on an airborne operative.
-      if (j.hunter && aligned && j.cool <= 0 && (j.rockets ?? 0) > 0) {
+      // A hunter has missiles as well as guns, and it uses them on an airborne operative.
+      if (j.hunter && aligned && dist > 420 && dist < 2200 && j.cool <= 0 && (j.rockets ?? 0) > 0) {
         j.rockets = (j.rockets ?? 0) - 1;
-        j.cool = 2.6;
+        j.cool = j.ace ? 2.0 : 3.0;
         this.enemyRockets.push({
-          x: j.x + Math.cos(j.ang) * 40, y: j.y + Math.sin(j.ang) * 40,
-          vx: Math.cos(j.ang) * 900, vy: Math.sin(j.ang) * 900,
-          life: 9, dmg: 26, spooked: 0,
+          x: j.x + Math.cos(j.ang) * 46, y: j.y + Math.sin(j.ang) * 46,
+          vx: Math.cos(j.ang) * 980, vy: Math.sin(j.ang) * 980,
+          life: 10, dmg: j.ace ? 30 : 22, spooked: 0,
         });
-        this.addText(j.x, j.y - 50, 'MISSILE AWAY', '#ffb08a', 12);
+        // launch smoke and a very loud warning in the operative's cockpit
+        for (let k = 0; k < 10; k++) {
+          this.addParticle(j.x, j.y, rand(-60, 60), rand(-60, 60), rand(0.4, 0.9), rand(3, 6), '#e8e2d4', true);
+        }
+        if (this.playerJet) this.playerJet.rwr = 4.2;
+        this.addText(j.x, j.y - 56, j.ace ? 'ACE · FOX TWO' : 'FOX TWO · INBOUND', '#ff9a7a', 14);
+        if (this.playerJet) this.addText(this.px, this.py - 118, 'MISSILE INBOUND · FLARES', '#ff8a7a', 15);
         sfx.shoot('rocket');
       }
+      // Gunnery is aimed where the aircraft is going to be, not where it is now.
       if (aligned && dist < 1500 && j.cool <= 0) {
-        j.cool = 0.9;
-        for (let i = 0; i < 3; i++) {
-          const a = j.ang + rand(-0.02, 0.02);
+        j.cool = j.ace ? 0.85 : 1.15;
+        const lead = Math.min(0.9, dist / 1150);
+        const tx = this.px + this.pvx * lead * 0.45, ty = this.py + this.pvy * lead * 0.45;
+        const ga = Math.atan2(ty - j.y, tx - j.x);
+        const burst = j.ace ? 4 : 3;
+        for (let i = 0; i < burst; i++) {
+          const spread = j.ace ? 0.012 : 0.03;
+          const a = ga + rand(-spread, spread);
           this.bullets.push({
             x: j.x, y: j.y, px: j.x, py: j.y,
-            vx: Math.cos(a) * 1150, vy: Math.sin(a) * 1150,
-            dmg: 11, life: 1.4, friendly: false, color: '#ffe2a8', r: 3, hits: [],
+            vx: Math.cos(a) * 1250, vy: Math.sin(a) * 1250,
+            dmg: j.ace ? 13 : 9, life: 1.4, friendly: false,
+            color: j.ace ? '#ffe0a0' : '#ffe2a8', r: 3, hits: [],
           });
         }
         this.addLight(j.x, j.y, 220, '255,220,150', 0.1);
         sfx.shoot('smg');
+      }
+      // Defensive break: if the operative's nose is on this aircraft, it does not sit still.
+      if (this.playerJet) {
+        const pj = this.playerJet;
+        const toMe = Math.atan2(j.y - pj.y, j.x - pj.x);
+        let off = Math.atan2(Math.sin(toMe - pj.ang), Math.cos(toMe - pj.ang));
+        if (Math.abs(off) < 0.35 && Math.hypot(j.x - pj.x, j.y - pj.y) < 900) {
+          j.ang += (j.ace ? 2.4 : 2.0) * dt * (off > 0 ? 1 : -1);
+          if (Math.random() < dt * 1.6) this.addParticle(j.x, j.y, rand(-40, 40), rand(-40, 40), 0.5, rand(3, 6), '#cfd8dd', true);
+        }
       }
       if (dist < (j.hunter ? 190 : 320)) { j.state = 'egress'; j.t = 0; }
       if (j.t > (j.hunter ? 30 : 22)) { j.state = 'egress'; j.t = 0; }
@@ -3012,6 +3144,16 @@ export class Game {
     j.mode = 'cannon'; j.flares = 6; j.autopilot = false; j.lock = null;
     const ace = j.tier === 'prototype';
     const frost = j.tier === 'frostwing';
+    /* THE LOADOUT.
+     * Every airframe comes with a full war load the first time it is taken: wing
+     * missiles, salvo rockets, and — on the two experimental machines — the lance.
+     * Re-boarding does not restock, so a long sortie is a real decision.
+     */
+    if (j.missiles === undefined) j.missiles = ace ? 8 : frost ? 10 : 6;
+    if (j.rocketsPlayer === undefined) j.rocketsPlayer = ace ? 16 : frost ? 16 : 12;
+    if (j.lance === undefined) j.lance = ace || frost ? 4 : 0;
+    j.heat = 0; j.jam = 0; j.charge = 0; j.rwr = j.rwr ?? 0;
+    if (j.view === undefined) j.view = 0;
     // Frostwing clearance: the airframe comes back ice-plated and with more countermeasures.
     // Applied once per airframe — re-boarding the same jet must never stack the bonus.
     if (this.frostwing && !j.tuned) {
@@ -3112,15 +3254,169 @@ export class Game {
       this.addText(j.x, j.y - 70, 'NO LOCK — POINT THE NOSE AT SOMETHING', '#ffcf7a', 13);
       return;
     }
+    if ((j.missiles ?? 0) <= 0) {
+      this.addText(j.x, j.y - 70, 'MISSILE RAILS EMPTY · USE THE CANNON', '#ffcf7a', 13);
+      return;
+    }
+    j.missiles = (j.missiles ?? 0) - 1;
     const a = Math.atan2(lock.y - j.y, lock.x - j.x);
     this.jetMissiles.push({
       x: j.x + Math.cos(a) * 60, y: j.y + Math.sin(a) * 60,
       vx: Math.cos(a) * 900, vy: Math.sin(a) * 900,
       life: 6, air: lock.air, dmg: lock.air ? 320 : 420,
     });
-    this.addText(j.x, j.y - 70, `FOX TWO · ${lock.label}`, '#a9ecff', 14);
+    this.addText(j.x, j.y - 70, `FOX TWO · ${lock.label} · ${j.missiles} LEFT`, '#a9ecff', 14);
     this.addLight(j.x, j.y, 320, '180,235,255', 0.3);
+    // launch smoke off the rail, and a shove that can be felt
+    for (let i = 0; i < 14; i++) {
+      const a = j.ang + rand(-0.5, 0.5);
+      this.addParticle(j.x + Math.cos(a) * 60, j.y + Math.sin(a) * 60,
+        Math.cos(a) * rand(40, 160), Math.sin(a) * rand(40, 160), rand(0.5, 1.1), rand(3, 7), '#dfeaf2', true);
+    }
+    this.hitstop = Math.max(this.hitstop, 0.04);
+    this.flash = Math.max(this.flash, 0.12); this.flashColor = '200,235,255';
     sfx.shoot('rocket');
+  }
+
+  /**
+   * H: the rocket pods. Six unguided rockets out of the wings in one press — the anti-ground
+   * weapon of the aircraft, and the reason a strafing pass over the army base is a bad
+   * minute for anyone standing under it.
+   */
+  private fireJetRockets() {
+    const j = this.playerJet;
+    if (!j) return;
+    const left = j.rocketsPlayer ?? 0;
+    if (left <= 0) { this.addText(j.x, j.y - 70, 'ROCKET PODS EMPTY', '#ffcf7a', 13); return; }
+    const salvo = Math.min(6, left);
+    j.rocketsPlayer = left - salvo;
+    for (let i = 0; i < salvo; i++) {
+      const a = j.ang + rand(-0.09, 0.09);
+      const side = i % 2 ? 1 : -1;
+      const ox = Math.cos(j.ang + Math.PI / 2) * side * 34;
+      const oy = Math.sin(j.ang + Math.PI / 2) * side * 34;
+      this.jetRockets.push({
+        x: j.x + ox + Math.cos(j.ang) * 50, y: j.y + oy + Math.sin(j.ang) * 50,
+        vx: Math.cos(a) * 1150 + Math.cos(j.ang) * j.speed * 0.35,
+        vy: Math.sin(a) * 1150 + Math.sin(j.ang) * j.speed * 0.35,
+        life: 2.4, dmg: 130,
+      });
+    }
+    this.addText(j.x, j.y - 70, `ROCKET SALVO · ${j.rocketsPlayer} LEFT`, '#ffca86', 14);
+    this.addLight(j.x, j.y, 300, '255,190,120', 0.25);
+    this.timeScale = 0.82;
+    sfx.shoot('rocket');
+    this.provokeAirResponse(0.5);
+  }
+
+  /**
+   * R: the lance. Holding the key winds the capacitor; when it is full the shot goes off
+   * by itself — a piercing line of cold light that cuts through everything on the nose.
+   * Only the two experimental airframes carry one.
+   */
+  private fireLanceCharge() {
+    const j = this.playerJet;
+    if (!j) return;
+    if ((j.lance ?? 0) <= 0) {
+      this.addText(j.x, j.y - 70, 'NO LANCE CHARGES', '#ffcf7a', 13);
+      return;
+    }
+    if ((j.charge ?? 0) > 0.05) return;          // already winding
+    j.charge = 0.001;
+    sfx.click();
+  }
+
+  /** The capacitor is full: the lance fires down the nose. */
+  private releaseLance() {
+    const j = this.playerJet;
+    if (!j) return;
+    j.charge = 0;
+    j.lance = Math.max(0, (j.lance ?? 0) - 1);
+    const beam: LanceBeam = { x: j.x, y: j.y, ang: j.ang, life: 0.42, max: 0.42, dmg: j.tier === 'frostwing' ? 460 : 400 };
+    this.lanceBeams.push(beam);
+    const reach = 2600;
+    const ex = j.x + Math.cos(j.ang) * reach, ey = j.y + Math.sin(j.ang) * reach;
+    const near = (x: number, y: number, r: number) => {
+      // distance from the point to the beam segment
+      const dx = ex - j.x, dy = ey - j.y;
+      const t = clamp(((x - j.x) * dx + (y - j.y) * dy) / (dx * dx + dy * dy), 0, 1);
+      return Math.hypot(x - (j.x + dx * t), y - (j.y + dy * t)) < r;
+    };
+    let hits = 0;
+    for (const o of this.armyJets) {
+      if (o === j || o.state === 'parked' || o.hp <= 0) continue;
+      if (!near(o.x, o.y, 90)) continue;
+      o.hp -= beam.dmg; hits++;
+      this.sparks(o.x, o.y, '#dff6ff', 18);
+      if (o.hp <= 0) this.downJet(o, 'LANCE');
+    }
+    for (const h of this.helis) {
+      if (!near(h.x, h.y, 80) || h.hp <= 0) continue;
+      h.hp -= beam.dmg; hits++;
+      if (h.hp <= 0) this.killHeli(h);
+    }
+    for (const t of this.tanks) {
+      if (t.dead || t.captured || !near(t.x, t.y, 70)) continue;
+      t.hp -= beam.dmg; hits++;
+    }
+    for (const t of this.armyTurrets) {
+      if (t.owner === 'player' || !near(t.x, t.y, 60)) continue;
+      t.hp -= beam.dmg; hits++;
+    }
+    for (const e of this.enemies) {
+      if (e.hp <= 0 || e.spawnT > 0 || !near(e.x, e.y, 46)) continue;
+      this.hurtEnemy(e, beam.dmg); hits++;
+    }
+    this.addText(j.x, j.y - 84, hits ? `LANCE · ${hits} HIT${hits === 1 ? '' : 'S'}` : 'LANCE · CLEAN AIR', '#dff6ff', 16);
+    this.flash = Math.max(this.flash, 0.32); this.flashColor = '210,245,255';
+    this.hitstop = Math.max(this.hitstop, 0.06);
+    this.shocks.push({ x: j.x, y: j.y, r: 10, max: 260, life: 0.4, t: 0.4, color: '210,245,255', width: 8 });
+    sfx.shoot('rocket');
+  }
+
+  /** V: three camera perspectives for the dogfight. */
+  private cycleJetView() {
+    const j = this.playerJet;
+    if (!j) return;
+    j.view = ((j.view ?? 0) + 1) % 3;
+    const name = j.view === 0 ? 'CHASE CAMERA' : j.view === 1 ? 'TACTICAL · WIDE' : 'GUN CAMERA · CLOSE';
+    this.addText(j.x, j.y - 96, name, '#a9ecff', 15);
+    sfx.click();
+  }
+
+  /** Screen point to world point, correct at any jet camera zoom. */
+  /**
+   * The three cockpit cameras.
+   *
+   * `lead` pushes the camera ahead of the aircraft so the target is not hidden under the
+   * nose, `zoom` pulls the view out (tactical) or in (gun camera).
+   */
+  private jetViewConfig(): { zoom: number; lead: number } {
+    const j = this.playerJet;
+    if (!j) return { zoom: 1, lead: 0 };
+    if (j.view === 1) return { zoom: 0.72, lead: 0 };
+    if (j.view === 2) return { zoom: 1.32, lead: 220 };
+    return { zoom: 1.06, lead: 130 };
+  }
+
+  /** The camera the world pass should use this frame. */
+  private jetCamera(): { x: number; y: number; zoom: number; active: boolean } {
+    const j = this.playerJet;
+    if (!j) return { x: this.camX, y: this.camY, zoom: 1, active: false };
+    const { zoom, lead } = this.jetViewConfig();
+    const vw = this.w / zoom, vh = this.h / zoom;
+    const fx = j.x + Math.cos(j.ang) * lead, fy = j.y + Math.sin(j.ang) * lead;
+    return {
+      x: clamp(fx - vw / 2, 0, Math.max(0, ARENA_W - vw)),
+      y: clamp(fy - vh / 2, 0, Math.max(0, ARENA_H - vh)),
+      zoom,
+      active: true,
+    };
+  }
+
+  private worldMouse(): { x: number; y: number } {
+    const cam = this.jetCamera();
+    return { x: cam.x + this.mouseX / cam.zoom, y: cam.y + this.mouseY / cam.zoom };
   }
 
   /** SPACE: countermeasures, and the hard break that comes with them. */
@@ -3130,9 +3426,12 @@ export class Game {
     if ((j.flares ?? 0) <= 0) { this.addText(j.x, j.y - 60, 'NO FLARES LEFT', '#ff9d9d', 13); return; }
     j.flares = (j.flares ?? 0) - 1;
     this.jetFlareT = Math.max(this.jetFlareT, 2.8);
-    for (const r of this.enemyRockets) {
-      if (Math.hypot(r.x - j.x, r.y - j.y) < 1400) r.spooked = 3.4;
+    // An inbound missile sees the flare as a hotter target than the aircraft.
+    for (const m of this.enemyRockets) {
+      if (Math.hypot(m.x - j.x, m.y - j.y) < 1600) m.spooked = Math.max(m.spooked, 3.4);
     }
+    j.rwr = 0;
+    this.addText(j.x, j.y - 96, 'FLARES AWAY', '#ffd8a0', 12);
     for (let i = 0; i < 8; i++) {
       const a = j.ang + Math.PI + rand(-0.9, 0.9);
       this.addParticle(j.x, j.y, Math.cos(a) * rand(120, 320), Math.sin(a) * rand(120, 320),
@@ -3171,7 +3470,8 @@ export class Game {
       const dx = this.aimStick.x - this.aimStick.ox, dy = this.aimStick.y - this.aimStick.oy;
       if (Math.hypot(dx, dy) > 12) { aim = Math.atan2(dy, dx); firing = true; }
     } else if (!this.isTouch) {
-      aim = Math.atan2(this.mouseY + this.camY - j.y, this.mouseX + this.camX - j.x);
+      const mp = this.worldMouse();
+      aim = Math.atan2(mp.y - j.y, mp.x - j.x);
       firing = this.firing;
     }
     // A/D: a coordinated roll into a hard turn, the way a fighter changes heading.
@@ -3180,6 +3480,25 @@ export class Game {
     let turn = aim - j.ang;
     while (turn > Math.PI) turn -= TAU;
     while (turn < -Math.PI) turn += TAU;
+
+    const ace = j.tier === 'prototype';
+    const frost = j.tier === 'frostwing';
+    /* ---- SYSTEMS ---- */
+    // Cannon heat: held fire cooks the barrels, and a cooked barrel is a jam. A jammed
+    // gun vents hard, so the tape falls away while the barrels are being cleared.
+    const coolRate = (ace ? 0.22 : frost ? 0.21 : 0.19) * ((j.jam ?? 0) > 0 ? 3 : 1);
+    j.heat = Math.max(0, (j.heat ?? 0) - coolRate * dt);
+    if ((j.jam ?? 0) > 0) {
+      j.jam = Math.max(0, (j.jam ?? 0) - dt);
+      if (j.jam === 0) this.addText(j.x, j.y - 80, 'CANNON CLEAR', '#a9ecff', 12);
+    }
+    // Radar warning receiver: an inbound missile keeps the light on.
+    if ((j.rwr ?? 0) > 0) j.rwr = Math.max(0, (j.rwr ?? 0) - dt);
+    // The lance winds while R is held and fires itself when the capacitor is full.
+    if ((j.charge ?? 0) > 0) {
+      j.charge = Math.min(1, (j.charge ?? 0) + dt / 0.9);
+      if (j.charge >= 1) this.releaseLance();
+    }
 
     const brake = !!this.keys['s'] && !this.keys['w'];
     const boost = !!this.keys['shift'];   // SPACE is countermeasures in a jet, not burner
@@ -3193,8 +3512,6 @@ export class Game {
       while (turn < -Math.PI) turn += TAU;
     }
 
-    const ace = j.tier === 'prototype';
-    const frost = j.tier === 'frostwing';
     const agility = (2.5 - Math.min(1, j.speed / (ace ? 2400 : 1800)) * 0.9)
       * (brake ? 1.8 : 1) * (ace ? 1.12 : frost ? 1.08 : 1);
     j.ang += clamp(turn, -agility * dt, agility * dt);
@@ -3213,6 +3530,14 @@ export class Game {
     if (j.x < 220 || j.x > ARENA_W - 220) { j.x = clamp(j.x, 220, ARENA_W - 220); j.ang = Math.PI - j.ang; }
     if (j.y < 220 || j.y > ARENA_H - 220) { j.y = clamp(j.y, 220, ARENA_H - 220); j.ang = -j.ang; }
 
+    // A hurt airframe trails smoke: black when it is nearly out of airframe, grey before.
+    const frac = j.hp / Math.max(1, j.maxHp);
+    if (frac < 0.45 && Math.random() < 0.7) {
+      const a = j.ang + Math.PI + rand(-0.25, 0.25);
+      this.addParticle(j.x + Math.cos(a) * 66, j.y + Math.sin(a) * 66,
+        Math.cos(a) * rand(30, 90), Math.sin(a) * rand(30, 90), rand(0.5, 1.1), rand(3, 7),
+        frac < 0.2 ? '#3c3c3c' : '#8d9295', true);
+    }
     if (j.boost > 0.12) {
       this.jetTrail.push({ x: j.x - Math.cos(j.ang) * 90, y: j.y - Math.sin(j.ang) * 90, t: 0.55 });
       if (j.boost > 0.6) this.addLight(j.x, j.y, 280, this.frostwing ? '150,235,255' : '150,225,255', 0.2);
@@ -3227,8 +3552,18 @@ export class Game {
       if (j.mode === 'missile') {
         j.cool = 1.6;
         this.fireJetMissile();
+      } else if ((j.jam ?? 0) > 0) {
+        j.cool = 0.25;
+        if (Math.random() < 0.12) this.addText(j.x, j.y - 76, 'GUN JAMMED · COOLING', '#ffb08a', 12);
       } else {
         j.cool = ace ? 0.045 : frost ? 0.048 : 0.055;
+        j.heat = Math.min(1, (j.heat ?? 0) + (ace ? 0.019 : frost ? 0.02 : 0.022));
+        if ((j.heat ?? 0) >= 1) {
+          j.jam = ace ? 1.5 : frost ? 1.6 : 2.2;
+          this.addText(j.x, j.y - 90, 'GUN OVERHEAT · BARRELS COOKED', '#ffb08a', 15);
+          this.sparks(j.x + Math.cos(j.ang) * 60, j.y + Math.sin(j.ang) * 60, '#ffcf7a', 10);
+          sfx.hit();
+        }
         for (const side of [-1, 1]) {
           const a = j.ang + rand(-0.01, 0.01);
           const ox = Math.cos(j.ang + Math.PI / 2) * side * 14 + Math.cos(j.ang) * 74;
@@ -3241,6 +3576,7 @@ export class Game {
           });
         }
         this.addLight(j.x, j.y, 200, '190,240,255', 0.1);
+        this.shocks.push({ x: j.x + Math.cos(j.ang) * 82, y: j.y + Math.sin(j.ang) * 82, r: 2, max: 22, life: 0.1, t: 0.1, color: '255,240,200', width: 2 });
         this.provokeAirResponse(0.08);   // sustained strafing heats the air defence up
         sfx.shoot('rifle');
       }
@@ -3268,7 +3604,7 @@ export class Game {
           if (o.manned || o.state === 'parked') continue;
           if (Math.hypot(o.x - m.x, o.y - m.y) < 90) {
             o.hp -= m.dmg; hit = true;
-            if (o.hp <= 0) { o.state = 'parked'; this.explode(o.x, o.y, 180, 60, true); this.score += 1400; }
+            if (o.hp <= 0) this.downJet(o, 'FOX TWO');
             break;
           }
         }
@@ -5003,14 +5339,14 @@ export class Game {
     this.flyingPlane = true;
     this.plane.active = true;
     this.px = this.plane.x; this.py = this.plane.y;
-    this.setBanner('S.H.I.E.L.D. STRATEGIC BOMBER', 'NOSE FOLLOWS THE MOUSE · W THROTTLE · SHIFT BURNER · S TO LAND · LMB GUNS · G BOMBS');
+    this.setBanner('S.H.I.E.L.D. STRATEGIC BOMBER', 'WASD FLY · MOUSE AIMS · LMB NOSE CANNONS · G BOMB CARPET · F LAND');
     sfx.rotor();
   }
 
   private exitPlane() {
     if (!this.plane) return;
     if (Math.hypot(this.plane.vx, this.plane.vy) > 140) {
-      this.addText(this.plane.x, this.plane.y - 90, 'HOLD S TO SLOW FOR LANDING', '#ffcf7a', 13);
+      this.addText(this.plane.x, this.plane.y - 90, 'THROTTLE DOWN TO DISEMBARK', '#ffcf7a', 13);
       return;
     }
     const landing = { x: this.plane.x, y: this.plane.y };
@@ -5275,14 +5611,11 @@ export class Game {
 
   /** The vault bomber: heavy, slow to turn, devastating carpet bombs. */
   /**
-   * THE BOMBER FLIES LIKE AN AIRCRAFT.
+   * THE BOMBER FLIES ON WASD.
    *
-   * It used to be a top-down twin-stick machine: the nose pointed at the mouse while the
-   * hull slid sideways wherever WASD pushed it, which is not flying, it is a shopping
-   * trolley with wings. It now uses the same model as the interceptor — the nose tracks
-   * the mouse, the hull always travels where the nose points, W throttles up, S throttles
-   * back to a landing approach, SHIFT is the burner — so the two aircraft in the game
-   * answer the controls the same way.
+   * The nose follows the mouse (that is where the guns point) and WASD flies the aircraft:
+   * W forward, S back, A/D across, with the hull easing into the new heading. It is a
+   * heavy strategic bomber, not a fighter, so it turns slowly and carries its speed.
    */
   private updatePlane(dt: number) {
     const p = this.plane;
@@ -5293,8 +5626,6 @@ export class Game {
     if (this.aimStick.active) {
       const dx = this.aimStick.x - this.aimStick.ox, dy = this.aimStick.y - this.aimStick.oy;
       if (Math.hypot(dx, dy) > 12) { aim = Math.atan2(dy, dx); firing = true; }
-      // On a touch screen the left stick is the nose: push it and the bomber turns.
-      if (m.x || m.y) aim = Math.atan2(m.y, m.x);
     } else if (!this.isTouch) {
       aim = Math.atan2(this.mouseY + this.camY - p.y, this.mouseX + this.camX - p.x);
       firing = this.firing;
@@ -5302,34 +5633,13 @@ export class Game {
     let turn = aim - p.ang;
     while (turn > Math.PI) turn -= TAU;
     while (turn < -Math.PI) turn += TAU;
-    // A bomber is heavier than a fighter: wide, deliberate turns that tighten as it slows.
-    const speedNow = Math.hypot(p.vx, p.vy);
-    const agility = (2.0 - Math.min(1, speedNow / 1250) * 0.8) * (this.keys['s'] ? 1.7 : 1);
-    p.ang += clamp(turn, -agility * dt, agility * dt);
-    p.bank = lerp(p.bank, clamp(turn * 0.85, -0.8, 0.8), 1 - Math.pow(0.01, dt));
-
-    const brake = !!this.keys['s'] && !this.keys['w'];
-    const boost = !!this.keys['shift'] && !brake && p.fuel > 0;
-    const throttle = m.y < -0.1 ? 1 : m.y > 0.1 ? -0.45 : 0;
-    // No engine, no altitude: the bomber glides, slowly and badly.
-    const topSpeed = p.fuel > 0 ? (boost ? 1180 : 820 + throttle * 240) : 330;
-    const want = brake ? 120 : topSpeed;
-    const accel = boost ? 2.0 : brake ? 3.0 : 1.5;
-    const speed = speedNow + (want - speedNow) * Math.min(1, dt * accel);
-    // Forward flight: velocity is the nose, never the strafe vector.
-    p.vx = Math.cos(p.ang) * speed;
-    p.vy = Math.sin(p.ang) * speed;
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    // Edges are flown around, not bounced off: turn the nose back into the arena.
-    if (p.x < 220 || p.x > ARENA_W - 220) {
-      p.x = clamp(p.x, 220, ARENA_W - 220);
-      p.ang = Math.atan2(Math.sin(p.ang), p.x < ARENA_W / 2 ? Math.abs(Math.cos(p.ang)) : -Math.abs(Math.cos(p.ang)));
-    }
-    if (p.y < 220 || p.y > ARENA_H - 220) {
-      p.y = clamp(p.y, 220, ARENA_H - 220);
-      p.ang = Math.atan2(p.y < ARENA_H / 2 ? Math.abs(Math.sin(p.ang)) : -Math.abs(Math.sin(p.ang)), Math.cos(p.ang));
-    }
+    p.ang += Math.sign(turn) * Math.min(Math.abs(turn), 1.25 * dt);
+    p.bank = lerp(p.bank, clamp(turn * 0.85, -0.7, 0.7), 1 - Math.pow(0.01, dt));
+    const thrust = p.fuel > 0 ? 640 : 95;
+    p.vx = lerp(p.vx, m.x * thrust, 1 - Math.pow(0.16, dt));
+    p.vy = lerp(p.vy, m.y * thrust, 1 - Math.pow(0.16, dt));
+    p.x = clamp(p.x + p.vx * dt, 120, ARENA_W - 120);
+    p.y = clamp(p.y + p.vy * dt, 120, ARENA_H - 120);
     p.fuel = Math.max(0, p.fuel - dt * 0.75);
     p.gunCd = Math.max(0, p.gunCd - dt);
     p.bombCd = Math.max(0, p.bombCd - dt);
@@ -9473,8 +9783,13 @@ export class Game {
     }
     // Flying a fast jet, the airframe eats the fire; the pilot only dies when it does.
     if (this.playerJet) {
+      // A fighter is mostly engine and armour: it eats half of what reaches it, which is
+      // what makes a long turning fight survivable for a pilot who uses the flares.
       const j = this.playerJet;
-      j.hp = Math.max(0, j.hp - dmg * 0.85);
+      // Flares buy a break turn as well as spoofing missiles: for the couple of seconds
+      // they burn, the airframe takes a third less.
+      const breakFactor = this.jetFlareT > 0 ? 0.34 : 0.5;
+      j.hp = Math.max(0, j.hp - dmg * breakFactor);
       this.sparks(j.x, j.y, '#cfe8ff', 7);
       this.flash = Math.max(this.flash, 0.12); this.flashColor = '200,235,255';
       sfx.hit();
@@ -9710,11 +10025,27 @@ export class Game {
       this.renderArrest(ctx);
       return;
     }
-    const camX = this.camX, camY = this.camY;
+    /* ---- PERSPECTIVE ----
+     * Flying a jet, the operative can pull the camera back to a tactical view or push it
+     * right up to the airframe. The world pass is drawn into a window that is wider than
+     * the canvas by exactly the zoom factor, so culling, drawing and lighting all agree
+     * about what is on screen; the HUD is drawn afterwards at real size.
+     */
+    const jetCam = this.jetCamera();
+    const zoom = jetCam.zoom;
+    const realW = this.w, realH = this.h;
+    const prevCamX = this.camX, prevCamY = this.camY;
+    let camX = this.camX, camY = this.camY;
+    if (jetCam.active) {
+      this.w = realW / zoom; this.h = realH / zoom;
+      camX = jetCam.x; camY = jetCam.y;
+      this.camX = camX; this.camY = camY;
+    }
 
     ctx.save();
     ctx.fillStyle = '#080d0c';
-    ctx.fillRect(0, 0, this.w, this.h);
+    ctx.fillRect(0, 0, realW, realH);
+    if (jetCam.active && zoom !== 1) ctx.scale(zoom, zoom);
     ctx.translate(-camX, -camY);
 
     this.drawGround(ctx, camX, camY);
@@ -9814,13 +10145,18 @@ export class Game {
       ctx.restore();
     }
     ctx.restore();
+    if (jetCam.active) {
+      this.w = realW; this.h = realH;
+      this.camX = prevCamX; this.camY = prevCamY;
+    }
 
     this.drawScreenFx(ctx);
     this.drawLighting(ctx, camX, camY);
     this.drawBlackoutLamps(ctx, camX, camY);
     this.drawWeather(ctx);
+    if (this.playerJet) this.drawJetOverlay(ctx);
     if (this.status === 'playing' || this.status === 'paused' || this.status === 'upgrade') {
-      this.drawThreatArrows(ctx, camX, camY);
+      this.drawThreatArrows(ctx, this.camX, this.camY);
       this.drawBossBar(ctx);
       this.drawMinimap(ctx);
     }
@@ -11176,7 +11512,7 @@ export class Game {
    */
   private drawFighter(ctx: CanvasRenderingContext2D, x: number, y: number, ang: number,
     alt: number, scale: number, boost: number, friendly: boolean, parked: boolean,
-    tier: JetTier = 'standard') {
+    tier: JetTier = 'standard', loadout = 0, aceTrim = false, damage = 0) {
     ctx.save();
     ctx.translate(x, y - alt * 0.22);
     ctx.rotate(ang);
@@ -11186,10 +11522,10 @@ export class Game {
     // is pale ice-blue with a lit spine.
     const ace = tier === 'prototype';
     const frost = tier === 'frostwing';
-    const body = ace ? (friendly ? '#4b4a52' : parked ? '#3f3e46' : '#46454e')
+    const body = ace ? (friendly ? '#54525c' : parked ? '#3f3e46' : '#46454e')
       : frost ? (parked ? '#b9d8e2' : '#cbe8f1')
-      : friendly ? '#7d8870' : parked ? '#63705a' : '#6d7860';
-    const dark = ace ? '#26252c' : frost ? '#5d7f8c' : friendly ? '#4e5747' : '#414b3c';
+      : friendly ? '#a9bdb4' : parked ? '#63705a' : '#57614f';
+    const dark = ace ? '#26252c' : frost ? '#5d7f8c' : friendly ? '#5d6f68' : '#39412f';
     // wings: diamond planform, leaning back from the intakes to the tail
     ctx.fillStyle = body;
     ctx.beginPath();
@@ -11238,13 +11574,75 @@ export class Game {
       ctx.fillStyle = friendly ? 'rgba(180,245,255,0.9)' : 'rgba(223,189,120,0.9)';
       ctx.fillRect(-52, -3, 5, 6);
     }
-    // canopy
-    ctx.fillStyle = 'rgba(196,236,246,0.78)';
+    /* panel lines: an airframe, not a silhouette */
+    ctx.strokeStyle = 'rgba(20,28,24,0.35)';
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(-30, -9); ctx.lineTo(2, -9);
+    ctx.moveTo(-30, 9); ctx.lineTo(2, 9);
+    ctx.moveTo(-44, -5); ctx.lineTo(-44, 5);
+    ctx.moveTo(-20, -30); ctx.lineTo(-20, -12);
+    ctx.moveTo(-20, 30); ctx.lineTo(-20, 12);
+    ctx.stroke();
+    // canopy: tinted glass with a razor highlight along the rail
+    const glass = ctx.createLinearGradient(12, -6, 40, 6);
+    glass.addColorStop(0, frost ? 'rgba(226,252,255,0.95)' : ace ? 'rgba(190,215,240,0.9)' : 'rgba(186,232,244,0.85)');
+    glass.addColorStop(1, frost ? 'rgba(120,196,224,0.8)' : 'rgba(70,104,120,0.85)');
+    ctx.fillStyle = glass;
     ctx.beginPath();
     ctx.ellipse(26, 0, 15, 6, 0, 0, TAU);
     ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    ctx.fillRect(16, -2, 16, 2);
+    ctx.strokeStyle = 'rgba(240,255,255,0.55)';
+    ctx.lineWidth = 0.9;
+    ctx.beginPath(); ctx.ellipse(26, 0, 15, 6, 0, 0, TAU); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillRect(16, -2.4, 16, 1.8);
+
+    /* WING STATIONS: a loaded aircraft reads as armed from above. */
+    if (loadout > 0 && !parked) {
+      const pairs = Math.min(3, Math.ceil(loadout / 2));
+      for (let i = 0; i < pairs; i++) {
+        for (const side of [-1, 1]) {
+          const wy = side * (22 + i * 14);
+          const wx = -6 - i * 4;
+          ctx.fillStyle = '#c9d3d8';
+          ctx.beginPath(); ctx.roundRect(wx - 9, wy - 2.2, 18, 4.4, 2); ctx.fill();
+          ctx.fillStyle = friendly ? '#ffd9a0' : '#ffb28a';
+          ctx.fillRect(wx + 8, wy - 1.6, 4, 3.2);
+        }
+      }
+    }
+    /* navigation lights: red to port, green to starboard, white at the tail */
+    if (!parked) {
+      const blink = 0.55 + Math.sin(this.simulationTime * 4) * 0.45;
+      ctx.fillStyle = `rgba(255,90,90,${blink})`;
+      ctx.beginPath(); ctx.arc(-12, 58, 2.6, 0, TAU); ctx.fill();
+      ctx.fillStyle = `rgba(120,255,150,${blink})`;
+      ctx.beginPath(); ctx.arc(-12, -58, 2.6, 0, TAU); ctx.fill();
+      ctx.fillStyle = 'rgba(240,250,255,0.85)';
+      ctx.beginPath(); ctx.arc(-56, 0, 2, 0, TAU); ctx.fill();
+    }
+    /* squadron ace: a gold stripe over the wings */
+    if (aceTrim) {
+      ctx.fillStyle = 'rgba(255,214,130,0.9)';
+      ctx.fillRect(-22, 12, 40, 3.2);
+      ctx.fillRect(-22, -15.2, 40, 3.2);
+    }
+    /* sides: a friendly airframe wears cyan bands, a hostile one wears HYDRA red. In a
+     * turning fight that is the only thing that has to be readable at a glance. */
+    if (!parked) {
+      ctx.fillStyle = friendly ? 'rgba(120,235,255,0.85)' : 'rgba(255,96,84,0.8)';
+      ctx.fillRect(2, 26, 9, 26);
+      ctx.fillRect(2, -52, 9, 26);
+      ctx.fillStyle = friendly ? 'rgba(160,245,255,0.55)' : 'rgba(255,120,100,0.45)';
+      ctx.fillRect(30, -7, 4, 14);
+    }
+    /* battle damage: dark patches and leaking smoke */
+    if (damage > 0.55) {
+      ctx.fillStyle = `rgba(24,20,18,${Math.min(0.6, (damage - 0.55) * 1.6)})`;
+      ctx.beginPath(); ctx.ellipse(-16, 18, 12, 7, 0.4, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(-34, -8, 8, 5, -0.2, 0, TAU); ctx.fill();
+    }
     // canted twin tails
     ctx.fillStyle = dark;
     ctx.save(); ctx.rotate(0.26); ctx.fillRect(-48, -20, 12, 20); ctx.restore();
@@ -11254,17 +11652,33 @@ export class Game {
     ctx.fillRect(-60, -9, 6, 6);
     ctx.fillRect(-60, 3, 6, 6);
     if (!parked || boost > 0.05) {
-      const flame = 6 + boost * 34 + Math.sin(this.simulationTime * 34) * 3;
+      const flame = 6 + boost * 40 + Math.sin(this.simulationTime * 34) * 3;
       for (const sy of [-6, 6]) {
         const g = ctx.createLinearGradient(-58, sy, -58 - flame, sy);
-        g.addColorStop(0, boost > 0.4 ? 'rgba(200,245,255,0.95)' : 'rgba(160,215,255,0.7)');
+        g.addColorStop(0, boost > 0.4 ? 'rgba(235,252,255,1)' : 'rgba(160,215,255,0.72)');
+        g.addColorStop(0.4, boost > 0.4 ? 'rgba(150,225,255,0.85)' : 'rgba(130,190,240,0.5)');
         g.addColorStop(1, 'rgba(120,180,255,0)');
         ctx.fillStyle = g;
         ctx.beginPath();
-        ctx.moveTo(-58, sy - 5);
+        ctx.moveTo(-58, sy - (boost > 0.4 ? 6.5 : 5));
         ctx.lineTo(-58 - flame, sy);
-        ctx.lineTo(-58, sy + 5);
+        ctx.lineTo(-58, sy + (boost > 0.4 ? 6.5 : 5));
         ctx.closePath(); ctx.fill();
+        // shock diamonds in a hard burner
+        if (boost > 0.45) {
+          for (let d = 0; d < 3; d++) {
+            const dx = -62 - d * (flame * 0.24);
+            ctx.fillStyle = `rgba(255,255,255,${0.5 - d * 0.14})`;
+            ctx.beginPath(); ctx.ellipse(dx, sy, 2.2 - d * 0.5, 1.6, 0, 0, TAU); ctx.fill();
+          }
+        }
+      }
+      if (boost > 0.6) {
+        const haze = ctx.createRadialGradient(-70, 0, 2, -70, 0, 30 + boost * 24);
+        haze.addColorStop(0, 'rgba(200,240,255,0.28)');
+        haze.addColorStop(1, 'rgba(200,240,255,0)');
+        ctx.fillStyle = haze;
+        ctx.beginPath(); ctx.arc(-70, 0, 30 + boost * 24, 0, TAU); ctx.fill();
       }
     }
     ctx.restore();
@@ -11324,12 +11738,40 @@ export class Game {
       }
     }
 
-    // heat plume and missiles in flight
+    /* CONTRAILS: a tapering ribbon behind the aircraft, plus vapour off the wingtips. */
+    const pjTrail = this.playerJet;
+    if (this.jetTrail.length > 1) {
+      for (let i = 1; i < this.jetTrail.length; i++) {
+        const a = this.jetTrail[i - 1], b = this.jetTrail[i];
+        if (!on(b.x, b.y, 400)) continue;
+        const k = Math.max(0, b.t / 0.55);
+        ctx.strokeStyle = pjTrail && pjTrail.tier === 'frostwing'
+          ? `rgba(196,246,255,${0.34 * k})`
+          : `rgba(198,224,240,${0.28 * k})`;
+        ctx.lineWidth = 2 + 12 * k;
+        ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+      ctx.lineCap = 'butt';
+    }
     for (const t of this.jetTrail) {
       if (!on(t.x, t.y)) continue;
       const a = Math.max(0, t.t / 0.55);
-      ctx.fillStyle = `rgba(${this.frostwing ? '170,240,255' : '180,220,255'},${a * 0.5})`;
-      ctx.beginPath(); ctx.arc(t.x, t.y, 10 * a + 3, 0, TAU); ctx.fill();
+      ctx.fillStyle = `rgba(${pjTrail && pjTrail.tier === 'frostwing' ? '190,244,255' : '190,220,240'},${a * 0.32})`;
+      ctx.beginPath(); ctx.arc(t.x, t.y, 9 * a + 2, 0, TAU); ctx.fill();
+    }
+    /* vapour cones: the wingtips pull cloud when the aircraft is fast and turning hard */
+    if (pjTrail && pjTrail.speed > 900) {
+      const k = Math.min(1, (pjTrail.speed - 900) / 1200);
+      for (const side of [-1, 1]) {
+        const tx = pjTrail.x + Math.cos(pjTrail.ang + Math.PI / 2) * side * 54 - Math.cos(pjTrail.ang) * 18;
+        const ty = pjTrail.y + Math.sin(pjTrail.ang + Math.PI / 2) * side * 54 - Math.sin(pjTrail.ang) * 18;
+        const g = ctx.createRadialGradient(tx, ty, 1, tx, ty, 20 + k * 16);
+        g.addColorStop(0, `rgba(255,255,255,${0.28 + k * 0.36})`);
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(tx, ty, 20 + k * 16, 0, TAU); ctx.fill();
+      }
     }
     for (const m of this.jetMissiles) {
       if (!on(m.x, m.y)) continue;
@@ -11356,7 +11798,54 @@ export class Game {
       ctx.fillStyle = live ? 'rgba(255,140,80,0.95)' : 'rgba(150,150,150,0.5)';
       ctx.beginPath(); ctx.moveTo(-14, -4); ctx.lineTo(-32, 0); ctx.lineTo(-14, 4); ctx.fill();
       ctx.restore();
+      if (live && this.playerJet) {
+        const pulse = 0.4 + Math.sin(this.simulationTime * 18) * 0.3;
+        ctx.strokeStyle = `rgba(255,110,90,${pulse})`;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath(); ctx.arc(m.x, m.y, 24, 0, TAU); ctx.stroke();
+      }
     }
+    /* SALVO ROCKETS: a bright motor and a smoke trail, close to the ground */
+    for (const r of this.jetRockets) {
+      if (!on(r.x, r.y)) continue;
+      const a = Math.atan2(r.vy, r.vx);
+      ctx.save();
+      ctx.translate(r.x, r.y);
+      ctx.rotate(a);
+      ctx.fillStyle = 'rgba(232,238,240,0.55)';
+      ctx.beginPath(); ctx.ellipse(-22, 0, 24, 5, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#d8dee2';
+      ctx.beginPath(); ctx.roundRect(-10, -2.6, 20, 5.2, 2.6); ctx.fill();
+      ctx.fillStyle = 'rgba(255,196,120,0.95)';
+      ctx.beginPath(); ctx.moveTo(-10, -3); ctx.lineTo(-30, 0); ctx.lineTo(-10, 3); ctx.fill();
+      ctx.restore();
+    }
+
+    /* LANCE BEAMS: a white line of cold light with a hot core */
+    for (const b of this.lanceBeams) {
+      const k = b.life / b.max;
+      const ex = b.x + Math.cos(b.ang) * 2600, ey = b.y + Math.sin(b.ang) * 2600;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const g = ctx.createLinearGradient(b.x, b.y, ex, ey);
+      g.addColorStop(0, `rgba(225,250,255,${0.85 * k})`);
+      g.addColorStop(0.7, `rgba(150,235,255,${0.5 * k})`);
+      g.addColorStop(1, 'rgba(120,220,255,0)');
+      ctx.strokeStyle = g;
+      ctx.lineWidth = 16 * k;
+      ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(ex, ey); ctx.stroke();
+      ctx.strokeStyle = `rgba(255,255,255,${0.9 * k})`;
+      ctx.lineWidth = 4 * k;
+      ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(ex, ey); ctx.stroke();
+      // muzzle bloom
+      const bloom = ctx.createRadialGradient(b.x, b.y, 2, b.x, b.y, 120 * k);
+      bloom.addColorStop(0, `rgba(210,248,255,${0.7 * k})`);
+      bloom.addColorStop(1, 'rgba(210,248,255,0)');
+      ctx.fillStyle = bloom;
+      ctx.beginPath(); ctx.arc(b.x, b.y, 120 * k, 0, TAU); ctx.fill();
+      ctx.restore();
+    }
+
     // seeker box on whatever the nose is holding
     const pj = this.playerJet;
     if (pj && pj.lock) {
@@ -11372,10 +11861,23 @@ export class Game {
         ctx.lineTo(l.x + sx * s2 - sx * 10, l.y + sy * s2);
         ctx.stroke();
       }
+      // inner ring closes as the seeker settles: a visible lock tone
+      const settle = 0.5 + Math.sin(this.simulationTime * 14) * 0.5;
+      ctx.strokeStyle = l.air ? `rgba(180,245,255,${0.35 + settle * 0.4})` : `rgba(255,214,150,${0.3 + settle * 0.35})`;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(l.x, l.y, 16 + settle * 6, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(l.x - 6, l.y); ctx.lineTo(l.x + 6, l.y);
+      ctx.moveTo(l.x, l.y - 6); ctx.lineTo(l.x, l.y + 6); ctx.stroke();
+      // lead pipper: where the target will be when a missile arrives
+      const d = Math.hypot(l.x - pj.x, l.y - pj.y);
+      const t = d / 900;
+      const px2 = l.x + this.pvx * t * 0.5, py2 = l.y + this.pvy * t * 0.5;
+      ctx.strokeStyle = 'rgba(255,240,200,0.7)';
+      ctx.beginPath(); ctx.arc(px2, py2, 4, 0, TAU); ctx.stroke();
       ctx.font = 'bold 10px ui-monospace, monospace';
       ctx.fillStyle = l.air ? '#bff2ff' : '#ffd8a0';
       ctx.textAlign = 'center';
-      ctx.fillText(`${l.label} · ${Math.round(Math.hypot(l.x - pj.x, l.y - pj.y))}m`, l.x, l.y - 38);
+      ctx.fillText(`${l.label} · ${Math.round(d)}m`, l.x, l.y - 38);
       ctx.textAlign = 'left';
       ctx.restore();
     }
@@ -11385,7 +11887,17 @@ export class Game {
     for (const j of this.armyJets) {
       if (!on(j.x, j.y, 300)) continue;
       const flying = j.state !== 'parked' && !j.manned;
-      const scale = 2.1;
+      // Squadron aces fly a heavier airframe: a longer wingspan reads at a glance.
+      const scale = j.ace ? 2.42 : flying ? 2.1 : 2.1;
+      if (this.playerJet === j) {
+        // the operative's own airframe sits in a cold pool of light, so it can be found
+        // in a four-aircraft dogfight without looking at the HUD
+        const glow = ctx.createRadialGradient(j.x, j.y, 10, j.x, j.y, 130);
+        glow.addColorStop(0, 'rgba(150,235,255,0.18)');
+        glow.addColorStop(1, 'rgba(150,235,255,0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath(); ctx.arc(j.x, j.y, 130, 0, TAU); ctx.fill();
+      }
       if (this.playerJet === j || flying) {
         ctx.save();
         ctx.fillStyle = 'rgba(0,0,0,0.28)';
@@ -11396,7 +11908,8 @@ export class Game {
       }
       this.drawFighter(ctx, j.x, j.y, j.ang, this.playerJet === j ? j.alt : flying ? j.alt : 0,
         scale, this.playerJet === j ? (j.boost || 0) : flying ? 0.35 : 0, this.playerJet === j,
-        !this.playerJet && !flying, j.tier);
+        !this.playerJet && !flying, j.tier,
+        this.playerJet === j ? (j.missiles ?? 0) : 0, !!j.ace, 1 - j.hp / Math.max(1, j.maxHp));
       if (this.playerJet === j || flying) {
         const frac = Math.max(0, j.hp / j.maxHp);
         ctx.fillStyle = 'rgba(0,0,0,0.5)';
@@ -11405,13 +11918,9 @@ export class Game {
         ctx.fillRect(j.x - 40, j.y - 96, 80 * frac, 6);
       }
       if (this.playerJet === j) {
-        ctx.fillStyle = 'rgba(170,240,255,0.85)';
-        ctx.font = 'bold 12px ui-monospace, monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText((j.boost || 0) > 0.5 ? `AFTERBURNER · ${Math.round(j.speed)}` : `INTERCEPTOR · ${Math.round(j.speed)}`,
-          j.x, j.y - 108);
-        ctx.textAlign = 'left';
-      } else if (!flying && this.nearArmyJet() === j) {
+        // The cockpit overlay in drawJetOverlay carries the instruments; the only thing
+        // worth drawing over the airframe is the burner flame it is already inside.
+      } else if (!flying && !this.playerJet && this.nearArmyJet() === j) {
         ctx.fillStyle = j.tier === 'prototype' ? 'rgba(255,222,160,0.95)'
           : j.tier === 'frostwing' ? 'rgba(200,246,255,0.98)' : 'rgba(200,240,255,0.9)';
         ctx.font = 'bold 12px ui-monospace, monospace';
@@ -15062,6 +15571,110 @@ export class Game {
     ctx.strokeRect(x, y, w, 12);
     ctx.restore();
     ctx.textAlign = 'left';
+  }
+
+  /**
+   * THE COCKPIT.
+   *
+   * Everything the pilot needs, drawn on the glass: the heat tape for the cannon, the
+   * rounds on the rails and in the pods, the lance capacitor, the camera the operative is
+   * looking through, and a screaming warning when something is inbound.
+   */
+  private drawJetOverlay(ctx: CanvasRenderingContext2D) {
+    const j = this.playerJet;
+    if (!j) return;
+    const cx = this.w / 2, cy = this.h / 2;
+    const heat = j.heat ?? 0;
+    const jam = (j.jam ?? 0) > 0;
+    const rwr = (j.rwr ?? 0) > 0;
+    const charge = j.charge ?? 0;
+    const tierName = j.tier === 'prototype' ? 'PROTOTYPE' : j.tier === 'frostwing' ? 'FROSTWING'
+      : j.tier === 'standard' ? 'INTERCEPTOR' : 'INTERCEPTOR';
+    const viewName = j.view === 1 ? 'TACTICAL' : j.view === 2 ? 'GUN CAM' : 'CHASE';
+    ctx.save();
+    ctx.font = 'bold 11px "Share Tech Mono", ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+
+    /* heat tape: down the left edge, out of the fight */
+    const hx = 26, hy = cy - 5, hw = 150;
+    ctx.fillStyle = 'rgba(4,14,18,0.6)';
+    ctx.fillRect(hx - 2, hy - 2, hw + 4, 14);
+    const hg = ctx.createLinearGradient(hx, 0, hx + hw, 0);
+    hg.addColorStop(0, '#5fe3c8'); hg.addColorStop(0.6, '#ffd166'); hg.addColorStop(1, '#ff6a4d');
+    ctx.fillStyle = hg;
+    ctx.fillRect(hx, hy, hw * heat, 10);
+    ctx.strokeStyle = jam ? 'rgba(255,120,90,0.95)' : 'rgba(150,230,240,0.5)';
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(hx, hy, hw, 10);
+    ctx.fillStyle = jam ? '#ff9a8a' : 'rgba(190,240,250,0.85)';
+    ctx.font = '9px "Share Tech Mono", ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(jam ? 'CANNON JAMMED' : 'CANNON HEAT', hx, hy - 12);
+    ctx.fillText(`${Math.round(heat * 100)}%`, hx + 96, hy - 12);
+
+    /* the loadout, under the reticle */
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 11px "Share Tech Mono", ui-monospace, monospace';
+    const ammo = `AAM ${j.missiles ?? 0}   RKT ${j.rocketsPlayer ?? 0}   FLR ${j.flares ?? 0}`
+      + ((j.lance ?? 0) > 0 ? `   LANCE ${j.lance}` : '');
+    ctx.fillStyle = 'rgba(200,246,255,0.92)';
+    ctx.fillText(ammo, cx, cy + 62);
+    ctx.fillStyle = 'rgba(150,210,225,0.75)';
+    ctx.font = '9px "Share Tech Mono", ui-monospace, monospace';
+    ctx.fillText(`${tierName} · ${viewName} VIEW · ${Math.round(j.speed)} M/S · ALT ${Math.round(j.alt)}`, cx, cy + 78);
+
+    /* lance capacitor: a ring that fills while R is held */
+    if (charge > 0) {
+      ctx.strokeStyle = 'rgba(210,250,255,0.9)';
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(cx, cy, 44, -Math.PI / 2, -Math.PI / 2 + charge * TAU); ctx.stroke();
+      ctx.fillStyle = 'rgba(220,252,255,0.85)';
+      ctx.font = '9px "Share Tech Mono", ui-monospace, monospace';
+      ctx.fillText('CHARGING', cx, cy - 58);
+    }
+
+    /* RWR: a missile is going to arrive in about a second */
+    if (rwr) {
+      const pulse = 0.45 + Math.sin(this.simulationTime * 20) * 0.35;
+      ctx.strokeStyle = `rgba(255,90,70,${pulse})`;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(10.5, 10.5, this.w - 21, this.h - 21);
+      ctx.fillStyle = `rgba(255,120,100,${0.55 + pulse * 0.4})`;
+      ctx.font = 'bold 15px "Share Tech Mono", ui-monospace, monospace';
+      ctx.fillText('MISSILE INBOUND · SPACE FOR FLARES', cx, cy - 190);
+    }
+
+    /* speed streaks on the canopy at speed */
+    const spd = Math.hypot(this.pvx, this.pvy);
+    if (spd > 700) {
+      const k = Math.min(1, (spd - 700) / 1500);
+      ctx.strokeStyle = `rgba(210,240,255,${0.12 + k * 0.18})`;
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 26; i++) {
+        const a = (i / 26) * TAU + this.simulationTime * 0.35;
+        const r0 = Math.min(this.w, this.h) * (0.42 + ((i * 37) % 23) / 60);
+        const len = 40 + k * 120;
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+        ctx.lineTo(cx + Math.cos(a) * (r0 + len), cy + Math.sin(a) * (r0 + len));
+        ctx.stroke();
+      }
+    }
+
+    /* reticle: a fighter pipper, not a crosshair */
+    ctx.strokeStyle = 'rgba(200,250,255,0.75)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(cx, cy, 22, 0, TAU); ctx.stroke();
+    for (const a of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * 26, cy + Math.sin(a) * 26);
+      ctx.lineTo(cx + Math.cos(a) * 38, cy + Math.sin(a) * 38);
+      ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(210,250,255,0.85)';
+    ctx.beginPath(); ctx.arc(cx, cy, 1.8, 0, TAU); ctx.fill();
+    ctx.textAlign = 'left';
+    ctx.restore();
   }
 
   private drawMinimap(ctx: CanvasRenderingContext2D) {
