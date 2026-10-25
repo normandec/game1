@@ -94,6 +94,8 @@ export interface Hud {
   /** Cockpit systems: rounds on the rails, cannon heat, camera view, inbound warning. */
   jetMissiles: number; jetRockets: number; jetLance: number;
   jetHeat: number; jetJam: boolean; jetView: string; jetRwr: boolean; jetTier: string;
+  /** Developer console: the run was started from the dev panel and cannot be lost. */
+  devInfinite: boolean; devSector: number;
   /** The kit: four groups of item chips, built every HUD tick. */
   inventory: { group: string; items: { label: string; detail: string; tone: string }[] }[];
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
@@ -370,6 +372,8 @@ interface Heli {
   orbitA: number; medevac: boolean; carrying: number; announced: boolean;
   bank: number;
   home?: number; altitude?: number; serviceT?: number; sortieT?: number;
+  /** Flown off the board for good: no bay, no second sortie. Used when the island stands down. */
+  retire?: boolean;
 }
 interface VTOL {
   x: number; y: number; tx: number; ty: number;
@@ -638,6 +642,16 @@ export class Game {
   private airResponse = 0;
   /** Accumulated provocation: every bomb and every strafing pass adds to it. */
   private airResponseHeat = 0;
+
+  /* ---------------- the developer console ---------------- *
+   * Both of these are set only from the start screen: `devInfiniteLives` never turns
+   * itself on, so a normal run can never inherit it.
+   */
+  devInfiniteLives = false;
+  /** Sector the operative was inserted into by the dev panel (1 when it was never used). */
+  devSector = 1;
+  /** Set on a prison escape: THE CAGE does not answer with landing waves. */
+  private cageEscaped = false;
   private airResponseWave = 0;
   private airResponseT = 0;
   /** Flare cloud still burning; hostile rockets lose lock while it lasts. */
@@ -1398,6 +1412,7 @@ export class Game {
     // The sea wakes up with the world: three moored skiffs and two patrols on station.
     this.drivingBoat = null;
     this.islandAlarmT = 0; this.islandWaves = 0; this.islandLanded = false;
+    this.cageEscaped = false;
     this.prisonFinale = false;
     // Reefs: the shallow approaches around the island are mined by nature, not by Hydra.
     this.reefs = [
@@ -1723,8 +1738,24 @@ export class Game {
     for (const f of this.facilities) f.remaining = this.enemies.filter(e => e.facilityId === f.id).length;
   }
 
-  startRun(cls = 'assault', support = 'aegis') {
-    this.reset();
+  /**
+   * Begin a run.
+   *
+   * `opts` exists for the developer console on the start screen: it can drop the operative
+   * straight into any sector, and it can switch on infinite lives. Both are off unless the
+   * dev panel asked for them, so a normal deploy behaves exactly as it always did.
+   */
+  startRun(cls = 'assault', support = 'aegis', opts: { sector?: number; infiniteLives?: boolean } = {}) {
+    const wanted = clamp(Math.round(opts.sector ?? 1), 1, SECTORS.length);
+    this.devInfiniteLives = !!opts.infiniteLives;
+    this.devSector = wanted;
+    if (wanted === 1) {
+      this.reset();
+    } else {
+      // `reset(false)` keeps the sector we just chose: the campaign is skipped, nothing else is.
+      this.sector = wanted;
+      this.reset(false);
+    }
     this.mouseX = this.w / 2; this.mouseY = this.h / 2 - 100;
     // apply starting loadout
     if (cls === 'assault') {
@@ -1751,7 +1782,15 @@ export class Game {
       this.mods.emp = Math.max(this.mods.emp, 0.55);
     }
     this.status = 'playing';
-    this.setBanner('PROTOCOL SOLAR ECLIPSE', 'ENEMY COMMAND IS ALREADY HUNTING YOU');
+    if (this.devInfiniteLives) {
+      this.setBanner('DEV DEPLOY · INFINITE LIVES', `SECTOR ${this.sector} / ${SECTORS[this.sector - 1].name} · THE OPERATIVE CANNOT BE KILLED`);
+      this.addText(this.px, this.py - 110, 'DEVELOPER CONSOLE ACTIVE', '#ffd166', 17);
+    } else if (wanted > 1) {
+      this.setBanner('DEV DEPLOY', `SECTOR ${this.sector} / ${SECTORS[this.sector - 1].name}`);
+      this.addText(this.px, this.py - 110, `INSERTED INTO SECTOR ${this.sector}`, '#8be8ff', 17);
+    } else {
+      this.setBanner('PROTOCOL SOLAR ECLIPSE', 'ENEMY COMMAND IS ALREADY HUNTING YOU');
+    }
     this.tellStory(PROLOGUE, 14);
     sfx.resume();
   }
@@ -2236,6 +2275,7 @@ export class Game {
       jetJam: (this.playerJet?.jam ?? 0) > 0,
       jetView: this.playerJet?.view === 1 ? 'TACTICAL' : this.playerJet?.view === 2 ? 'GUN CAM' : 'CHASE',
       jetRwr: (this.playerJet?.rwr ?? 0) > 0,
+      devInfinite: this.devInfiniteLives, devSector: this.sector,
       jetTier: this.playerJet?.tier === 'prototype' ? 'PROTOTYPE'
         : this.playerJet?.tier === 'frostwing' ? 'FROSTWING' : 'INTERCEPTOR',
       jetAutopilot: !!this.playerJet?.autopilot,
@@ -2290,7 +2330,30 @@ export class Game {
     this.setAimSens(this.aimSens * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
   };
 
+  /**
+   * DEV CONSOLE · INFINITE LIVES.
+   *
+   * One place, once a frame: whatever the frame before it did to a health pool — a reef, a
+   * crashing transport, a scripted 9999 — the operative and whatever he is sitting in are
+   * put back on one hit point instead of dying.
+   */
+  /** DEV CONSOLE: with infinite lives on, nothing's hull is allowed to reach zero. */
+  private devKeep(hull: { hp: number } | null | undefined) {
+    if (!this.devInfiniteLives || !hull) return;
+    if (hull.hp < 1) hull.hp = 1;
+  }
+
+  private devHoldTheLine() {
+    if (!this.devInfiniteLives) return;
+    if (this.hp < 1) this.hp = 1;
+    if (this.playerJet && this.playerJet.hp < 1) this.playerJet.hp = 1;
+    if (this.plane && this.flyingPlane && this.plane.hp < 1) this.plane.hp = 1;
+    if (this.piloting && this.playerHeli && this.playerHeli.hp < 1) this.playerHeli.hp = 1;
+    if (this.playerTank && this.playerTank.hp < 1) this.playerTank.hp = 1;
+  }
+
   private update(dt: number) {
+    if (this.devInfiniteLives) this.devHoldTheLine();
     this.lockGrace = Math.max(0, this.lockGrace - dt);
     this.syncLockedAim();
     this.pathBudget = 1;
@@ -5120,6 +5183,40 @@ export class Game {
   }
 
   /** Back on the surface: the operative keeps the smuggled pistol and the score. */
+  /**
+   * A prison escape ends the island's interest in the operative.
+   *
+   * Called the moment the operative walks out of THE CAGE: the alarm stands down, any
+   * gunships already over the island break off and go home, and every landing craft still
+   * on the water turns around. Nothing new launches while `cageEscaped` holds.
+   */
+  private standDownIslandDefence() {
+    this.cageEscaped = true;
+    this.islandLanded = false;
+    this.islandWaves = 0;
+    this.islandAlarmT = 0;
+    let sent = 0;
+    for (const h of this.helis) {
+      if (h.medevac) continue;
+      // No bay, no second sortie: they were scrambled for a prisoner who has already gone,
+      // so they fly off the board rather than taxiing in and going back into service.
+      h.home = undefined;
+      h.retire = true;
+      if (h.state !== 'egress') sent++;
+      h.state = 'egress';
+      h.t = 0;
+    }
+    for (const b of this.boats) {
+      if (b.kind !== 'landing' || b.state === 'retreat' || b.state === 'sunk') continue;
+      b.state = 'retreat';
+      b.tx = b.homeX; b.ty = b.homeY;
+    }
+    if (sent > 0) {
+      this.addText(this.px, this.py - 132, 'GUNSHIPS BREAKING OFF — THE ISLAND IS QUIET', '#a9ecff', 15);
+      sfx.rotor();
+    }
+  }
+
   leavePrison(stats: PrisonStats, escaped: boolean) {
     // Every number that reaches the score is sanitised: a missing stat must never turn the
     // campaign score into NaN, which would silently break the run and the leaderboard.
@@ -5145,6 +5242,9 @@ export class Game {
     this.py = PRISON_DOOR.y;
     this.pvx = 0; this.pvy = 0;
     this.prisonReentry = 2.5;
+    // A man walking out of the gate is not an amphibious assault: the island's alarm stays
+    // cold, and anything already airborne goes home instead of raking the forecourt.
+    if (escaped) this.standDownIslandDefence();
     this.hp = Math.max(40, Math.min(this.maxHp, this.hp));
     this.weapon = 'pistol'; this.ammo = Infinity;
     this.weaponAmmo.set('pistol', Infinity);
@@ -6119,6 +6219,14 @@ export class Game {
    */
   private updateIslandDefence(dt: number) {
     const onIsland = this.px > 13980 && Math.hypot(this.px - ISLAND.x, this.py - ISLAND.y) < 2100;
+    // THE CAGE IS BEHIND YOU. Walking out of the prison — on foot, with a smuggled pistol —
+    // is not an invasion of the island, and the island must not answer it like one: no
+    // landing waves, no gunship flights, no garrison turning out. The silence holds until
+    // the operative is off the island; come back later and the defence is live again.
+    if (this.cageEscaped) {
+      if (!onIsland) this.cageEscaped = false;
+      else { this.islandAlarmT = 0; return; }
+    }
     if (onIsland && !this.islandLanded) this.startIslandLanding();
     if (onIsland) {
       this.islandAlarmT = Math.max(0, this.islandAlarmT - dt);
@@ -7279,7 +7387,12 @@ export class Game {
       // Attacking gunships fly in from wherever they were launched. They only
       // claim a parking bay on the way home, so a sortie never teleports an
       // aircraft onto a pad (and never hides the aircraft parked there).
-      if (h.home === undefined && h.state === 'egress') {
+      // A retired aircraft is leaving, not coming home: it must never claim a parking bay.
+      if (h.retire && Math.hypot(h.x - this.px, h.y - this.py) > 3400) {
+        this.helis.splice(i, 1);
+        continue;
+      }
+      if (h.home === undefined && h.state === 'egress' && !h.retire) {
         const slot = this.parkedHelis.findIndex((p, index) => !p.taken && ![...this.hangarClaims.values()].includes(index));
         if (slot >= 0) {
           h.home = slot;
@@ -9790,6 +9903,7 @@ export class Game {
       // they burn, the airframe takes a third less.
       const breakFactor = this.jetFlareT > 0 ? 0.34 : 0.5;
       j.hp = Math.max(0, j.hp - dmg * breakFactor);
+      this.devKeep(j);
       this.sparks(j.x, j.y, '#cfe8ff', 7);
       this.flash = Math.max(this.flash, 0.12); this.flashColor = '200,235,255';
       sfx.hit();
@@ -9798,6 +9912,7 @@ export class Game {
     }
     if (this.flyingPlane && this.plane) {
       this.plane.hp = Math.max(0, this.plane.hp - dmg);
+      this.devKeep(this.plane);
       this.sparks(this.plane.x, this.plane.y, '#ffbe82', 8);
       if (this.plane.hp <= 0) {
         const x = this.plane.x, y = this.plane.y;
@@ -9813,6 +9928,7 @@ export class Game {
     if (this.playerTank) {
       const t = this.playerTank;
       t.hp = Math.max(0, t.hp - dmg * 0.35);
+      this.devKeep(t);
       this.sparks(t.x, t.y, '#ffd166', 9);
       if (t.hp <= 0) {
         this.playerTank = null;
@@ -9829,12 +9945,14 @@ export class Game {
     if (this.drivingBoat) {
       const b = this.drivingBoat;
       b.hp = Math.max(0, b.hp - dmg);
+      this.devKeep(b);
       this.sparks(b.x, b.y, '#9fe6ef', 6);
       if (b.hp <= 0) { this.sinkBoat(b); }
       return;
     }
     if (this.drivingVan) {
       const v = this.drivingVan; v.hp = Math.max(0, v.hp - dmg);
+      this.devKeep(v);
       if (v.hp <= 0) {
         v.dead = true; v.driving = false; this.drivingVan = null;
         this.hp = Math.max(1, this.hp - 35); this.iFrames = 1.5;
@@ -9848,6 +9966,7 @@ export class Game {
     if (this.piloting && this.playerHeli) {
       const h = this.playerHeli;
       h.hp -= dmg;
+      this.devKeep(h);
       this.sparks(h.x, h.y, '#8be8ff', 8);
       if (h.hp <= 0) {
         const crashX = h.x, crashY = h.y;
@@ -9893,6 +10012,9 @@ export class Game {
       for (let i = 0; i < 14; i++)
         this.addParticle(this.px, this.py, Math.cos(a + rand(-1, 1)) * rand(80, 260), Math.sin(a + rand(-1, 1)) * rand(80, 260), rand(0.25, 0.6), rand(2, 5), '#ff5d6c', true);
     } else { this.flash = Math.max(this.flash, 0.12); this.flashColor = '255,80,80'; }
+    // DEV CONSOLE · INFINITE LIVES. He still takes every hit and the bar still falls — it
+    // just stops one point above the floor, so nothing in the world can end the run.
+    if (this.hp <= 0 && this.devInfiniteLives) this.hp = 1;
     if (this.hp <= 0) this.die();
   }
 
