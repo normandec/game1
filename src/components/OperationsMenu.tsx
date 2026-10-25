@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { CLASSES, SUPPORTS } from '../game/engine';
+import { SECTORS } from '../game/world';
 import type { ScoreEntry } from '../game/scores';
 import { PHASE_STORY, PROLOGUE } from '../game/campaign';
 import { BUILD_STAMP, GAME_VERSION, VERSION_LABEL } from '../game/version';
@@ -8,6 +9,9 @@ interface Props {
   onStart: () => void; onTour: () => void;
   scores: ScoreEntry[]; name: string; setName: (v: string) => void;
   cls: string; setCls: (v: string) => void; support: string; setSupport: (v: string) => void;
+  fullscreen: boolean; onFullscreen: () => void;
+  /** DEVELOPER CONSOLE: start a run on chosen ground, optionally without the risk of dying. */
+  onDevDeploy: (sector: number, infiniteLives: boolean) => void;
 }
 
 export function ShieldMark({ className = '' }: { className?: string }) {
@@ -16,8 +20,23 @@ export function ShieldMark({ className = '' }: { className?: string }) {
 
 export default function OperationsMenu(p: Props) {
   const [tab, setTab] = useState('operation');
+  const [dev, setDev] = useState(false);
+  const [devSector, setDevSector] = useState(1);
+  const [devLives, setDevLives] = useState(false);
   return <div className="operations-menu">
-    <header className="operations-header"><div className="operations-emblem"><ShieldMark/><span>S.H.I.E.L.D.<small>STRATEGIC OPERATIONS DIVISION</small></span></div><span className="operations-build">CLASSIFIED <b>LEVEL 07</b><em className="operations-version">{VERSION_LABEL}</em></span></header>
+    <header className="operations-header"><div className="operations-emblem"><ShieldMark/><span>S.H.I.E.L.D.<small>STRATEGIC OPERATIONS DIVISION</small></span></div><span className="operations-build">CLASSIFIED <b>LEVEL 07</b>
+      <em className="operations-version">{VERSION_LABEL}</em>
+      <span className="operations-tools">
+        <button type="button" className="screen-tool" onClick={p.onFullscreen}
+          aria-label={p.fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+          title={p.fullscreen ? 'Leave fullscreen' : 'Play fullscreen'}>
+          <span aria-hidden="true">{p.fullscreen ? '\u2715' : '\u26F6'}</span>{p.fullscreen ? 'EXIT FULLSCREEN' : 'FULLSCREEN'}
+        </button>
+        <button type="button" className={`screen-tool dev-tool${dev ? ' active' : ''}`} onClick={() => setDev(v => !v)}
+          aria-expanded={dev} aria-label="Developer console" title="Developer console — insertion sector and infinite lives">
+          <span aria-hidden="true">{'\u26A1'}</span>DEV
+        </button>
+      </span></span></header>
     <nav className="operations-tabs" aria-label="Main menu">{[['operation', 'OPERATION'], ['loadout', 'LOADOUT'], ['intel', 'FIELD INTEL'], ['story', 'DOSSIER'], ['records', 'SERVICE RECORD']].map(([key, text]) => <button className={tab === key ? 'selected' : ''} onClick={() => setTab(key)} key={key}>{text}</button>)}</nav>
     {tab === 'operation' ? <main className="operation-hero">
       <div className="operation-eyebrow"><span/> OPERATION BLACK VAULT <i className="operation-version">BUILD {VERSION_LABEL}</i></div>
@@ -56,6 +75,7 @@ export default function OperationsMenu(p: Props) {
 <p><b>WINTER SECTORS.</b> The Arctic Relay is fought on snow: drifts line every road, ploughed lanes cut through them, and the municipal ploughs work their rounds in real time, throwing the load onto the shoulder and piling the banks higher as you watch. Roofs, hulls and roads all carry the weather.</p>
 <p><b>EVERY SECTOR HAS ITS OWN SOUTH.</b> The new ground below the old south rampart is no longer empty. The Fallen Hub has a drowned pump station, a sluice and a sunken archive; the Red Mesa a cliff fort, derricks and a refinery rail yard; the Arctic an ice station, a frozen airstrip and the glacier wall; the Venom Marsh stilt laboratories over a drowned temple; the Nexus a serpent reactor, an obelisk line and a reliquary. Each is held by that sector's own regiment.</p>
 <p><b>THE CROSSING.</b> The island prison is reached over an orange suspension bridge. It is a structure, not scenery: <b>bomb the span and it falls</b>. Nothing crosses to the Cage after that — not you, not the custody officers.</p>
+<p><b>GETTING OUT THE OTHER SIDE.</b> Walking out of THE CAGE is not an invasion of the island: the alarm stays cold and <b>no landing waves, no gunships and no garrison</b> come for a man on foot with a smuggled pistol. Anything already airborne breaks off and leaves. The silence holds until you are off the island — come back later and the defence answers like it always did.</p>
 <p><b>ATLAS</b> cargo planes deploy parachute troops. Twin-rotor <b>MANTIS</b> helicopters hover while infantry descends on two ropes. Rockets and bombs can break fortifications in sections, including blast doors. New openings are real routes for vehicles and infantry.</p><p><b>CAPTURED GUNSHIP / THREE STATIONS.</b> The <b>chain gun</b> answers anything on the ground or in the air. <b>Hellfire</b> is ground-attack only and cannot lock or damage an aircraft. <b>Sidewinder</b> is air-to-air only, steers itself into transports, gunships and troops still on the ropes, and never rakes the ground. Switch with <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> (or <kbd>X</kbd>); the HUD shows a separate magazine for each and an air-contact lock light.</p></div>
         <div><h3>HELIOS / THE NIGHT PROTOCOL</h3><p>The sector's power flows from <b>HELIOS at X 7300 / Y 3400</b>: six turbine generators and four armored server blocks, defended by fixed machine guns, an elite garrison and two marching patrols. Destroy all ten cells and the grid collapses — searchlights, radar and warehouse floods go dark. HYDRA switches to helmet lamps and deploys two hunting columns toward your last position.</p></div>
         <div><h3>GOLIATH / MNEMOSYNE</h3><p>The enlarged warehouse fortress at <b>X 2800 / Y 4520</b> feeds HYDRA's reserves from four mega-storage halls filled with oversized cargo: Tesseract shielding, a heavy M79 crate, DMR armor-piercing rounds, AEGIS cells, nano-stims and a rocket arsenal. Goliath and Kraken both field marching row patrols. The unlisted Mnemosyne Library is farther north.</p></div>
@@ -74,6 +94,27 @@ export default function OperationsMenu(p: Props) {
       {tab === 'story' && <div className="field-intel dossier-entries">{[PROLOGUE, ...Object.values(PHASE_STORY)].map(s => <article key={s.id}><small>{s.channel}</small><h3>{s.title}</h3><p>{s.text}</p></article>)}</div>}
       {tab === 'records' && <div className="service-records"><div className="record-head"><span>RANK / CALLSIGN</span><span>WAVE</span><span>SCORE</span></div>{p.scores.length ? p.scores.map((s, i) => <div className="record-line" key={`${s.date}-${i}`}><span><small>{String(i + 1).padStart(2, '0')}</small>{s.name}</span><span>{s.wave}</span><strong>{s.score.toLocaleString()}</strong></div>) : <p>No records yet. Complete an operation to register your callsign.</p>}<small className="records-note">Stored on this device. Campaign scores are saved at defeat or final victory.</small></div>}
     </section>}
+    {dev && <div className="dev-console" role="dialog" aria-modal="true" aria-label="Developer console" onClick={e => { if (e.target === e.currentTarget) setDev(false); }}>
+      <div className="dev-console-card">
+        <header><span><i aria-hidden="true">&#9889;</i><small>DEVELOPER CONSOLE</small></span><button type="button" onClick={() => setDev(false)} aria-label="Close developer console">CLOSE &#10005;</button></header>
+        <h2>Drop straight into a sector.</h2>
+        <p className="dev-lead">Pick the ground, decide whether the operative can die, then deploy. Nothing here changes a normal run unless you deploy from this panel.</p>
+        <div className="dev-sectors">{SECTORS.map((s, i) => <button type="button" key={s.id} className={devSector === i + 1 ? 'active' : ''} onClick={() => setDevSector(i + 1)} aria-pressed={devSector === i + 1}>
+          <small>0{i + 1}</small><strong>{s.name}</strong><span>{s.codename} / {s.weather.toUpperCase()}</span>
+        </button>)}</div>
+        <label className="dev-lives">
+          <input type="checkbox" checked={devLives} onChange={e => setDevLives(e.target.checked)} />
+          <span><b>INFINITE LIVES</b><small>The operative cannot be killed: every hit still lands, but the pool never reaches zero. Off unless you tick it.</small></span>
+        </label>
+        <div className="dev-actions">
+          <button type="button" className="deploy-button" onClick={() => p.onDevDeploy(devSector, devLives)}>
+            DEPLOY TO SECTOR {devSector} <span>&#8599;</span>
+          </button>
+          <button type="button" className="tour-button" onClick={() => setDev(false)}>CANCEL<span>BACK TO THE MENU</span></button>
+        </div>
+        <p className="dev-note">SECTOR {devSector} / {SECTORS[devSector - 1].name} · {devLives ? 'INFINITE LIVES ON' : 'NORMAL RULES'} · {p.cls.toUpperCase()} + {p.support.toUpperCase()}</p>
+      </div>
+    </div>}
     <footer className="operations-footer"><div><span className="secure-dot"/> SECURE CHANNEL ESTABLISHED</div><span>SIX SECTORS <i>/</i> NO CAMERA SHAKE <i>/</i> KEYBOARD + TOUCH</span><small>PROTOCOL {GAME_VERSION.codename} / {BUILD_STAMP}</small></footer>
   </div>;
 }

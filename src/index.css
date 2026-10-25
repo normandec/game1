@@ -144,6 +144,52 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 .operations-build b { font-weight: 400; color: #dfc18a; margin-left: 15px; }
 /* The build on the start screen: always visible, never in the way. */
 .operations-version { display: block; margin-top: 6px; font: normal 10px 'Share Tech Mono', monospace; letter-spacing: 2.4px; color: #e7be73; text-align: right; }
+/* Beside the build: the one thing every player wants on a start screen, and the door into
+   the developer console. Both are small, quiet and out of the way of DEPLOY. */
+.operations-tools { display: flex; gap: 7px; justify-content: flex-end; margin-top: 9px; }
+.screen-tool { display: inline-flex; align-items: center; gap: 6px; padding: 7px 11px; background: #10242ecc; border: 1px solid #6f97a150; color: #a8c9c6; font: 9px 'Share Tech Mono', monospace; letter-spacing: 1.5px; cursor: pointer; transition: .18s; }
+.screen-tool > span { font-size: 12px; line-height: 0; color: #e7be73; }
+.screen-tool:hover { background: #1b3a44; border-color: #8fd4cc; color: #e6fbf5; }
+.screen-tool:focus-visible { outline: 2px solid #e7be73; outline-offset: 2px; }
+.screen-tool.dev-tool { border-color: #e7be7355; color: #dfc18a; }
+.screen-tool.dev-tool.active { background: #3a2f18; border-color: #e7be73; color: #ffe3ad; }
+
+/* DEVELOPER CONSOLE — only ever opened from the button beside the version. */
+.dev-console { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; background: #030a10e0; backdrop-filter: blur(3px); }
+.dev-console-card { width: min(720px, 100%); max-height: 88vh; overflow: auto; padding: 24px 26px 26px; background: linear-gradient(160deg, #0d1f2a 0%, #091620 60%, #0a1a22 100%); border: 1px solid #e7be7355; box-shadow: 0 24px 80px #000000aa, inset 0 0 0 1px #ffffff08; animation: float-up .25s ease-out both; }
+.dev-console-card > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e7be7326; padding-bottom: 12px; }
+.dev-console-card > header > span { display: flex; align-items: center; gap: 9px; }
+.dev-console-card > header i { font-style: normal; color: #e7be73; font-size: 15px; }
+.dev-console-card > header small { font: 9px 'Share Tech Mono', monospace; letter-spacing: 3px; color: #e7be73; }
+.dev-console-card > header button { background: none; border: 1px solid #6f97a150; color: #8fb3b6; font: 8px 'Share Tech Mono', monospace; letter-spacing: 1.6px; padding: 6px 9px; cursor: pointer; }
+.dev-console-card > header button:hover { color: #e6fbf5; border-color: #8fd4cc; }
+.dev-console-card h2 { margin: 18px 0 8px; font-size: 26px; font-weight: 500; letter-spacing: -.4px; color: #e9f4ee; }
+.dev-lead { margin: 0 0 16px; font-size: 12px; line-height: 1.7; color: #8ba4ab; }
+.dev-sectors { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.dev-sectors button { display: grid; gap: 3px; padding: 11px 12px; text-align: left; background: #11263199; border: 1px solid #4d6f7a55; color: #a9c3c4; cursor: pointer; transition: .16s; }
+.dev-sectors button small { font: 8px 'Share Tech Mono', monospace; letter-spacing: 2px; color: #5f838c; }
+.dev-sectors button strong { font-size: 11px; font-weight: 600; letter-spacing: .6px; }
+.dev-sectors button span { font: 8px 'Share Tech Mono', monospace; letter-spacing: 1.3px; color: #6d8f97; }
+.dev-sectors button:hover { border-color: #8fd4cc88; background: #173340; }
+.dev-sectors button.active { border-color: #e7be73; background: #2b2517; color: #ffe3ad; }
+.dev-sectors button.active small, .dev-sectors button.active span { color: #c8a869; }
+.dev-lives { display: flex; align-items: flex-start; gap: 12px; margin: 18px 0 4px; padding: 13px 14px; border: 1px solid #4d6f7a55; background: #0f2230aa; cursor: pointer; }
+.dev-lives:hover { border-color: #8fd4cc88; }
+.dev-lives input { width: 17px; height: 17px; margin-top: 2px; accent-color: #e7be73; cursor: pointer; }
+.dev-lives b { display: block; font: 10px 'Share Tech Mono', monospace; letter-spacing: 2px; color: #dfc18a; }
+.dev-lives small { display: block; margin-top: 4px; font-size: 11px; line-height: 1.6; color: #8ba4ab; }
+.dev-actions { display: flex; align-items: stretch; gap: 11px; margin-top: 18px; flex-wrap: wrap; }
+.dev-actions .tour-button { padding: 12px 16px; }
+.dev-note { margin: 14px 0 0; font: 8px 'Share Tech Mono', monospace; letter-spacing: 1.6px; color: #5f838c; }
+@media (max-width: 640px) {
+  .operations-tools { margin-top: 7px; }
+  .screen-tool { padding: 6px 8px; font-size: 8px; letter-spacing: 1px; }
+  .screen-tool > span { display: none; }
+  .dev-console { padding: 12px; }
+  .dev-console-card { padding: 18px 16px 20px; }
+  .dev-sectors { grid-template-columns: 1fr 1fr; }
+  .dev-console-card h2 { font-size: 21px; }
+}
 .operation-version { margin-left: 12px; font: normal 9px 'Share Tech Mono', monospace; letter-spacing: 2.2px; color: #7fb7c0; }
 .operations-tabs { display: flex; gap: 30px; margin-top: 29px; border-bottom: 1px solid #a4cbd621; overflow-x: auto; white-space: nowrap; scrollbar-width: thin; }
 .operations-tabs button { padding: 12px 0; color: #7f9da6; background: none; border: 0; border-bottom: 2px solid transparent; font: 10px 'Share Tech Mono', monospace; letter-spacing: 1.6px; transition: .2s; }
@@ -242,6 +288,8 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 .combat-sector b { display: block; font: 500 14px 'Chakra Petch', sans-serif; letter-spacing: 2px; margin: 5px 0 6px; }
 .combat-sector > span { color: #c3b08d; font-size: 9px; }
 .combat-sector i, .combat-objective i, .combat-intel i { font-style: normal; color: #4c7885; margin: 0 8px; }
+/* The dev console is on: say so, quietly, where the sector name already is. */
+.combat-dev { display: block; margin-top: 5px; font: normal 8px 'Share Tech Mono', monospace; font-style: normal; letter-spacing: 1.8px; color: #ffcf7a; }
 .combat-settings { display: flex; gap: 8px; pointer-events: auto; }
 .combat-settings button { color: #9abcbe; border: 1px solid #5e969c40; background: #081824df; font: 9px 'Share Tech Mono', monospace; padding: 10px 12px; }
 .combat-settings kbd { margin-left: 9px; color: #5b7e8c; }

@@ -29,6 +29,7 @@ const emptyHud: Hud = {
   driving: false, tank: false, flyingPlane: false, jet: false, jetBoost: 0,
   jetSpeed: 0, jetAlt: 0, jetMode: 'cannon', jetFlares: 0, jetLock: '', jetAutopilot: false, frostwing: false, airThreat: 0, jetAce: false,
     jetMissiles: 0, jetRockets: 0, jetLance: 0, jetHeat: 0, jetJam: false, jetView: 'CHASE', jetRwr: false, jetTier: 'INTERCEPTOR',
+  devInfinite: false, devSector: 1,
   inventory: [],
   allies: 0, barricades: 0, siegeActive: false,
   lasersHeld: 0, poisCaptured: 0, poisTotal: 5, vaultFound: false, nearPrompt: '',
@@ -163,6 +164,21 @@ export default function App() {
     return () => { ro.disconnect(); g.destroy(); gameRef.current = null; };
   }, [handleOver, togglePause, handleUpgrade, handleVictory, handleTransit, handleVault, handlePrison, handleArrestAnim]);
 
+  /**
+   * DEVELOPER CONSOLE. Deploy straight into a sector, with or without infinite lives.
+   * Nothing here is reachable from gameplay: the start screen has to ask for it.
+   */
+  const startDev = useCallback((sector: number, infinite: boolean) => {
+    const g = gameRef.current;
+    if (!g) return;
+    setBriefing(false);
+    saveName(nameRef.current);
+    setEntryDate(0); setIsBest(false); setChoices([]); setBuild([]);
+    g.startRun(clsRef.current, supportRef.current, { sector, infiniteLives: infinite });
+    setStatus('playing');
+    sfx.click();
+  }, [setStatus]);
+
   const startRun = useCallback(() => {
     const g = gameRef.current;
     if (!g) return;
@@ -294,6 +310,7 @@ export default function App() {
           onStart={() => setBriefing(true)} scores={scores} name={name} setName={setName}
           cls={cls} setCls={chooseCls} support={support} setSupport={chooseSupport}
           onTour={() => setTour(true)}
+          fullscreen={fullscreen} onFullscreen={toggleFullscreen} onDevDeploy={startDev}
         />
       )}
       {status === 'menu' && briefing && <OperationBriefing onBegin={startRun} onBack={() => setBriefing(false)} />}
