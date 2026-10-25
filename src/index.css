@@ -142,6 +142,9 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 .operations-emblem small { display: block; margin-top: 4px; font: 8px 'Share Tech Mono', monospace; letter-spacing: 1.9px; color: #72969f; }
 .operations-build { color: #6e959f; font: 9px 'Share Tech Mono', monospace; letter-spacing: 2px; }
 .operations-build b { font-weight: 400; color: #dfc18a; margin-left: 15px; }
+/* The build on the start screen: always visible, never in the way. */
+.operations-version { display: block; margin-top: 6px; font: normal 10px 'Share Tech Mono', monospace; letter-spacing: 2.4px; color: #e7be73; text-align: right; }
+.operation-version { margin-left: 12px; font: normal 9px 'Share Tech Mono', monospace; letter-spacing: 2.2px; color: #7fb7c0; }
 .operations-tabs { display: flex; gap: 30px; margin-top: 29px; border-bottom: 1px solid #a4cbd621; overflow-x: auto; white-space: nowrap; scrollbar-width: thin; }
 .operations-tabs button { padding: 12px 0; color: #7f9da6; background: none; border: 0; border-bottom: 2px solid transparent; font: 10px 'Share Tech Mono', monospace; letter-spacing: 1.6px; transition: .2s; }
 .operations-tabs button:hover { color: #dcf9ee; }

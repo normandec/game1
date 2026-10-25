@@ -1,6 +1,6 @@
 import { sfx } from './audio';
 import type { SectorDressing } from './sectorKits';
-import type { ArmyPlan } from './army';
+import type { ArmyPlan, JetTier } from './army';
 import { AIRFIELD, VAULT_ENTRY, ARENA_W, ARENA_H, HQ, PLAYER_START, SECTORS, SpatialGrid, generateWorld, type Rect, type Zone } from './world';
 import { RoutePlanner, segmentBox, segmentCircle, type Point, type Block } from './navigation';
 import { makeGates, makeDetails, gateBlocks, drawGate, drawDetails, type HydraulicGate, type RoomDetail } from './installations';
@@ -89,6 +89,8 @@ export interface Hud {
   jetLock: string; jetAutopilot: boolean; frostwing: boolean;
   /** Hostile fighters currently hunting the operative. */
   airThreat: number;
+  /** Flying one of the two experimental airframes. */
+  jetAce: boolean;
   /** The kit: four groups of item chips, built every HUD tick. */
   inventory: { group: string; items: { label: string; detail: string; tone: string }[] }[];
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
@@ -309,6 +311,8 @@ interface ArmyTurret {
 /** Military fast jet: parked until the base is breached, then it hunts. */
 interface ArmyJet {
   x: number; y: number; ang: number; hp: number; maxHp: number;
+  /** Line airframe or one of the two experimental machines from the proving flight. */
+  tier?: JetTier;
   state: 'parked' | 'launch' | 'attack' | 'egress';
   alt: number; speed: number; cool: number; t: number;
   /** A seized interceptor: from here on the operative is the pilot. */
@@ -328,6 +332,8 @@ interface ArmyJet {
   hunter?: boolean;
   /** Rockets left in the pods of a hunter. */
   rockets?: number;
+  /** The Frostwing upgrade has already been applied to this airframe once. */
+  tuned?: boolean;
 }
 /** Attack gunship — strafes, hovers, rockets the player. */
 interface Heli {
@@ -382,6 +388,8 @@ interface PoiState {
   id: string; kind: 'airfield' | 'peggy' | 'vault' | 'laser' | 'depot' | 'library';
   x: number; y: number; r: number; name: string; sub: string;
   secret: boolean; discovered: boolean; cleared: boolean; captured: boolean; looted: boolean;
+  /** Thinly held barracks or dispersal strip: marked, but never an objective. */
+  soft?: boolean;
   gates: { x: number; y: number; built: boolean; hp: number }[];
 }
 interface Barricade { x: number; y: number; hp: number; maxHp: number; ang: number; }
@@ -1196,10 +1204,16 @@ export class Game {
       rounds: 0, gap: 0, aimX: t.x, aimY: t.y,
     }));
     this.armyInnerOpen = false;
-    this.armyJets = (world.army?.jets || []).map((j) => ({
-      x: j.x, y: j.y, ang: j.ang, hp: 420, maxHp: 420,
-      state: 'parked' as const, alt: 0, speed: 0, cool: 0, t: 0,
-    }));
+    // A prototype is a different aircraft, not a repaint: twice the structure, a hotter
+    // powerplant and a seeker that reaches further. The line ships keep their old numbers.
+    this.armyJets = (world.army?.jets || []).map((j) => {
+      const tier: JetTier = j.tier ?? 'standard';
+      const hp = tier === 'prototype' ? 1100 : 420;
+      return {
+        x: j.x, y: j.y, ang: j.ang, hp, maxHp: hp, tier,
+        state: 'parked' as const, alt: 0, speed: 0, cool: 0, t: 0,
+      };
+    });
     this.gates = makeGates(world);
     this.details = makeDetails(world);
     this.facilities = world.facilities.map(f => ({ ...f, reveal: 0, discovered: false, secured: false, alarm: false, remaining: 0 }));
@@ -1373,7 +1387,7 @@ export class Game {
     }));
     this.parkedHelis = world.parkedHelis.map((p) => ({ ...p, taken: false }));
     this.pois = world.pois.map((p) => ({
-      ...p, discovered: !p.secret, cleared: false, captured: false, looted: false,
+      ...p, discovered: !p.secret || !!p.soft, cleared: false, captured: false, looted: false,
       gates: p.gates.map((g) => ({ x: g.x, y: g.y, built: false, hp: 600 })),
     }));
     this.vaultSpot = world.vaultSpot;
@@ -2034,7 +2048,7 @@ export class Game {
   private nearPrompt(): string {
     if (this.playerJet) return 'F · EJECT FROM INTERCEPTOR';
     const jetNear = this.nearArmyJet();
-    if (jetNear) return 'F · SEIZE THE INTERCEPTOR';
+    if (jetNear) return jetNear.tier === 'prototype' ? 'F · SEIZE PROTOTYPE INTERCEPTOR' : 'F · SEIZE THE INTERCEPTOR';
     if (this.flyingPlane) return 'F · LAND BOMBER';
     if (this.playerTank) return 'F · EXIT TANK';
     if (this.drivingBoat) return 'F · EXIT BOAT';
@@ -2180,6 +2194,7 @@ export class Game {
       jetFlares: this.playerJet?.flares ?? 0,
       jetLock: this.playerJet?.lock ? `${this.playerJet.lock.label}` : '',
       airThreat: this.hunterCount(),
+      jetAce: this.playerJet?.tier === 'prototype',
       jetAutopilot: !!this.playerJet?.autopilot,
       frostwing: this.frostwing,
       vehicleHp: this.playerJet ? this.playerJet.hp : this.flyingPlane ? this.plane?.hp || 0 : this.playerTank ? this.playerTank.hp : this.drivingVan ? this.drivingVan.hp : this.piloting ? this.playerHeli?.hp || 0 : 0,
@@ -2994,13 +3009,17 @@ export class Game {
     j.manned = true;
     j.alt = 0; j.speed = 120; j.boost = 0;
     j.mode = 'cannon'; j.flares = 6; j.autopilot = false; j.lock = null;
+    const ace = j.tier === 'prototype';
     // Frostwing clearance: the airframe comes back ice-plated and with more countermeasures.
-    if (this.frostwing) {
+    // Applied once per airframe — re-boarding the same jet must never stack the bonus.
+    if (this.frostwing && !j.tuned) {
       j.maxHp = Math.round(j.maxHp * 1.5);
       j.hp = j.maxHp;
-      j.flares = 10;
+      j.flares = ace ? 16 : 10;
+      j.tuned = true;
     } else {
       j.hp = Math.max(j.hp, j.maxHp * 0.8);
+      if (ace) j.flares = Math.max(j.flares, 12);
     }
     this.px = j.x; this.py = j.y; this.pvx = 0; this.pvy = 0;
     for (const o of this.armyJets) {
@@ -3008,9 +3027,20 @@ export class Game {
       o.state = 'parked'; o.alt = 0; o.speed = 0;
     }
     for (const h of this.helis) h.state = 'egress';
-    this.score += 1500;
-    this.setBanner('INTERCEPTOR SEIZED', 'LMB FIRE · G MISSILE · X STATION · E AUTOPILOT · SPACE FLARES · SHIFT BURN');
-    this.addText(j.x, j.y - 90, 'AIRSPACE IS YOURS — NOTHING ELSE FLIES', '#a9ecff', 17);
+    if (ace) {
+      // The proving flight only ever built two of these, and neither was meant to leave
+      // the apron. Taking one is the single biggest prize in the district.
+      this.score += 6500;
+      this.setBanner('PROTOTYPE INTERCEPTOR SEIZED',
+        'EXPERIMENTAL AIRFRAME · 2.4 KM/S BURNER · 16 FLARES · TWIN CANNON');
+      this.addText(j.x, j.y - 90, 'THE PROVING FLIGHT JUST LOST ITS ONLY PILOT', '#ffd489', 18);
+      this.addText(j.x, j.y - 68, 'PROTOTYPE ON S.H.I.E.L.D. STRENGTH · +6500', '#ffe6ad', 13);
+      this.flash = 0.5; this.flashColor = '255,215,140';
+    } else {
+      this.score += 1500;
+      this.setBanner('INTERCEPTOR SEIZED', 'LMB FIRE · G MISSILE · X STATION · E AUTOPILOT · SPACE FLARES · SHIFT BURN');
+      this.addText(j.x, j.y - 90, 'AIRSPACE IS YOURS — NOTHING ELSE FLIES', '#a9ecff', 17);
+    }
     this.flash = 0.35; this.flashColor = '150,235,255';
     sfx.rotor();
   }
@@ -3040,7 +3070,7 @@ export class Game {
     const consider = (x: number, y: number, label: string, air: boolean) => {
       const dx = x - j.x, dy = y - j.y;
       const d = Math.hypot(dx, dy);
-      if (d < 60 || d > 2600) return;
+      if (d < 60 || d > (j.tier === 'prototype' ? 3400 : 2600)) return;
       const dot = (dx * nose.x + dy * nose.y) / d;
       if (dot < 0.55) return;                     // roughly 57 degrees off the nose
       const score = dot * 2 - d / 2600;
@@ -3150,13 +3180,15 @@ export class Game {
       while (turn < -Math.PI) turn += TAU;
     }
 
-    const agility = (2.5 - Math.min(1, j.speed / 1800) * 0.9) * (brake ? 1.8 : 1);
+    const ace = j.tier === 'prototype';
+    const agility = (2.5 - Math.min(1, j.speed / (ace ? 2400 : 1800)) * 0.9) * (brake ? 1.8 : 1) * (ace ? 1.12 : 1);
     j.ang += clamp(turn, -agility * dt, agility * dt);
 
     const throttle = m.y < -0.1 ? 1 : m.y > 0.1 ? -0.55 : 0;
-    const topSpeed = this.frostwing ? 2050 : 1750;
+    // Prototype airframe: 2 400 m/s on the burner, and it gets there sooner.
+    const topSpeed = ace ? 2400 : this.frostwing ? 2050 : 1750;
     const want = brake ? 210 : boost ? topSpeed : 620 + throttle * 260;
-    j.speed += (want - j.speed) * Math.min(1, dt * (boost ? 1.9 : brake ? 4.2 : 2.6));
+    j.speed += (want - j.speed) * Math.min(1, dt * (boost ? (ace ? 2.3 : 1.9) : brake ? 4.2 : 2.6));
     j.boost = lerp(j.boost || 0, boost && !brake ? 1 : 0, Math.min(1, dt * 4));
     j.alt = clamp(j.alt + (boost ? 46 : brake ? -30 : 14) * dt, 0, 480);
     j.cool = Math.max(0, j.cool - dt);
@@ -3181,7 +3213,7 @@ export class Game {
         j.cool = 1.6;
         this.fireJetMissile();
       } else {
-        j.cool = 0.055;
+        j.cool = ace ? 0.045 : 0.055;
         for (const side of [-1, 1]) {
           const a = j.ang + rand(-0.01, 0.01);
           const ox = Math.cos(j.ang + Math.PI / 2) * side * 14 + Math.cos(j.ang) * 74;
@@ -3189,8 +3221,8 @@ export class Game {
           this.bullets.push({
             x: j.x + ox, y: j.y + oy, px: j.x + ox, py: j.y + oy,
             vx: Math.cos(a) * 2100, vy: Math.sin(a) * 2100,
-            dmg: this.frostwing ? 30 : 24, life: 0.9, friendly: true,
-            color: this.frostwing ? '#c8f8ff' : '#d6f6ff', r: 3.6, hits: [],
+            dmg: ace ? 38 : this.frostwing ? 30 : 24, life: 0.9, friendly: true,
+            color: ace ? '#ffe0a0' : this.frostwing ? '#c8f8ff' : '#d6f6ff', r: ace ? 4.2 : 3.6, hits: [],
           });
         }
         this.addLight(j.x, j.y, 200, '190,240,255', 0.1);
@@ -9870,9 +9902,11 @@ export class Game {
       ctx.restore();
     }
 
-    // Base override terminals at POI centers
+    // Base override terminals at POI centers. Soft targets are not objectives: they carry
+    // no uplink, only what is standing on them.
     for (const poi of this.pois) {
       if (poi.secret && !poi.discovered) continue;
+      if (poi.soft) continue;
       const d = Math.hypot(this.px - poi.x, this.py - poi.y);
       if (d > 2200) continue;
       ctx.save();
@@ -10968,13 +11002,17 @@ export class Game {
    * reads as an aircraft next to a 2 m soldier.
    */
   private drawFighter(ctx: CanvasRenderingContext2D, x: number, y: number, ang: number,
-    alt: number, scale: number, boost: number, friendly: boolean, parked: boolean) {
+    alt: number, scale: number, boost: number, friendly: boolean, parked: boolean,
+    ace = false) {
     ctx.save();
     ctx.translate(x, y - alt * 0.22);
     ctx.rotate(ang);
     ctx.scale(scale, scale);
-    const body = friendly ? '#7d8870' : parked ? '#63705a' : '#6d7860';
-    const dark = friendly ? '#4e5747' : '#414b3c';
+    // A prototype is finished in graphite with sand-gold trim: recognisable on the apron
+    // from across the airfield, and recognisable in a dogfight from behind.
+    const body = ace ? (friendly ? '#4b4a52' : parked ? '#3f3e46' : '#46454e')
+      : friendly ? '#7d8870' : parked ? '#63705a' : '#6d7860';
+    const dark = ace ? '#26252c' : friendly ? '#4e5747' : '#414b3c';
     // wings: diamond planform, leaning back from the intakes to the tail
     ctx.fillStyle = body;
     ctx.beginPath();
@@ -11010,9 +11048,19 @@ export class Game {
     ctx.lineTo(30, 8);
     ctx.closePath(); ctx.fill();
     // intakes
-    ctx.fillStyle = '#2b3329';
+    ctx.fillStyle = ace ? '#1b1a20' : '#2b3329';
     ctx.fillRect(8, -14, 18, 6);
     ctx.fillRect(8, 8, 18, 6);
+    if (ace) {
+      // gold cheat line down the spine and two canard slivers ahead of the wing root
+      ctx.fillStyle = friendly ? '#9fe8ff' : '#dfbd78';
+      ctx.fillRect(-42, -2.2, 62, 4.4);
+      ctx.fillStyle = dark;
+      ctx.beginPath(); ctx.moveTo(20, 11); ctx.lineTo(4, 22); ctx.lineTo(2, 12); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(20, -11); ctx.lineTo(4, -22); ctx.lineTo(2, -12); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = friendly ? 'rgba(180,245,255,0.9)' : 'rgba(223,189,120,0.9)';
+      ctx.fillRect(-52, -3, 5, 6);
+    }
     // canopy
     ctx.fillStyle = 'rgba(196,236,246,0.78)';
     ctx.beginPath();
@@ -11171,7 +11219,7 @@ export class Game {
       }
       this.drawFighter(ctx, j.x, j.y, j.ang, this.playerJet === j ? j.alt : flying ? j.alt : 0,
         scale, this.playerJet === j ? (j.boost || 0) : flying ? 0.35 : 0, this.playerJet === j,
-        !this.playerJet && !flying);
+        !this.playerJet && !flying, j.tier === 'prototype');
       if (this.playerJet === j || flying) {
         const frac = Math.max(0, j.hp / j.maxHp);
         ctx.fillStyle = 'rgba(0,0,0,0.5)';
@@ -11187,10 +11235,17 @@ export class Game {
           j.x, j.y - 108);
         ctx.textAlign = 'left';
       } else if (!flying && this.nearArmyJet() === j) {
-        ctx.fillStyle = 'rgba(200,240,255,0.9)';
+        ctx.fillStyle = j.tier === 'prototype' ? 'rgba(255,222,160,0.95)' : 'rgba(200,240,255,0.9)';
         ctx.font = 'bold 12px ui-monospace, monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('F · SEIZE', j.x, j.y - 96);
+        ctx.fillText(j.tier === 'prototype' ? 'F · SEIZE PROTOTYPE' : 'F · SEIZE', j.x, j.y - 96);
+        ctx.textAlign = 'left';
+      } else if (!flying && j.tier === 'prototype' && on(j.x, j.y, 60)) {
+        // Even from a distance the experimental machine is marked, so it can be found.
+        ctx.fillStyle = 'rgba(223,189,120,0.75)';
+        ctx.font = 'bold 10px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('PROTOTYPE', j.x, j.y - 92);
         ctx.textAlign = 'left';
       }
     }

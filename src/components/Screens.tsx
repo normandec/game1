@@ -365,7 +365,7 @@ export function HudLayer({
           {hud.jet && (
             <div className="mt-2 rounded-sm border border-cyan-200/70 bg-cyan-300/15 px-2 py-1 text-cyan-50">
               <div className="flex items-baseline justify-between text-[10px] font-bold tracking-[0.18em]">
-                <span>{hud.frostwing ? '❄ FROSTWING' : '🛩 INTERCEPTOR'}</span>
+                <span>{hud.jetAce ? '⚡ PROTOTYPE' : hud.frostwing ? '❄ FROSTWING' : '🛩 INTERCEPTOR'}</span>
                 <span className="font-tech text-[9px] text-cyan-100/70">{hud.vehicleHp}/{hud.vehicleMax} HULL</span>
               </div>
               <div className="mt-1 flex items-center justify-between font-tech text-[10px] tracking-widest text-cyan-100/80">

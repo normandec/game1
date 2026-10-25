@@ -51,6 +51,21 @@ export interface ArmyStrongpoint {
   garrison: number;
 }
 
+/**
+ * A forward airfield holds more than one kind of airframe. The wing's line jets are
+ * `standard`; a `prototype` is one of the two experimental machines the proving flight
+ * keeps out east — heavier, faster, and worth stealing.
+ */
+export type JetTier = 'standard' | 'prototype';
+
+/** One of the army's soft spots: a company barracks you can walk into and clear. */
+export interface ArmySoftTarget {
+  id: string;
+  name: string;
+  sub: string;
+  x: number; y: number; w: number; h: number;
+}
+
 export interface ArmyPlan {
   /** Bounds of the whole district on the arena. */
   region: { x: number; y: number; w: number; h: number };
@@ -65,7 +80,7 @@ export interface ArmyPlan {
   /** Live armour: these drive out and fight, wave after wave. */
   tankPatrols: { x: number; y: number; ang: number }[];
   helis: { x: number; y: number; ang: number }[];
-  jets: { x: number; y: number; ang: number }[];
+  jets: { x: number; y: number; ang: number; tier?: JetTier }[];
   turrets: ArmyTurretSpot[];
   generators: { x: number; y: number }[];
   gates: ArmyGate[];
@@ -77,6 +92,13 @@ export interface ArmyPlan {
   routes: { x: number; y: number }[][];
   /** The brig: break it open and the inmates fight for whoever freed them. */
   stockade: { x: number; y: number; w: number; h: number };
+  /**
+   * The soft side of the district: thinly held company barracks and the two forward
+   * strips, marked on the map so an operative can find them before the alarm goes up.
+   */
+  softTargets: ArmySoftTarget[];
+  /** Supply caches left in the open beside the soft targets. */
+  loot: { x: number; y: number }[];
   /** Where the base alarm is tripped: crossing into the walled compound. */
   alarm: { x: number; y: number; w: number; h: number };
   spawn: { x: number; y: number };
@@ -114,6 +136,8 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
   const strongpoints: ArmyStrongpoint[] = [];
   const guards: { x: number; y: number; type: string }[] = [];
   const routes: { x: number; y: number }[][] = [];
+  const softTargets: ArmySoftTarget[] = [];
+  const loot: { x: number; y: number }[] = [];
 
   const gate = (x: number, y: number, w: number, h: number, innerGate: boolean, hp: number): ArmyGate => {
     const rects: Rect[] = [];
@@ -591,10 +615,10 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
     { x: base.x + 2460, y: y0 + 840, ang: Math.PI },
     { x: base.x + 3240, y: y0 + 840, ang: Math.PI },
   ];
-  const jets = [
-    { x: base.x + 5050, y: y0 + 860, ang: 0 },
-    { x: base.x + 6450, y: y0 + 860, ang: 0 },
-    { x: base.x + 7850, y: y0 + 860, ang: 0 },
+  const jets: { x: number; y: number; ang: number; tier?: JetTier }[] = [
+    { x: base.x + 5050, y: y0 + 860, ang: 0, tier: 'standard' },
+    { x: base.x + 6450, y: y0 + 860, ang: 0, tier: 'standard' },
+    { x: base.x + 7850, y: y0 + 860, ang: 0, tier: 'standard' },
   ];
 
   /* ---------------- the daily clutter, army issue only ---------------- */
@@ -644,9 +668,77 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
     { x: CX + 300, y: y0 + 2900 }, { x: CX - 300, y: y0 + 2900 },
   ]);
 
+  /* ================================================================== *
+   * FORWARD CANTONMENT — THE SOFT SIDE OF THE ARMY
+   *
+   * An army group this size is not uniformly dug in. Three company barracks sit out
+   * east of the wire with a stove, a stack of crates and two men awake between them,
+   * and the wing keeps two forward strips out there for dispersal — each with spare
+   * airframes on the apron, including one of the two experimental machines from the
+   * proving flight. They are the first thing an operative can actually take: light
+   * resistance, real loot, and an aircraft that does not have to be earned through
+   * the main gate.
+   * ================================================================== */
+  const cantonment = (id: string, name: string, sub: string, x: number, y: number) => {
+    const w = 560, h = 400;
+    post(id, name, x, y, w, h, 3);
+    softTargets.push({ id, name, sub, x, y, w, h });
+    // A barracks hut, a tent for the overspill, and the company's own store.
+    add(x + 40, y + 40, 460, 180, 'barrack', 46, '#3f4a40');
+    add(x + 60, y + 260, 170, 120, 'tent', 30, '#6a725e');
+    add(x + 420, y + 290, 70, 70, 'crate', 22);
+    add(x + 340, y + 300, 60, 60, 'barrel', 24, '#6e6234');
+    add(x + 30, y + 226, 500, 18, 'fence', 20, '#7d8670');
+    // Two men on duty, not a garrison: this is a place you can walk into.
+    man(x + 220, y + 240, 'armytrooper');
+    man(x + 400, y + 250, 'armyengineer');
+    loot.push({ x: x + 120, y: y + 250 }, { x: x + 470, y: y + 240 });
+  };
+  // North cantonment: on the east approach, just outside the outer rampart.
+  cantonment('cantonment-north', 'CANTONMENT · 4TH COMPANY',
+    'THINLY HELD · TWO MEN AWAKE · SUPPLY CACHES IN THE OPEN', 16580, 8740);
+  // South cantonment: the transit block, where replacements wait for a posting.
+  cantonment('cantonment-south', 'CANTONMENT · TRANSIT BARRACKS',
+    'REPLACEMENTS IN TRANSIT · NO HEAVY WEAPONS', 16580, 9940);
+  // West cantonment: inside the wire, between the parade and the east barracks.
+  cantonment('cantonment-west', 'REPLACEMENT DEPOT',
+    'A STORE HUT AND A GUARD WHO IS NOT PAYING ATTENTION', 8780, 9500);
+
+  /**
+   * A forward strip: dispersal apron, a length of runway, a control tent, fuel, and
+   * airframes parked in the open. Nothing here is fenced, and nothing here is held by
+   * more than a fireteam.
+   */
+  const forwardStrip = (id: string, name: string, sub: string, x: number, y: number,
+    airframes: { dx: number; tier: JetTier }[], guards: number) => {
+    post(id, name, x, y, 1950, 290, guards + 4);
+    softTargets.push({ id, name, sub, x, y, w: 1950, h: 290 });
+    zone(x, y, 1950, 290, 'concrete');
+    zone(x + 40, y + 40, 1870, 120, 'runway');
+    // North edge: the control tent, a revetment line and the fuel point, all behind the
+    // parked airframes so nothing sits on top of an aircraft.
+    add(x + 40, y + 180, 240, 70, 'tent', 34, '#6b7360');
+    add(x + 320, y + 182, 640, 16, 'sandbag', 16);
+    add(x + 1560, y + 170, 120, 120, 'bladder', 44, '#5c5c44');
+    for (let i = 0; i < 6; i++) add(x + 1700 + (i % 3) * 62, y + 160 + Math.floor(i / 3) * 66, 50, 50, 'barrel', 24, '#6e6234');
+    // South edge: the airframes, nose to the runway, and the crew that is supposed to be
+    // watching them.
+    for (const a of airframes) jets.push({ x: x + a.dx, y: y + 248, ang: 0, tier: a.tier });
+    for (let i = 0; i < guards; i++) man(x + 420 + i * 260, y + 258, i % 2 ? 'armyengineer' : 'armytrooper');
+    loot.push({ x: x + 400, y: y + 252 }, { x: x + 1440, y: y + 252 });
+  };
+  // DISPERSAL ALPHA — two line jets and the first prototype, held by a single fireteam.
+  forwardStrip('strip-alpha', 'FORWARD STRIP ALPHA',
+    'DISPERSAL APRON · TWO LINE INTERCEPTORS · ONE PROTOTYPE', 11950, 8700,
+    [{ dx: 640, tier: 'standard' }, { dx: 900, tier: 'prototype' }, { dx: 1180, tier: 'standard' }], 3);
+  // DISPERSAL BRAVO — the proving flight's second machine, no fence, two men.
+  forwardStrip('strip-bravo', 'FORWARD STRIP BRAVO · PROVING FLIGHT',
+    'EXPERIMENTAL AIRFRAME ON THE APRON · GUARDED BY TWO', 13950, 8700,
+    [{ dx: 560, tier: 'standard' }, { dx: 860, tier: 'prototype' }, { dx: 1120, tier: 'standard' }], 2);
+
   return {
     region, base, core, parade, tanks, tankPatrols, helis, jets, turrets, generators, gates,
-    strongpoints, guards, routes, stockade: stock,
+    strongpoints, guards, routes, stockade: stock, softTargets, loot,
     alarm: { x: inner.x - 200, y: base.y, w: inner.w + 400, h: base.h },
     spawn: { x: CX, y: y0 + 260 },
     hq: { x: CX, y: core.y + core.h / 2 },

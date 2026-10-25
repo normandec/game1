@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { CLASSES, SUPPORTS } from '../game/engine';
 import type { ScoreEntry } from '../game/scores';
 import { PHASE_STORY, PROLOGUE } from '../game/campaign';
+import { BUILD_STAMP, GAME_VERSION, VERSION_LABEL } from '../game/version';
 
 interface Props {
   onStart: () => void; onTour: () => void;
@@ -16,10 +17,10 @@ export function ShieldMark({ className = '' }: { className?: string }) {
 export default function OperationsMenu(p: Props) {
   const [tab, setTab] = useState('operation');
   return <div className="operations-menu">
-    <header className="operations-header"><div className="operations-emblem"><ShieldMark/><span>S.H.I.E.L.D.<small>STRATEGIC OPERATIONS DIVISION</small></span></div><span className="operations-build">CLASSIFIED <b>LEVEL 07</b></span></header>
+    <header className="operations-header"><div className="operations-emblem"><ShieldMark/><span>S.H.I.E.L.D.<small>STRATEGIC OPERATIONS DIVISION</small></span></div><span className="operations-build">CLASSIFIED <b>LEVEL 07</b><em className="operations-version">{VERSION_LABEL}</em></span></header>
     <nav className="operations-tabs" aria-label="Main menu">{[['operation', 'OPERATION'], ['loadout', 'LOADOUT'], ['intel', 'FIELD INTEL'], ['story', 'DOSSIER'], ['records', 'SERVICE RECORD']].map(([key, text]) => <button className={tab === key ? 'selected' : ''} onClick={() => setTab(key)} key={key}>{text}</button>)}</nav>
     {tab === 'operation' ? <main className="operation-hero">
-      <div className="operation-eyebrow"><span/> OPERATION BLACK VAULT</div>
+      <div className="operation-eyebrow"><span/> OPERATION BLACK VAULT <i className="operation-version">BUILD {VERSION_LABEL}</i></div>
       <h1>PROTOCOL<span>SOLAR ECLIPSE</span><i>TACTICAL CAMPAIGN</i></h1>
       <h2>They took our bases.<br/>Take them back.</h2>
       <p>Six command strongholds. One S.H.I.E.L.D. operative.<br className="desktop-break"/> Reclaim the technology. Break the chain of command.</p>
@@ -41,6 +42,7 @@ export default function OperationsMenu(p: Props) {
         <div><h3>AIRLIFT / STRUCTURAL BREACHES</h3><p><b>IRON RESERVE / VOJSKA.</b> The sixth sector is new ground south of everything you have already fought over: a motorised army base held by a thousand men in ranks. <b>Crossing the wall trips the general alarm</b> — the parade stands up in waves, four hulls roll out of the armour park, attack helicopters lift off their pads and fast jets scramble. Any first shot inside the wire wakes the whole base too. The inner blast gate is powered by two generators in the compound: destroy both and the shutter drops. <b>Twin-gun emplacements</b> cover the ground and the air — suppress the crew, then press <kbd>F</kbd> on the pit and the guns work for you.</p>
 <p><b>THE BASE ITSELF.</b> Twenty-two named positions, each built differently: a causeway checkpoint, a field-artillery line, an air-defence battery, a signals array, a field hospital, an ammunition depot, a provost post, the 1st Armoured Battalion's park — <b>a hundred and one hulls</b> nose-to-tail — a boneyard, an engineer yard, a combined-arms range, a railhead, a drone hangar, a silo field, an experimental test rig, a cooling plant, the air park, a fuel farm, a forward magazine, two battalion barracks and the command bunker. Every one is held by its own garrison. Once the alarm is up the armour comes in waves: eight to ten hulls every six seconds, thirty-four alive at once.</p>
 <p><b>SEIZED INTERCEPTOR.</b> The air park fields fast jets drawn on a real fifth-generation fighter. Walk up to a parked one and press <kbd>F</kbd>: you fly it, and while you do, the sky is yours — nothing else in the army gets off the ground. <b>Hold SHIFT for the afterburner</b>: the interceptor goes from six hundred to seventeen hundred and fifty.</p>
+<p><b>THE SOFT SIDE / TWO PROTOTYPES.</b> Not every position out here is the parade ground. Three <b>thinly held company barracks</b> (two men awake, a stove, a supply cache and no heavy weapons) sit out east of the wire at roughly <b>X 16860 / Y 8940</b>, <b>X 16860 / Y 10140</b> and — inside the outer rampart, between the parade and the east barracks — at <b>X 9060 / Y 9700</b>. Beside them, two unfenced <b>forward dispersal strips</b> at <b>X 12925 / Y 8845</b> and <b>X 14925 / Y 8845</b> park spare airframes in the open. Each strip holds one of the two <b>PROTOTYPE interceptors</b>: graphite and gold, <b>1 100 hull</b>, <b>2 400 m/s on the burner</b>, a hotter twin cannon, a seeker that reaches 3 400 m and 12–16 flares. Walk up and press <kbd>F</kbd> to take one — <b>+6 500</b>. They are marked on the map from the first frame, so you can go straight there before the general staff ever hears about it.</p>
 <p><b>WINTER SECTORS.</b> The Arctic Relay is fought on snow: drifts line every road, ploughed lanes cut through them, and the municipal ploughs work their rounds in real time, throwing the load onto the shoulder and piling the banks higher as you watch. Roofs, hulls and roads all carry the weather.</p>
 <p><b>EVERY SECTOR HAS ITS OWN SOUTH.</b> The new ground below the old south rampart is no longer empty. The Fallen Hub has a drowned pump station, a sluice and a sunken archive; the Red Mesa a cliff fort, derricks and a refinery rail yard; the Arctic an ice station, a frozen airstrip and the glacier wall; the Venom Marsh stilt laboratories over a drowned temple; the Nexus a serpent reactor, an obelisk line and a reliquary. Each is held by that sector's own regiment.</p>
 <p><b>THE CROSSING.</b> The island prison is reached over an orange suspension bridge. It is a structure, not scenery: <b>bomb the span and it falls</b>. Nothing crosses to the Cage after that — not you, not the custody officers.</p>
@@ -62,6 +64,6 @@ export default function OperationsMenu(p: Props) {
       {tab === 'story' && <div className="field-intel dossier-entries">{[PROLOGUE, ...Object.values(PHASE_STORY)].map(s => <article key={s.id}><small>{s.channel}</small><h3>{s.title}</h3><p>{s.text}</p></article>)}</div>}
       {tab === 'records' && <div className="service-records"><div className="record-head"><span>RANK / CALLSIGN</span><span>WAVE</span><span>SCORE</span></div>{p.scores.length ? p.scores.map((s, i) => <div className="record-line" key={`${s.date}-${i}`}><span><small>{String(i + 1).padStart(2, '0')}</small>{s.name}</span><span>{s.wave}</span><strong>{s.score.toLocaleString()}</strong></div>) : <p>No records yet. Complete an operation to register your callsign.</p>}<small className="records-note">Stored on this device. Campaign scores are saved at defeat or final victory.</small></div>}
     </section>}
-    <footer className="operations-footer"><div><span className="secure-dot"/> SECURE CHANNEL ESTABLISHED</div><span>SIX SECTORS <i>/</i> NO CAMERA SHAKE <i>/</i> KEYBOARD + TOUCH</span><small>PROTOCOL SOLAR ECLIPSE / NIGHTFALL PROTOCOL</small></footer>
+    <footer className="operations-footer"><div><span className="secure-dot"/> SECURE CHANNEL ESTABLISHED</div><span>SIX SECTORS <i>/</i> NO CAMERA SHAKE <i>/</i> KEYBOARD + TOUCH</span><small>PROTOCOL {GAME_VERSION.codename} / {BUILD_STAMP}</small></footer>
   </div>;
 }
