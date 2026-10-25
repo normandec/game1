@@ -949,6 +949,86 @@ export class Game {
     this.lightCv.height = Math.max(2, Math.floor(this.h / 2));
   };
 
+  /**
+   * Where the operative actually starts a sector.
+   *
+   * `settle()` only guarantees "not inside a wall in the clearance grid"; it happily leaves
+   * the spawn inside a facility yard, a warehouse shell or right next to the S.H.I.E.L.D.
+   * vault, because those rects are drawn as floor. That produced sector starts buried in a
+   * building, which reads as a bug and traps the run before it begins. This picker insists
+   * on open ground: outside every facility rect, outside every structure, well clear of the
+   * vault and the prison, with at least four of eight escape directions open, and preferring
+   * road or plaza ground with the fewest hostiles in sight.
+   */
+  private pickSpawnPoint(start: Point, settle: (p: Point, r: number) => Point, stuck: (x: number, y: number, r: number) => boolean) {
+    const clearance = 30;
+    const insideRect = (x: number, y: number, r: { x: number; y: number; w: number; h: number }, pad: number) =>
+      x > r.x - pad && x < r.x + r.w + pad && y > r.y - pad && y < r.y + r.h + pad;
+    const shielded = (x: number, y: number) =>
+      Math.hypot(x - VAULT_ENTRY.x, y - VAULT_ENTRY.y) < 1000;
+    // A spot is legal when nothing is drawn on it, it is not in a facility yard or the
+    // vault compound, and a walker can leave it in more than one direction.
+    const legal = (x: number, y: number) => {
+      if (x < 240 || y < 240 || x > ARENA_W - 240 || y > ARENA_H - 240) return false;
+      if (stuck(x, y, clearance)) return false;
+      if (this.pointBlocked(x, y)) return false;
+      if (this.inWater(x, y)) return false;
+      for (const f of this.facilities) if (insideRect(x, y, f, 46)) return false;
+      if (shielded(x, y)) return false;
+      const rayClear = (a: number, span: number) => {
+        for (let t = 40; t <= span; t += 40) {
+          const px = x + Math.cos(a) * t, py = y + Math.sin(a) * t;
+          if (stuck(px, py, 18) || this.pointBlocked(px, py) || this.inWater(px, py)) return false;
+        }
+        return true;
+      };
+      let open = 0, far = 0;
+      for (let k = 0; k < 8; k++) {
+        const a = (k / 8) * TAU;
+        if (rayClear(a, 160)) open++;
+        if (rayClear(a, 520)) far++;
+      }
+      // Near cover is fine, a boxed-in corner is not: the operative has to be able to walk out.
+      return open >= 4 && far >= 3;
+    };
+    const zoneBonus = (x: number, y: number) => {
+      let bonus = 0;
+      for (const z of this.zones) {
+        if (x < z.x || x > z.x + z.w || y < z.y || y > z.y + z.h) continue;
+        if (z.kind === 'road' || z.kind === 'plaza' || z.kind === 'concrete') bonus -= 2;
+      }
+      return bonus;
+    };
+    const origin = start;
+    const candidates: { x: number; y: number; score: number }[] = [];
+    const consider = (x: number, y: number) => {
+      const q = { x, y };
+      for (let i = 0; i < 2; i++) this.collide(q, 26);
+      if (!legal(q.x, q.y)) return;
+      const hostiles = this.enemies.filter((e) => !e.def?.civilian && e.hp > 0
+        && Math.hypot(e.x - q.x, e.y - q.y) < 780).length;
+      const dist = Math.hypot(q.x - origin.x, q.y - origin.y);
+      candidates.push({ x: q.x, y: q.y, score: hostiles * 60 + dist * 0.02 + zoneBonus(q.x, q.y) });
+    };
+    consider(origin.x, origin.y);
+    for (const d of [80, 160, 260, 380, 520, 700, 900, 1200, 1500, 1900]) {
+      for (let k = 0; k < 16; k++) {
+        const a = (k / 16) * TAU;
+        consider(origin.x + Math.cos(a) * d, origin.y + Math.sin(a) * d);
+      }
+    }
+    if (candidates.length) {
+      candidates.sort((a, b) => a.score - b.score);
+      return { x: candidates[0].x, y: candidates[0].y };
+    }
+    // Nothing clean anywhere near the authorised insert: fall back to the old behaviour of
+    // settling the point and, failing that, the nearest open lane.
+    const fallback = settle(origin, 26);
+    if (legal(fallback.x, fallback.y)) return fallback;
+    const lane = this.routes.nearest(origin);
+    return legal(lane.x, lane.y) ? lane : fallback;
+  }
+
   reset(newCampaign = true) {
     this.clearInput();
     this.dynamicRects = [];
@@ -1244,7 +1324,7 @@ export class Game {
 
     // The start must never be inside a wall: the army district moved buildings onto the
     // old insert points, so settle the spawn exactly like a loot cache.
-    const insert = settle(world.dressing?.start || PLAYER_START, 26);
+    const insert = this.pickSpawnPoint(world.dressing?.start || PLAYER_START, settle, stuck);
     this.px = insert.x; this.py = insert.y; this.pvx = 0; this.pvy = 0;
     this.pang = -Math.PI / 2;
     this.hp = this.maxHp = 100;
@@ -1540,10 +1620,33 @@ export class Game {
       { x: cx2 - r, y: cy2 }, { x: cx2 - r * 0.6, y: cy2 - r * 0.8 },
       { x: cx2, y: cy2 - r }, { x: cx2 + r * 0.7, y: cy2 - r * 0.7 },
     ];
+    // The S.H.I.E.L.D. compound is the one place in the theatre the custody branch does not
+    // walk: a police ring based on the black vault put handcuffs on the operative's doorstep
+    // and turned the friendly base into a trap. Beats are dropped when any of their posts or
+    // their ring passes near the vault, and secret sites never get one at all.
+    const shieldGuard = (x: number, y: number) =>
+      Math.hypot(x - VAULT_ENTRY.x, y - VAULT_ENTRY.y) < 1500;
+    const beatIsClean = (ring: Point[]) => {
+      for (const q of ring) {
+        if (shieldGuard(q.x, q.y)) return false;
+        for (let i = 0; i < ring.length; i++) {
+          const a = ring[i], b = ring[(i + 1) % ring.length];
+          for (let t = 0; t <= 1; t += 0.1) {
+            if (shieldGuard(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)) return false;
+          }
+        }
+      }
+      return true;
+    };
     const beats: Point[][] = [];
-    for (const poi of this.pois.slice(0, 7)) beats.push(policeRing(poi.x, poi.y, Math.min(420, Math.max(240, poi.r * 0.8))));
+    for (const poi of this.pois.slice(0, 7)) {
+      if (poi.secret || shieldGuard(poi.x, poi.y)) continue;
+      const ring = policeRing(poi.x, poi.y, Math.min(420, Math.max(240, poi.r * 0.8)));
+      if (beatIsClean(ring)) beats.push(ring);
+    }
     beats.push(policeRing(HQ.cx, HQ.cy, 1050));
-    beats.push(policeRing(AIRFIELD.x, AIRFIELD.y, 620));
+    const airBeat = policeRing(AIRFIELD.x, AIRFIELD.y, 620);
+    if (beatIsClean(airBeat)) beats.push(airBeat);
     beats.forEach((route, i) => {
       const pts = route.map((q) => this.infantryRoutesReadyPoint(q.x, q.y));
       const id = `police-${i}`;
@@ -1808,8 +1911,10 @@ export class Game {
     if (dt > 0.05) dt = 0.05;
 
     if (this.status === 'playing') {
-      if (this.hitstop > 0) { this.hitstop -= dt; this.update(dt * 0.12); }
-      else this.update(dt * this.timeScale);
+      try {
+        if (this.hitstop > 0) { this.hitstop -= dt; this.update(dt * 0.12); }
+        else this.update(dt * this.timeScale);
+      } catch (err) { this.survive(err, 'update'); }
       this.timeScale = lerp(this.timeScale, 1, dt * 2);
     } else if (this.status === 'transit') this.updateTransit(dt);
     else if (this.status === 'arrest') this.updateArrest(dt);
@@ -1822,10 +1927,32 @@ export class Game {
     if (this.pointerLocked && this.status !== 'playing' && document.exitPointerLock) {
       document.exitPointerLock();
     }
-    if (this.status !== 'interior' && this.status !== 'menu' && this.status !== 'prison' && this.status !== 'glacier') this.render();
+    if (this.status !== 'interior' && this.status !== 'menu' && this.status !== 'prison' && this.status !== 'glacier') {
+      try { this.render(); } catch (err) { this.survive(err, 'render'); }
+    }
     this.hudTimer -= dt;
-    if (this.hudTimer <= 0) { this.hudTimer = 0.06; this.pushHud(); }
+    if (this.hudTimer <= 0) {
+      this.hudTimer = 0.06;
+      try { this.pushHud(); } catch (err) { this.survive(err, 'hud'); }
+    }
   };
+
+  /**
+   * One bad frame must never end a run. Before this, a single throw inside the draw call
+   * stopped the picture dead while the simulation kept running underneath it: the operative
+   * died staring at a frozen screenshot and never saw the end screen. Now the failing
+   * subsystem is reported to the console (once per message) and the loop carries on.
+   */
+  private crashLog = new Set<string>();
+  crashCount = 0;
+  private survive(err: unknown, where: string) {
+    this.crashCount++;
+    const msg = `${where}: ${String((err as Error)?.message || err)}`;
+    if (!this.crashLog.has(msg)) {
+      this.crashLog.add(msg);
+      if (typeof console !== 'undefined') console.error('[game] recovered from a bad frame —', msg, err);
+    }
+  }
 
   private updateTransit(dt: number) {
     if (this.status !== 'transit') return;
@@ -7469,6 +7596,9 @@ export class Game {
       x = clamp(bx + rand(-80, 80), 90, ARENA_W - 90);
       y = clamp(by + rand(-80, 80), 90, ARENA_H - 90);
     }
+    // No custody officer is dispatched into the S.H.I.E.L.D. compound, however the squad
+    // lands: an arrest on the friendly doorstep is not a fight, it is a bug report.
+    if (type === 'custodian' && Math.hypot(x - VAULT_ENTRY.x, y - VAULT_ENTRY.y) < 1500) type = 'grunt';
     const e = this.makeEnemy(type, x, y, squadId, slot);
     this.collide(e, e.def.r);
     if (vtol) {
@@ -7986,7 +8116,9 @@ export class Game {
         // A dash or the AEGIS shield still beats a pair of handcuffs.
         // The gate detail only steps in once the operative is past the sally port; on the
         // bridge and the forecourt they let him walk up to the door.
-        const mayCuff = !e.policePost || this.px > PRISON_DOOR.x - 40;
+        // No handcuffs inside the S.H.I.E.L.D. compound: that ground belongs to the operative.
+        const atShield = Math.hypot(this.px - VAULT_ENTRY.x, this.py - VAULT_ENTRY.y) < 760;
+        const mayCuff = (!e.policePost || this.px > PRISON_DOOR.x - 40) && !atShield;
         if (mayCuff && this.iFrames <= 0 && this.aegisTime <= 0 && this.dashT <= 0) { this.beginArrest(e); return; }
       }
       // contact damage
@@ -8835,8 +8967,12 @@ export class Game {
       const r = Math.random();
       if (r < 0.34) this.dropPickup(e.x, e.y, 'health');
       else if (r < 0.56) this.dropPickup(e.x, e.y, 'grenade');
-      else {
-        const pool = ['shotgun', 'smg', 'smg', 'dmr', 'shotgun', 'rocket', 'gl', 'dmr', 'gl', 'ammo', 'ammo'];
+      else if (Math.random() < 0.18) {
+        // Ammunition is a pickup in its own right, not a weapon called "ammo": handing it
+        // out as a weapon crate crashed the renderer and froze the run.
+        this.dropPickup(e.x, e.y, 'ammo');
+      } else {
+        const pool = ['shotgun', 'smg', 'smg', 'dmr', 'shotgun', 'rocket', 'gl', 'dmr', 'gl'];
         this.dropPickup(e.x, e.y, 'weapon', pool[Math.floor(Math.random() * pool.length)]);
       }
     }
@@ -8915,7 +9051,7 @@ export class Game {
       mobility: this.mobility, camping: this.camping, avgRange: this.avgRange, coverUse: this.coverUse,
     };
     this.sector = Math.min(SECTORS.length, this.sector + 1);
-    this.reset(false);
+    try { this.reset(false); } catch (err) { this.survive(err, 'sector-build'); }
     this.score = saved.score;
     this.wave = saved.wave;
     this.bestMult = saved.bestMult;
@@ -9149,6 +9285,13 @@ export class Game {
   }
 
   private updatePickups(dt: number) {
+    // A crate whose payload cannot be resolved is dropped on the spot: nothing invalid is
+    // allowed to survive into a draw call, where it would take the whole frame down.
+    for (let i = this.pickups.length - 1; i >= 0; i--) {
+      const q = this.pickups[i];
+      if (q.kind === 'weapon' && !WEAPONS[q.weapon || '']) this.pickups.splice(i, 1);
+      else if (!Number.isFinite(q.x) || !Number.isFinite(q.y)) this.pickups.splice(i, 1);
+    }
     for (let i = this.pickups.length - 1; i >= 0; i--) {
       const p = this.pickups[i];
       p.t += dt; p.life -= dt;
@@ -13786,9 +13929,12 @@ export class Game {
       ctx.save();
       ctx.translate(p.x, p.y + bob);
       ctx.rotate(Math.sin(p.t * 2) * 0.2);
+      // Any unknown key falls back to the rifle colour: a bad pickup must never be able to
+      // throw inside the draw call, because one throw freezes the whole frame.
       const col = p.kind === 'health' ? '#5dff9b' : p.kind === 'grenade' ? '#8fd0ff'
         : p.kind === 'ammo' ? '#ffd166'
-        : p.kind === 'shield' || p.kind === 'aegis' ? '#7fd8ff' : WEAPONS[p.weapon!].color;
+        : p.kind === 'shield' || p.kind === 'aegis' ? '#7fd8ff'
+        : (WEAPONS[p.weapon || '']?.color || '#8ce8ff');
       ctx.shadowColor = col; ctx.shadowBlur = 20;
       ctx.fillStyle = 'rgba(10,20,18,0.92)'; ctx.fillRect(-13, -13, 26, 26);
       ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.strokeRect(-13, -13, 26, 26);
