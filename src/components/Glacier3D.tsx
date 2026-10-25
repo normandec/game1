@@ -95,303 +95,1095 @@ export default function Glacier3D({ onExit }: Props) {
     const el = host.current;
     if (!el) return;
 
-    /* ---------------- renderer, camera, light ---------------- */
+    /* ---------------- renderer, camera, light ---------------- *
+     * THE REFERENCE.
+     *
+     * This is not a lit corridor with ice-coloured walls: it is a cave that somebody built
+     * a base inside. Dark blue ice, one great mouth of daylight at the far end, floodlights
+     * on the catwalks, a floor of wet ice that mirrors every one of them, snow on every
+     * ledge, and machinery that reads as machinery. Everything below is built to that brief
+     * — and it is all procedural, one file, no assets.
+     */
     const W = el.clientWidth || 1280;
     const H = el.clientHeight || 720;
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.7));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.6));
     renderer.setSize(W, H);
-    renderer.setClearColor(0xbfe4f2, 1);
+    renderer.setClearColor(0x04090e, 1);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.02;
+    renderer.toneMappingExposure = 1.28;
     el.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    // Bright enough to read as ice, hazy enough that the far end glows instead of cutting.
-    scene.fog = new THREE.FogExp2(0xcfeaf6, 0.0075);
-    const camera = new THREE.PerspectiveCamera(76, W / H, 0.1, 600);
+    // Depth haze in the colour of the ice itself: the far end of the hall dissolves into it
+    // the way the back of a real cave does.
+    scene.fog = new THREE.FogExp2(0x12354b, 0.005);
+    const camera = new THREE.PerspectiveCamera(74, W / H, 0.1, 700);
 
-    scene.add(new THREE.AmbientLight(0xdff3ff, 0.75));
-    scene.add(new THREE.HemisphereLight(0xf2fbff, 0x9dc7d8, 1.15));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.1);
-    sun.position.set(-60, 140, 40);
-    scene.add(sun);
-    const rim = new THREE.DirectionalLight(0x9fd8ff, 0.7);
-    rim.position.set(80, 60, -160);
-    scene.add(rim);
+    /* ---------------- light ---------------- *
+     * A cave is lit by what comes in through the hole and by what people hung on the walls.
+     * Nothing here is flat: cold ambient, one strong daylight from the far mouth, and warm-
+     * white floodlights doing the actual work.
+     */
+    scene.add(new THREE.AmbientLight(0x3d7196, 1.15));
+    scene.add(new THREE.HemisphereLight(0x9fd6f2, 0x12222c, 1.05));
+    const dayLight = new THREE.DirectionalLight(0xd8f1ff, 2.1);
+    dayLight.position.set(-70, 120, -420);
+    scene.add(dayLight);
+    const gateLight = new THREE.DirectionalLight(0xa8d8ee, 0.8);
+    gateLight.position.set(20, 60, 220);
+    scene.add(gateLight);
 
-    /* ---------------- procedural ice ---------------- */
-    const cv = (size: number) => {
+    /* ---------------- textures (all drawn here) ---------------- */
+    const canvasOf = (w: number, h: number) => {
       const c = document.createElement('canvas');
-      c.width = c.height = size;
+      c.width = w; c.height = h;
       return { c, g: c.getContext('2d')! };
     };
-    const iceTex = (repeat: number, cold = true) => {
-      const { c, g } = cv(512);
-      g.fillStyle = cold ? '#e8f6fc' : '#dceef6';
-      g.fillRect(0, 0, 512, 512);
-      for (let i = 0; i < 260; i++) {
-        const x = Math.random() * 512, y = Math.random() * 512, r = 8 + Math.random() * 70;
-        const grd = g.createRadialGradient(x, y, 0, x, y, r);
-        grd.addColorStop(0, `rgba(${cold ? '172,214,238' : '190,225,242'},${0.05 + Math.random() * 0.12})`);
-        grd.addColorStop(1, 'rgba(255,255,255,0)');
-        g.fillStyle = grd; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
-      }
-      // veins and fracture lines: an ice sheet is all edges
-      for (let i = 0; i < 90; i++) {
-        g.strokeStyle = `rgba(${cold ? '120,180,210' : '140,195,220'},${0.05 + Math.random() * 0.16})`;
-        g.lineWidth = 0.6 + Math.random() * 1.6;
-        g.beginPath();
-        let x = Math.random() * 512, y = Math.random() * 512;
-        g.moveTo(x, y);
-        for (let k = 0; k < 5; k++) {
-          x += (Math.random() - 0.5) * 120;
-          y += (Math.random() - 0.5) * 120;
-          g.lineTo(x, y);
-        }
-        g.stroke();
-      }
+    const asTex = (c: HTMLCanvasElement, repeat = 1, srgb = true) => {
       const t = new THREE.CanvasTexture(c);
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
       t.repeat.set(repeat, repeat);
-      t.colorSpace = THREE.SRGBColorSpace;
+      if (srgb) t.colorSpace = THREE.SRGBColorSpace;
       t.anisotropy = 4;
       return t;
     };
 
-    const wallMat = new THREE.MeshStandardMaterial({
-      map: iceTex(6), color: 0xf2fbff, roughness: 0.32, metalness: 0.04,
-      emissive: 0x9fd6ea, emissiveIntensity: 0.16,
+    /** Wet ice on the floor: dark slab with pale fracture lines and puddles of meltwater. */
+    const floorTexture = () => {
+      const { c, g } = canvasOf(512, 512);
+      g.fillStyle = '#1d4053';
+      g.fillRect(0, 0, 512, 512);
+      // broad slabs, so the floor is a paved surface and not a void
+      g.strokeStyle = 'rgba(150,200,225,0.16)';
+      g.lineWidth = 2;
+      for (let i = 1; i < 4; i++) {
+        g.beginPath(); g.moveTo(0, (i * 512) / 4); g.lineTo(512, (i * 512) / 4); g.stroke();
+        g.beginPath(); g.moveTo((i * 512) / 4, 0); g.lineTo((i * 512) / 4, 512); g.stroke();
+      }
+      for (let i = 0; i < 420; i++) {
+        const x = Math.random() * 512, y = Math.random() * 512, r = 6 + Math.random() * 60;
+        const grd = g.createRadialGradient(x, y, 0, x, y, r);
+        const pale = Math.random() > 0.55;
+        grd.addColorStop(0, pale ? 'rgba(176,222,244,0.16)' : 'rgba(6,18,26,0.30)');
+        grd.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = grd;
+        g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+      }
+      for (let i = 0; i < 70; i++) {
+        g.strokeStyle = `rgba(160,214,240,${0.04 + Math.random() * 0.10})`;
+        g.lineWidth = 0.7 + Math.random();
+        g.beginPath();
+        let x = Math.random() * 512, y = Math.random() * 512;
+        g.moveTo(x, y);
+        for (let k = 0; k < 4; k++) {
+          x += (Math.random() - 0.5) * 150; y += (Math.random() - 0.5) * 150;
+          g.lineTo(x, y);
+        }
+        g.stroke();
+      }
+      return asTex(c, 14);
+    };
+
+    /** Roughness mask: meltwater is glass, frozen slab is not. Wet ice needs both. */
+    const puddleMask = () => {
+      const { c, g } = canvasOf(256, 256);
+      g.fillStyle = '#9a9a9a';
+      g.fillRect(0, 0, 256, 256);
+      for (let i = 0; i < 120; i++) {
+        const x = Math.random() * 256, y = Math.random() * 256, r = 10 + Math.random() * 54;
+        const grd = g.createRadialGradient(x, y, 0, x, y, r);
+        grd.addColorStop(0, 'rgba(12,12,12,0.9)');
+        grd.addColorStop(1, 'rgba(12,12,12,0)');
+        g.fillStyle = grd;
+        g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+      }
+      return asTex(c, 9, false);
+    };
+
+    /** A soft round glow, used for every lamp bloom and every pool of light. */
+    const glowTexture = () => {
+      const { c, g } = canvasOf(128, 128);
+      const grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+      grd.addColorStop(0, 'rgba(255,255,255,1)');
+      grd.addColorStop(0.25, 'rgba(210,244,255,0.75)');
+      grd.addColorStop(0.55, 'rgba(130,205,240,0.24)');
+      grd.addColorStop(1, 'rgba(90,170,220,0)');
+      g.fillStyle = grd;
+      g.fillRect(0, 0, 128, 128);
+      return asTex(c, 1);
+    };
+
+    /** The mouth of the cave: white at the centre, blue as it bleeds into the ice. */
+    const daylightTexture = () => {
+      const { c, g } = canvasOf(256, 256);
+      const grd = g.createRadialGradient(128, 120, 8, 128, 128, 150);
+      grd.addColorStop(0, '#ffffff');
+      grd.addColorStop(0.35, '#e2f6ff');
+      grd.addColorStop(0.7, '#9fd2e8');
+      grd.addColorStop(1, 'rgba(60,120,150,0)');
+      g.fillStyle = grd;
+      g.fillRect(0, 0, 256, 256);
+      return asTex(c, 1);
+    };
+
+    /** Vertical falloff for the shafts of light coming down through the roof. */
+    const shaftTexture = () => {
+      const { c, g } = canvasOf(64, 256);
+      const grd = g.createLinearGradient(0, 0, 0, 256);
+      grd.addColorStop(0, 'rgba(220,246,255,0.85)');
+      grd.addColorStop(0.45, 'rgba(170,220,245,0.30)');
+      grd.addColorStop(1, 'rgba(120,190,225,0)');
+      g.fillStyle = grd;
+      g.fillRect(0, 0, 64, 256);
+      return asTex(c, 1);
+    };
+
+    /** Shipping crates and equipment cases: panels, rivets, stencilled serials. */
+    const crateTexture = (label: string, body: string, ink: string) => {
+      const { c, g } = canvasOf(256, 256);
+      g.fillStyle = body;
+      g.fillRect(0, 0, 256, 256);
+      g.strokeStyle = 'rgba(0,0,0,0.42)';
+      g.lineWidth = 3;
+      for (let i = 1; i < 5; i++) {
+        g.beginPath(); g.moveTo(0, i * 51); g.lineTo(256, i * 51); g.stroke();
+      }
+      g.strokeRect(7, 7, 242, 242);
+      g.strokeStyle = 'rgba(255,255,255,0.10)';
+      g.lineWidth = 1.5;
+      g.strokeRect(15, 15, 226, 226);
+      g.fillStyle = ink;
+      g.font = 'bold 20px ui-monospace, monospace';
+      g.fillText(label, 20, 44);
+      g.font = '13px ui-monospace, monospace';
+      g.fillText('CRYO DIV / 07', 20, 66);
+      g.globalAlpha = 0.5;
+      for (let i = 0; i < 40; i++) {
+        g.fillStyle = i % 2 ? '#0a151c' : '#8fb4c4';
+        g.fillRect(18 + Math.random() * 220, 90 + Math.random() * 150, 5 + Math.random() * 10, 3);
+      }
+      g.globalAlpha = 1;
+      // frost creeping up from the bottom edge
+      const frost = g.createLinearGradient(0, 256, 0, 150);
+      frost.addColorStop(0, 'rgba(226,244,252,0.42)');
+      frost.addColorStop(1, 'rgba(226,244,252,0)');
+      g.fillStyle = frost;
+      g.fillRect(0, 0, 256, 256);
+      return asTex(c, 1);
+    };
+
+    /** A hanging banner: S.H.I.E.L.D. shield on the vault walls, HYDRA on the guard side. */
+    const bannerTexture = (kind: 'shield' | 'hydra') => {
+      const { c, g } = canvasOf(256, 384);
+      g.fillStyle = kind === 'shield' ? '#0d2330' : '#1a0d12';
+      g.fillRect(0, 0, 256, 384);
+      const wash = g.createLinearGradient(0, 0, 0, 384);
+      wash.addColorStop(0, 'rgba(255,255,255,0.06)');
+      wash.addColorStop(1, 'rgba(0,0,0,0.45)');
+      g.fillStyle = wash;
+      g.fillRect(0, 0, 256, 384);
+      g.strokeStyle = kind === 'shield' ? 'rgba(150,220,245,0.55)' : 'rgba(220,80,90,0.55)';
+      g.lineWidth = 4;
+      g.strokeRect(14, 14, 228, 356);
+      g.save();
+      g.translate(128, 150);
+      if (kind === 'shield') {
+        g.fillStyle = 'rgba(206,240,255,0.92)';
+        g.beginPath();
+        g.moveTo(0, -78);
+        g.lineTo(64, -56);
+        g.lineTo(64, 18);
+        g.quadraticCurveTo(64, 62, 0, 84);
+        g.quadraticCurveTo(-64, 62, -64, 18);
+        g.lineTo(-64, -56);
+        g.closePath();
+        g.fill();
+        g.fillStyle = '#0d2330';
+        g.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const a = -Math.PI / 2 + (i / 10) * Math.PI * 2;
+          const r = i % 2 ? 30 : 46;
+          const px = Math.cos(a) * r, py = Math.sin(a) * r;
+          if (i === 0) g.moveTo(px, py); else g.lineTo(px, py);
+        }
+        g.closePath();
+        g.fill();
+      } else {
+        g.strokeStyle = 'rgba(226,90,96,0.95)';
+        g.lineWidth = 7;
+        g.beginPath(); g.arc(0, -26, 34, 0, Math.PI * 2); g.stroke();
+        for (let i = 0; i < 6; i++) {
+          const a = -0.6 + (i / 5) * 1.2;
+          g.beginPath();
+          g.moveTo(Math.sin(a) * 18, 4);
+          g.quadraticCurveTo(Math.sin(a) * 40, 40, Math.sin(a) * 26, 74);
+          g.stroke();
+        }
+        g.fillStyle = 'rgba(226,90,96,0.95)';
+        g.beginPath(); g.arc(-10, -30, 6, 0, Math.PI * 2); g.fill();
+        g.beginPath(); g.arc(10, -30, 6, 0, Math.PI * 2); g.fill();
+      }
+      g.restore();
+      g.fillStyle = kind === 'shield' ? 'rgba(200,232,248,0.8)' : 'rgba(230,110,116,0.8)';
+      g.font = 'bold 26px ui-monospace, monospace';
+      g.textAlign = 'center';
+      g.fillText(kind === 'shield' ? 'S.H.I.E.L.D.' : 'HYDRA', 128, 300);
+      g.font = '15px ui-monospace, monospace';
+      g.fillText('CRYO VAULT', 128, 326);
+      g.textAlign = 'left';
+      const t = asTex(c, 1);
+      return t;
+    };
+
+    /** Yellow-and-black hazard paint for the aircraft aprons. */
+    const hazardTexture = () => {
+      const { c, g } = canvasOf(256, 256);
+      g.fillStyle = '#11181d';
+      g.fillRect(0, 0, 256, 256);
+      g.save();
+      g.translate(128, 128);
+      g.rotate(-Math.PI / 4);
+      for (let i = -12; i < 12; i++) {
+        g.fillStyle = i % 2 ? '#d8b23c' : '#181c1f';
+        g.fillRect(i * 26, -220, 13, 440);
+      }
+      g.restore();
+      return asTex(c, 3);
+    };
+
+    /** Winter camouflage for the airframes: pale grey-blue blotches over dark steel. */
+    const camoTexture = () => {
+      const { c, g } = canvasOf(256, 256);
+      g.fillStyle = '#2b3944';
+      g.fillRect(0, 0, 256, 256);
+      for (let i = 0; i < 90; i++) {
+        const x = Math.random() * 256, y = Math.random() * 256, r = 10 + Math.random() * 40;
+        g.fillStyle = Math.random() > 0.5 ? 'rgba(120,142,156,0.55)' : 'rgba(190,210,222,0.35)';
+        g.beginPath();
+        g.moveTo(x, y);
+        for (let k = 0; k < 6; k++) {
+          const a = (k / 6) * Math.PI * 2;
+          g.lineTo(x + Math.cos(a) * r * (0.6 + Math.random() * 0.7), y + Math.sin(a) * r * (0.6 + Math.random() * 0.7));
+        }
+        g.closePath();
+        g.fill();
+      }
+      const grime = g.createLinearGradient(0, 0, 0, 256);
+      grime.addColorStop(0, 'rgba(228,242,250,0.22)');
+      grime.addColorStop(0.5, 'rgba(0,0,0,0)');
+      grime.addColorStop(1, 'rgba(0,0,0,0.4)');
+      g.fillStyle = grime;
+      g.fillRect(0, 0, 256, 256);
+      return asTex(c, 1);
+    };
+
+    /** Winter camouflage cloth: white ground, pale grey-blue blotches, frost speckle. */
+    const snowCamoTexture = () => {
+      const { c, g } = canvasOf(256, 256);
+      g.fillStyle = '#dbe7ee';
+      g.fillRect(0, 0, 256, 256);
+      for (let i = 0; i < 120; i++) {
+        const x = Math.random() * 256, y = Math.random() * 256, r = 8 + Math.random() * 30;
+        g.fillStyle = Math.random() > 0.45 ? 'rgba(150,176,192,0.55)' : 'rgba(96,124,142,0.42)';
+        g.beginPath();
+        g.moveTo(x, y);
+        for (let k = 0; k < 6; k++) {
+          const a = (k / 6) * Math.PI * 2;
+          g.lineTo(x + Math.cos(a) * r * (0.5 + Math.random() * 0.8), y + Math.sin(a) * r * (0.5 + Math.random() * 0.8));
+        }
+        g.closePath();
+        g.fill();
+      }
+      for (let i = 0; i < 900; i++) {
+        g.fillStyle = Math.random() > 0.5 ? 'rgba(255,255,255,0.5)' : 'rgba(74,98,114,0.35)';
+        g.fillRect(Math.random() * 256, Math.random() * 256, 2, 2);
+      }
+      return asTex(c, 2);
+    };
+
+    const floorTex = floorTexture();
+    const snowCamoTex = snowCamoTexture();
+    const puddleTex = puddleMask();
+    const glowTex = glowTexture();
+    const dayTex = daylightTexture();
+    const shaftTex = shaftTexture();
+    const hazardTex = hazardTexture();
+    const camoTex = camoTexture();
+    const crateTexH = crateTexture('HYDRA', '#22303a', 'rgba(220,120,110,0.75)');
+    const crateTexS = crateTexture('S.H.I.E.L.D.', '#20323c', 'rgba(170,225,245,0.75)');
+
+    /* ---------------- materials ---------------- */
+    const rockMat = new THREE.MeshStandardMaterial({
+      vertexColors: true, roughness: 0.78, metalness: 0.05, flatShading: true,
+      emissive: 0x0a2233, emissiveIntensity: 0.55,
     });
+    const iceGlassMat = new THREE.MeshStandardMaterial({
+      color: 0x9fd6ea, roughness: 0.16, metalness: 0.08, transparent: true, opacity: 0.7,
+      emissive: 0x2f6f8c, emissiveIntensity: 0.5, flatShading: true, side: THREE.DoubleSide,
+    });
+    /* Wet ice. Metalness has to stay low: there is no environment map in here, so a metallic
+     * floor would go black — the wet look comes from the low roughness plus the light pools. */
     const floorMat = new THREE.MeshStandardMaterial({
-      map: iceTex(10, false), color: 0xffffff, roughness: 0.22, metalness: 0.08,
-      emissive: 0xa8dcec, emissiveIntensity: 0.10,
+      map: floorTex, roughnessMap: puddleTex, color: 0xe9f4fa, roughness: 0.38, metalness: 0.18,
+      emissive: 0x1b4358, emissiveIntensity: 0.5,
     });
-    const ceilMat = new THREE.MeshStandardMaterial({ color: 0xdff1f9, roughness: 0.6, emissive: 0x9fd2e6, emissiveIntensity: 0.2 });
-    const steelMat = new THREE.MeshStandardMaterial({ color: 0x8e9c9e, roughness: 0.55, metalness: 0.6 });
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0x39434b, roughness: 0.62, metalness: 0.78 });
+    const steelDark = new THREE.MeshStandardMaterial({ color: 0x161d23, roughness: 0.7, metalness: 0.62 });
+    const steelPale = new THREE.MeshStandardMaterial({ color: 0x6f7f8a, roughness: 0.48, metalness: 0.72 });
+    const paintMat = new THREE.MeshStandardMaterial({ color: 0x1d3a48, roughness: 0.55, metalness: 0.35 });
     const glowMat = new THREE.MeshStandardMaterial({
-      color: 0xbdf2ff, emissive: 0x66d8ff, emissiveIntensity: 1.6, roughness: 0.25,
+      color: 0xe8fbff, emissive: 0x8fe8ff, emissiveIntensity: 2.6, roughness: 0.22,
+    });
+    const hazardMat = new THREE.MeshStandardMaterial({ map: hazardTex, roughness: 0.7, metalness: 0.15 });
+    const snowMat = new THREE.MeshStandardMaterial({ color: 0xe6f4fb, roughness: 0.85, emissive: 0x0e2634, emissiveIntensity: 0.4 });
+    const hullMat = new THREE.MeshStandardMaterial({ map: camoTex, color: 0x71858f, roughness: 0.55, metalness: 0.4 });
+    const canopyMat = new THREE.MeshStandardMaterial({
+      color: 0x0f2b38, roughness: 0.06, metalness: 0.85, transparent: true, opacity: 0.82,
+      emissive: 0x1d5d75, emissiveIntensity: 0.35,
     });
 
-    // floor
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(HALL_HALF * 2, HALL_MAX_Z - HALL_MIN_Z), floorMat);
+    /* ---------------- geometry helpers ---------------- */
+    const smoothstep = (t: number) => t * t * (3 - 2 * t);
+    const hash = (x: number, y: number) => {
+      const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+      return n - Math.floor(n);
+    };
+    const noise2 = (x: number, y: number) => {
+      const xi = Math.floor(x), yi = Math.floor(y);
+      const xf = smoothstep(x - xi), yf = smoothstep(y - yi);
+      const a = hash(xi, yi), b = hash(xi + 1, yi), c = hash(xi, yi + 1), d = hash(xi + 1, yi + 1);
+      return (a + (b - a) * xf) * (1 - yf) + (c + (d - c) * xf) * yf;
+    };
+
+    /**
+     * Turn a flat panel into ice.
+     *
+     * Displaces every vertex along its normal with two octaves of value noise and paints it
+     * by height and depth — snow on the ledges, deep blue in the cracks. Flat shading does
+     * the rest: it is the faceted, broken look a real glacier wall has.
+     */
+    const rockify = (geo: THREE.BufferGeometry, amp: number, freq: number, seed = 0, tint = 0x3a7593) => {
+      geo.computeVertexNormals();
+      const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+      const nrm = geo.getAttribute('normal') as THREE.BufferAttribute;
+      const colors = new Float32Array(pos.count * 3);
+      const base = new THREE.Color(tint);
+      const deep = new THREE.Color(0x0b1f2c);
+      const snowy = new THREE.Color(0xd6ecf7);
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+        const n1 = noise2(x * freq + seed, y * freq * 1.3 + seed * 0.7) - 0.5;
+        const n2 = noise2(x * freq * 2.9 + 11 + seed, z * freq * 2.4) - 0.5;
+        const off = (n1 * 1.6 + n2 * 0.7) * amp;
+        pos.setXYZ(
+          i,
+          x + nrm.getX(i) * off,
+          y + nrm.getY(i) * off,
+          z + nrm.getZ(i) * off,
+        );
+        const ledge = Math.max(0, nrm.getY(i));
+        const c = base.clone()
+          .lerp(deep, Math.min(1, Math.max(0, 0.5 - n1)))
+          .lerp(snowy, Math.min(0.9, ledge * 0.9 + Math.max(0, n1) * 0.55));
+        colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+      }
+      geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      geo.computeVertexNormals();
+      return geo;
+    };
+
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    /** One shared unit cube, scaled per plate: dozens of parts, one geometry. */
+    const plate = (w: number, h: number, d: number, mat: THREE.Material, x: number, y: number, z: number) => {
+      const m = new THREE.Mesh(unitBox, mat);
+      m.scale.set(w, h, d);
+      m.position.set(x, y, z);
+      scene.add(m);
+      return m;
+    };
+    const glowSprite = (x: number, y: number, z: number, size: number, colour: number, opacity = 0.9) => {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: glowTex, color: colour, transparent: true, opacity,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }));
+      s.position.set(x, y, z);
+      s.scale.set(size, size, 1);
+      scene.add(s);
+      return s;
+    };
+
+    /* ---------------- the cave shell ---------------- */
+    const HALL_LEN = HALL_MAX_Z - HALL_MIN_Z;
+    const HALL_MID_Z = (HALL_MAX_Z + HALL_MIN_Z) / 2;
+
+    // floor: wet ice, dark, mirror-bright where the puddles are
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(HALL_HALF * 2, HALL_LEN, 24, 48), floorMat);
     floor.rotation.x = -Math.PI / 2;
-    floor.position.set(0, 0, (HALL_MIN_Z + HALL_MAX_Z) / 2);
+    floor.position.set(0, 0, HALL_MID_Z);
+    floor.name = 'floor';
     scene.add(floor);
-    // ceiling
-    const ceil = new THREE.Mesh(new THREE.PlaneGeometry(HALL_HALF * 2, HALL_MAX_Z - HALL_MIN_Z), ceilMat);
-    ceil.rotation.x = Math.PI / 2;
-    ceil.position.set(0, 32, (HALL_MIN_Z + HALL_MAX_Z) / 2);
-    scene.add(ceil);
-    // side walls
+
+    // the two side walls: 40 units of broken blue ice each
     for (const side of [-1, 1]) {
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(3, 36, HALL_MAX_Z - HALL_MIN_Z), wallMat);
-      wall.position.set(side * HALL_HALF, 17, (HALL_MIN_Z + HALL_MAX_Z) / 2);
+      const wall = new THREE.Mesh(
+        rockify(new THREE.PlaneGeometry(HALL_LEN, 46, 72, 18), 4.2, 0.055, side * 13),
+        rockMat,
+      );
+      wall.position.set(side * HALL_HALF, 21, HALL_MID_Z);
+      wall.rotation.y = side * -Math.PI / 2;
+      wall.name = side < 0 ? 'wall-west' : 'wall-east';
       scene.add(wall);
     }
-    // the far wall of the vault
-    const farWall = new THREE.Mesh(new THREE.BoxGeometry(HALL_HALF * 2, 36, 4), wallMat);
-    farWall.position.set(0, 17, HALL_MIN_Z);
-    scene.add(farWall);
-    /* THE GATE END.
+
+    /* the roof: a vault, sprung from the wall tops to a broken ridge.
      *
-     * The vault has to let something bigger than a man out: the Frostwing launches down
-     * the hall and out through a 30-unit opening in the gate wall, so that wall is built
-     * as two shoulders and a lintel with daylight behind them.
-     */
+     * A cylinder sliced in half is the honest shape for a cave roof — the arch is baked
+     * into the geometry, then displaced, so it reads as ice and not as a pipe. */
+    const vaultGeo = new THREE.CylinderGeometry(1, 1, HALL_LEN, 46, 32, true, -Math.PI / 2, Math.PI);
+    vaultGeo.rotateX(-Math.PI / 2);
+    vaultGeo.scale(HALL_HALF * 1.02, 23, 1);
+    // The inside of the arch is what the operative sees, so the faces are turned inwards:
+    // otherwise every surface reads as an outer ledge and the whole roof snows over.
+    const vaultIndex = vaultGeo.getIndex();
+    if (vaultIndex) {
+      const arr = vaultIndex.array as Uint16Array | Uint32Array;
+      for (let i = 0; i < arr.length; i += 3) {
+        const t = arr[i + 1];
+        arr[i + 1] = arr[i + 2];
+        arr[i + 2] = t;
+      }
+      vaultIndex.needsUpdate = true;
+    }
+    rockify(vaultGeo, 2.2, 0.05, 17);
+    // and darker towards the apex: the arch above the lamps is in shadow, which is what
+    // keeps the roof from reading as one pale shell
+    {
+      const pos = vaultGeo.getAttribute('position');
+      const colAttr = vaultGeo.getAttribute('color') as THREE.BufferAttribute;
+      for (let i = 0; i < pos.count; i++) {
+        const y = pos.getY(i);
+        const fade = 1 - Math.min(0.52, Math.max(0, (y - 7) / 20) * 0.62);
+        colAttr.setXYZ(i, colAttr.getX(i) * fade, colAttr.getY(i) * fade, colAttr.getZ(i) * fade);
+      }
+      colAttr.needsUpdate = true;
+    }
+    const vaultMat = rockMat.clone();
+    vaultMat.side = THREE.DoubleSide;
+    const vault = new THREE.Mesh(vaultGeo, vaultMat);
+    vault.position.set(0, 11, HALL_MID_Z);
+    vault.name = 'vault';
+    scene.add(vault);
+
+    /* ---------------- the mouth of the cave ----------------
+     * Read from the hall it has to look like an opening in rock with weather behind it, so the
+     * daylight sits at the end of a short tunnel of ice, ringed with broken boulders. A flat
+     * bright plane hung on the end wall reads as a lit doorway, and that is not the picture. */
+    const MOUTH_Z = HALL_MIN_Z - 30;
+    const mouth = new THREE.Mesh(
+      new THREE.PlaneGeometry(76, 48),
+      new THREE.MeshBasicMaterial({ map: dayTex, transparent: true, opacity: 0.98, depthWrite: false, fog: false }),
+    );
+    mouth.position.set(0, 18, MOUTH_Z);
+    mouth.name = 'cave-mouth';
+    scene.add(mouth);
+    const mouthCore = new THREE.Mesh(
+      new THREE.PlaneGeometry(52, 30),
+      new THREE.MeshBasicMaterial({ map: dayTex, transparent: true, opacity: 0.95, depthWrite: false, fog: false }),
+    );
+    mouthCore.position.set(0, 16, MOUTH_Z + 1);
+    mouthCore.name = 'cave-mouth-core';
+    scene.add(mouthCore);
+    glowSprite(0, 17, MOUTH_Z + 4, 150, 0xdcf4ff, 0.55);
+    glowSprite(0, 10, MOUTH_Z + 6, 80, 0xffffff, 0.3);
+    // the tunnel: dark ice either side of the light, and a ramp coming down to the hall
+    const tunnelMat = rockMat.clone();
+    tunnelMat.emissive = new THREE.Color(0x071c28);
+    tunnelMat.emissiveIntensity = 0.35;
     for (const side of [-1, 1]) {
-      const shoulder = new THREE.Mesh(new THREE.BoxGeometry(HALL_HALF - 15, 36, 4), wallMat);
-      shoulder.position.set(side * (HALL_HALF / 2 + 7.5), 17, HALL_MAX_Z);
+      const wall = new THREE.Mesh(
+        rockify(new THREE.PlaneGeometry(38, 34, 14, 12), 3.2, 0.12, side * 91, 0x2a5f7c),
+        tunnelMat,
+      );
+      wall.position.set(side * 22, 15, HALL_MIN_Z - 14);
+      wall.rotation.y = side * -Math.PI / 2;
+      scene.add(wall);
+      // ice shoulders flanking the approach, pushed back so the silhouette reads
+      const shoulder = new THREE.Mesh(
+        rockify(new THREE.PlaneGeometry(44, 42, 16, 14), 5, 0.09, side * 41),
+        rockMat,
+      );
+      shoulder.position.set(side * (HALL_HALF - 6), 20, HALL_MIN_Z + 3);
       scene.add(shoulder);
     }
-    const lintel = new THREE.Mesh(new THREE.BoxGeometry(30, 17, 4), wallMat);
+    const roofOver = new THREE.Mesh(
+      rockify(new THREE.PlaneGeometry(HALL_HALF * 1.5, 26, 22, 10), 4.5, 0.1, 63),
+      tunnelMat,
+    );
+    roofOver.rotation.x = Math.PI / 2;
+    roofOver.position.set(0, 22, HALL_MIN_Z - 12);
+    scene.add(roofOver);
+    const brow = new THREE.Mesh(
+      rockify(new THREE.PlaneGeometry(HALL_HALF * 1.3, 16, 24, 8), 4, 0.1, 63),
+      rockMat,
+    );
+    brow.position.set(0, 33, HALL_MIN_Z + 1);
+    scene.add(brow);
+    // broken ice ringing the opening, so nothing ends on a straight edge
+    for (let i = 0; i < 22; i++) {
+      const a = (i / 22) * Math.PI * 2;
+      const rx = Math.cos(a) * (34 + Math.random() * 9);
+      const ry = 15 + Math.sin(a) * (17 + Math.random() * 6);
+      if (Math.sin(a) < -0.6) continue;
+      const chunk = new THREE.Mesh(
+        rockify(new THREE.IcosahedronGeometry(3.4 + Math.random() * 2.6, 0), 1.4, 0.3, i * 7),
+        rockMat,
+      );
+      chunk.position.set(rx, Math.max(2, ry), HALL_MIN_Z - 6 - Math.random() * 8);
+      chunk.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+      scene.add(chunk);
+    }
+    // the light it spills down the last stretch of floor
+    const mouthSpill = new THREE.Mesh(
+      new THREE.PlaneGeometry(66, 130),
+      new THREE.MeshBasicMaterial({
+        map: glowTex, color: 0xc9ecff, transparent: true, opacity: 0.20,
+        blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+      }),
+    );
+    mouthSpill.rotation.x = -Math.PI / 2;
+    mouthSpill.position.set(0, 0.07, HALL_MIN_Z + 58);
+    scene.add(mouthSpill);
+
+    // the gate end: the way in, and the way the Frostwing goes out
+    for (const side of [-1, 1]) {
+      const shoulder = new THREE.Mesh(
+        rockify(new THREE.PlaneGeometry(HALL_HALF - 15, 40, 18, 14), 3.4, 0.08, side * 51),
+        rockMat,
+      );
+      shoulder.position.set(side * (HALL_HALF / 2 + 7.5), 20, HALL_MAX_Z);
+      shoulder.rotation.y = Math.PI;
+      scene.add(shoulder);
+    }
+    const lintel = new THREE.Mesh(new THREE.BoxGeometry(30, 17, 4), rockMat);
+    rockify(lintel.geometry as THREE.BufferGeometry, 1.4, 0.16, 71);
     lintel.position.set(0, 27.5, HALL_MAX_Z);
     scene.add(lintel);
     // daylight beyond the gate: the ice shelf outside, the brightest thing in the room
     const daylight = new THREE.Mesh(
       new THREE.PlaneGeometry(30, 19),
-      new THREE.MeshBasicMaterial({ color: 0xe6f8ff }),
+      new THREE.MeshBasicMaterial({ color: 0xe6f8ff, fog: false }),
     );
     daylight.position.set(0, 9.5, HALL_MAX_Z - 3);
     daylight.rotation.y = Math.PI;
     scene.add(daylight);
-    // the gate itself: two frozen leaves meeting on a lit seam
     const gateSeam = new THREE.Mesh(new THREE.BoxGeometry(1.2, 19, 0.6), glowMat);
     gateSeam.position.set(0, 9.5, HALL_MAX_Z - 2);
     scene.add(gateSeam);
     const gateLeaves: THREE.Mesh[] = [];
     for (const side of [-1, 1]) {
-      const leaf = new THREE.Mesh(new THREE.BoxGeometry(15.6, 19, 2.2), wallMat);
+      const leaf = new THREE.Mesh(new THREE.BoxGeometry(15.6, 19, 2.2), paintMat);
       leaf.position.set(side * 7.8, 9.5, HALL_MAX_Z - 1.4);
       scene.add(leaf);
       gateLeaves.push(leaf);
     }
 
-    /* the launch rail: a lit centreline from the frost bay to the gate */
-    const rail = new THREE.Mesh(
-      new THREE.PlaneGeometry(9, HALL_MAX_Z - HALL_MIN_Z - 30),
-      new THREE.MeshStandardMaterial({ color: 0x9fd8ea, emissive: 0x4fb4d8, emissiveIntensity: 0.5, roughness: 0.5 }),
-    );
-    rail.rotation.x = -Math.PI / 2;
-    rail.position.set(0, 0.06, (HALL_MAX_Z + HALL_MIN_Z) / 2 - 8);
-    scene.add(rail);
-    for (let z = HALL_MIN_Z + 24; z < HALL_MAX_Z - 10; z += 16) {
-      for (const side of [-1, 1]) {
-        const stud = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.3, 0.7), glowMat);
-        stud.position.set(side * 5.2, 0.2, z);
-        scene.add(stud);
-      }
-    }
-
-    /* THE HANGAR GANTRY.
-     * A worked base, not a cave: a steel walkway down the east wall with railings, two
-     * lit bays and the division's banners hanging off it.
-     */
-    const gantryX = HALL_HALF - 9;
-    const gantry = new THREE.Mesh(new THREE.BoxGeometry(9, 0.6, 190), steelMat);
-    gantry.position.set(gantryX, 11, -120);
-    scene.add(gantry);
-    for (let i = 0; i <= 8; i++) {
-      const post = new THREE.Mesh(new THREE.BoxGeometry(0.4, 11, 0.4), steelMat);
-      post.position.set(gantryX - 4, 5.5, -30 - i * 23);
-      scene.add(post);
-    }
-    for (let i = 0; i < 36; i++) {
-      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.22, 1.5, 0.22), steelMat);
-      bar.position.set(gantryX - 4, 12, -28 - i * 5.2);
-      scene.add(bar);
-    }
-    const rail2 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 190), steelMat);
-    rail2.position.set(gantryX - 4, 12.7, -120);
-    scene.add(rail2);
-    for (const bz of [-64, -150]) {
-      const banner = new THREE.Mesh(
-        new THREE.PlaneGeometry(7, 12),
-        new THREE.MeshStandardMaterial({ color: 0x5f8fa8, emissive: 0x2c6076, emissiveIntensity: 0.5, side: THREE.DoubleSide }),
+    /* ---------------- shafts of daylight through the roof ---------------- */
+    const shafts: THREE.Mesh[] = [];
+    for (const [sx, sz, rad] of [[-18, -84, 7], [22, -158, 9], [-6, -232, 11]] as const) {
+      const geo = new THREE.CylinderGeometry(rad * 0.42, rad, 30, 14, 1, true);
+      const mat = new THREE.MeshBasicMaterial({
+        map: shaftTex, color: 0xbfe9ff, transparent: true, opacity: 0.16,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+      });
+      const shaft = new THREE.Mesh(geo, mat);
+      shaft.position.set(sx, 15, sz);
+      shaft.rotation.z = 0.14;
+      scene.add(shaft);
+      shafts.push(shaft);
+      glowSprite(sx, 30, sz, 26, 0xd8f2ff, 0.35);
+      // the pool it throws on the ice
+      const pool = new THREE.Mesh(
+        new THREE.CircleGeometry(rad * 1.5, 26),
+        new THREE.MeshBasicMaterial({
+          map: glowTex, color: 0xa8e2ff, transparent: true, opacity: 0.20,
+          blending: THREE.AdditiveBlending, depthWrite: false,
+        }),
       );
-      banner.position.set(gantryX - 6, 17, bz);
-      banner.rotation.y = Math.PI / 2;
-      scene.add(banner);
-    }
-    for (const lz of [-52, -120, -196]) {
-      const lamp = new THREE.Mesh(new THREE.SphereGeometry(1.1, 10, 8), glowMat);
-      lamp.position.set(gantryX - 5, 14.5, lz);
-      scene.add(lamp);
+      pool.rotation.x = -Math.PI / 2;
+      pool.position.set(sx, 0.05, sz);
+      scene.add(pool);
     }
 
-    // ice pillars down both sides, and crystal formations that catch the light
-    const pillarGeo = new THREE.CylinderGeometry(2.6, 3.6, 26, 7);
-    const crystalGeo = new THREE.ConeGeometry(2.2, 9, 5);
+    /* ---------------- hanging ice ---------------- */
+    const icicleGeo = new THREE.ConeGeometry(0.62, 6, 6);
+    const icicles = new THREE.InstancedMesh(icicleGeo, iceGlassMat, 190);
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < 190; i++) {
+      const x = (Math.random() - 0.5) * HALL_HALF * 1.9;
+      const z = HALL_MAX_Z - Math.random() * HALL_LEN;
+      const roof = 11 + 23 * Math.sqrt(Math.max(0.04, 1 - (x / (HALL_HALF * 1.02)) ** 2));
+      dummy.position.set(x, roof - 1.2, z);
+      dummy.rotation.set(Math.PI + (Math.random() - 0.5) * 0.2, Math.random() * 3, (Math.random() - 0.5) * 0.2);
+      dummy.scale.set(0.5 + Math.random() * 1.4, 0.4 + Math.random() * 1.7, 0.5 + Math.random() * 1.4);
+      dummy.updateMatrix();
+      icicles.setMatrixAt(i, dummy.matrix);
+    }
+    icicles.instanceMatrix.needsUpdate = true;
+    scene.add(icicles);
+
+    // ice columns down both sides of the hall, with crystal growth at their feet
+    const pillarGeo = new THREE.CylinderGeometry(2.2, 3.4, 30, 7, 3);
+    rockify(pillarGeo, 1.5, 0.3, 5, 0x3d7693);
+    const crystalGeo = new THREE.ConeGeometry(1.9, 8, 5);
+    const crystals = new THREE.InstancedMesh(crystalGeo, iceGlassMat, 84);
+    let crystalIndex = 0;
+    const pillars: { x: number; z: number }[] = [];
     for (let i = 0; i < 14; i++) {
-      const z = -6 - i * 21;
+      const z = -8 - i * 21;
       for (const side of [-1, 1]) {
-        const p = new THREE.Mesh(pillarGeo, wallMat);
-        p.position.set(side * (HALL_HALF - 12), 13, z);
+        const p = new THREE.Mesh(pillarGeo, rockMat);
+        p.position.set(side * (HALL_HALF - 13), 14, z);
         p.rotation.y = i * 0.7;
+        p.scale.set(1, 0.8 + (i % 3) * 0.11, 1);
         scene.add(p);
+        pillars.push({ x: side * (HALL_HALF - 13), z });
         for (let k = 0; k < 3; k++) {
-          const cr = new THREE.Mesh(crystalGeo, glowMat);
-          cr.position.set(side * (HALL_HALF - 20 - k * 4), 1.6 + k * 1.4, z + 6 - k * 5);
-          cr.rotation.z = (Math.random() - 0.5) * 0.5;
-          cr.scale.setScalar(0.5 + Math.random() * 0.6);
-          scene.add(cr);
+          dummy.position.set(side * (HALL_HALF - 19 - k * 3.5), 1.8 + k * 1.2, z + 6 - k * 5);
+          dummy.rotation.set(0, Math.random() * 3, (Math.random() - 0.5) * 0.6);
+          dummy.scale.setScalar(0.45 + Math.random() * 0.75);
+          dummy.updateMatrix();
+          crystals.setMatrixAt(crystalIndex++, dummy.matrix);
         }
       }
     }
 
-    // hanging icicles from the ceiling
-    const icicleGeo = new THREE.ConeGeometry(0.7, 6, 5);
-    for (let i = 0; i < 90; i++) {
-      const ic = new THREE.Mesh(icicleGeo, glowMat);
-      ic.position.set((Math.random() - 0.5) * (HALL_HALF * 1.7), 30 - Math.random() * 2,
-        HALL_MAX_Z - Math.random() * (HALL_MAX_Z - HALL_MIN_Z));
-      ic.rotation.z = Math.PI;
-      ic.scale.setScalar(0.4 + Math.random() * 1.5);
-      scene.add(ic);
+    crystals.count = crystalIndex;
+    crystals.instanceMatrix.needsUpdate = true;
+    scene.add(crystals);
+
+    // rubble and snow banks along the walls
+    const rubbleGeo = new THREE.IcosahedronGeometry(1.1, 0);
+    const rubble = new THREE.InstancedMesh(rubbleGeo, rockMat, 120);
+    for (let i = 0; i < 120; i++) {
+      const side = Math.random() > 0.5 ? 1 : -1;
+      dummy.position.set(
+        side * (HALL_HALF - 3 - Math.random() * 10),
+        0.2 + Math.random() * 0.6,
+        HALL_MAX_Z - Math.random() * HALL_LEN,
+      );
+      dummy.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+      dummy.scale.setScalar(0.5 + Math.random() * 2.4);
+      dummy.updateMatrix();
+      rubble.setMatrixAt(i, dummy.matrix);
+    }
+    rubble.instanceMatrix.needsUpdate = true;
+    scene.add(rubble);
+
+    // drifts piled against the walls, snow-white, catching the floodlights
+    for (let i = 0; i < 14; i++) {
+      const side = Math.random() > 0.5 ? 1 : -1;
+      const drift = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 6), snowMat);
+      drift.position.set(side * (HALL_HALF - 4 - Math.random() * 5), -0.55, HALL_MAX_Z - Math.random() * HALL_LEN);
+      drift.scale.set(6 + Math.random() * 9, 0.34 + Math.random() * 0.3, 8 + Math.random() * 12);
+      scene.add(drift);
     }
 
-    /* ---------------- lights down the hall ---------------- */
-    const lampGeo = new THREE.SphereGeometry(1.5, 10, 8);
-    for (let i = 0; i < 9; i++) {
-      const z = 4 - i * 36;
-      const lamp = new THREE.Mesh(lampGeo, glowMat);
-      lamp.position.set(0, 21, z);
-      scene.add(lamp);
-      const pl = new THREE.PointLight(0xd6f4ff, 26, 130, 2);
-      pl.position.set(0, 18, z);
+    /* ---------------- the hangar built into the cave ---------------- */
+    const gantryX = HALL_HALF - 11;
+    // catwalk decks
+    for (const side of [-1, 1]) {
+      plate(9, 0.5, HALL_LEN * 0.78, steelMat, side * gantryX, 11.4, HALL_MID_Z - 18);
+      plate(9.6, 0.18, HALL_LEN * 0.78, steelDark, side * gantryX, 11.1, HALL_MID_Z - 18);
+      // toe board, two rails and the posts between them
+      plate(0.3, 0.7, HALL_LEN * 0.78, hazardMat, side * (gantryX - 5.2), 11.9, HALL_MID_Z - 18);
+      for (let i = 0; i <= 13; i++) {
+        const z = HALL_MAX_Z - 20 - i * 21;
+        plate(0.28, 1.9, 0.28, steelPale, side * (gantryX - 5.1), 12.4, z);
+        plate(0.5, 1.1, 0.5, steelMat, side * gantryX, 5.6, z);
+        if (i % 2 === 0) plate(0.22, 0.22, 21, steelPale, side * (gantryX - 5.1), 13.3, z - 10.5);
+      }
+      plate(0.26, 0.26, HALL_LEN * 0.78, steelPale, side * (gantryX - 5.1), 12.2, HALL_MID_Z - 18);
+      // stairs down to the floor
+      for (let s = 0; s < 14; s++) {
+        plate(7, 0.22, 1.1, steelMat, side * (gantryX - 3), 0.5 + s * 0.78, -34 + s * 1.15);
+      }
+    }
+
+    for (const side of [-1, 1]) {
+      plate(1.4, 0.7, HALL_LEN * 0.74, steelDark, side * (gantryX - 5.6), 10.2, HALL_MID_Z - 18);
+      for (let i = 0; i < 9; i++) {
+        plate(0.9, 0.5, 0.9, steelMat, side * (gantryX - 5.6), 9.4, HALL_MAX_Z - 40 - i * 34);
+      }
+    }
+
+    // floodlights on the catwalks: housing, lens bloom, a cone of light and the smear it
+    // leaves on wet ice
+    const lampPosts: THREE.Vector3[] = [];
+    for (let i = 0; i < 6; i++) {
+      const z = HALL_MAX_Z - 30 - i * 48;
+      for (const side of [-1, 1]) {
+        const x = side * (gantryX - 4.6);
+        plate(1.5, 0.9, 1.1, steelDark, x, 14.6, z);
+        plate(1.1, 0.16, 0.8, glowMat, x, 14.15, z);
+        const bloom = glowSprite(x, 14.1, z, 9, 0xbfeaff, 0.85);
+        bloom.userData.base = 0.85;
+        glowSprite(x, 14.2, z, 3.4, 0xffffff, 0.95);
+        const cone = new THREE.Mesh(
+          new THREE.CylinderGeometry(1.2, 7.2, 13, 14, 1, true),
+          new THREE.MeshBasicMaterial({
+            map: shaftTex, color: 0xa8ddf5, transparent: true, opacity: 0.085,
+            blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+          }),
+        );
+        cone.position.set(x - side * 1.6, 8, z);
+        cone.rotation.z = side * 0.12;
+        scene.add(cone);
+        // pool + vertical smear: what a floodlight does to a wet floor
+        const pool = new THREE.Mesh(
+          new THREE.CircleGeometry(6.5, 22),
+          new THREE.MeshBasicMaterial({
+            map: glowTex, color: 0x9ddcf5, transparent: true, opacity: 0.20,
+            blending: THREE.AdditiveBlending, depthWrite: false,
+          }),
+        );
+        pool.rotation.x = -Math.PI / 2;
+        pool.position.set(x - side * 2.2, 0.04, z);
+        scene.add(pool);
+        const smear = new THREE.Mesh(
+          new THREE.PlaneGeometry(3.2, 13),
+          new THREE.MeshBasicMaterial({
+            map: shaftTex, color: 0x9bdcf7, transparent: true, opacity: 0.13,
+            blending: THREE.AdditiveBlending, depthWrite: false,
+          }),
+        );
+        smear.rotation.x = -Math.PI / 2;
+        smear.rotation.z = Math.PI / 2;
+        smear.position.set(x - side * 3.4, 0.06, z - 5);
+        scene.add(smear);
+        // Only every other fixture carries a real light; the rest carry bloom and a pool.
+        // Forward rendering has a light budget and the room reads the same with nine.
+        if (i % 3 === 1) {
+          const pl = new THREE.PointLight(0xa8e0ff, 170, 74, 2);
+          pl.position.set(x - side * 3, 13.4, z);
+          scene.add(pl);
+          lampPosts.push(new THREE.Vector3(x - side * 3, 13.4, z));
+        }
+      }
+    }
+    // two more floods over the gate approach, so the entry reads as lit as the rest
+    for (const side of [-1, 1]) {
+      plate(1.4, 0.8, 1, steelDark, side * 19, 13.8, 4);
+      plate(1, 0.14, 0.7, glowMat, side * 19, 13.4, 4);
+      glowSprite(side * 19, 13.4, 4, 8, 0xbfeaff, 0.8);
+      if (side > 0) {
+        // one lamp over the approach is enough: two more would put us over the light budget
+        const pl = new THREE.PointLight(0xa8e0ff, 330, 90, 2);
+        pl.position.set(0, 13, 4);
+        scene.add(pl);
+      }
+      const pool = new THREE.Mesh(
+        new THREE.CircleGeometry(7.5, 22),
+        new THREE.MeshBasicMaterial({
+          map: glowTex, color: 0x9ddcf5, transparent: true, opacity: 0.22,
+          blending: THREE.AdditiveBlending, depthWrite: false,
+        }),
+      );
+      pool.rotation.x = -Math.PI / 2;
+      pool.position.set(side * 17, 0.04, 3);
+      scene.add(pool);
+    }
+
+    // a few lights up under the ridge, so the roof is not a black ceiling
+    for (let i = 0; i < 2; i++) {
+      const z = HALL_MAX_Z - 70 - i * 120;
+      const lamp = plate(3.4, 0.5, 1.2, steelDark, 0, 31.6, z);
+      plate(3, 0.2, 0.9, glowMat, 0, 31.3, z);
+      glowSprite(0, 31.2, z, 16, 0xbfeaff, 0.5);
+      const pl = new THREE.PointLight(0xbfeaff, 230, 130, 2);
+      pl.position.set(0, 29, z);
       scene.add(pl);
+      // the cable it hangs from
+      plate(0.1, 6, 0.1, steelDark, lamp.position.x, 34, z);
+    }
+
+    // banners: the division's colours, stiff with frost, hanging off the catwalk
+    const banners: THREE.Mesh[] = [];
+    for (const [side, zone, kind] of [[1, -70, 'shield'], [-1, -120, 'hydra'], [1, -186, 'shield'], [-1, -232, 'hydra']] as const) {
+      const banner = new THREE.Mesh(
+        new THREE.PlaneGeometry(6.4, 9.6),
+        new THREE.MeshStandardMaterial({
+          map: bannerTexture(kind), roughness: 0.85, metalness: 0.05,
+          side: THREE.DoubleSide, emissive: 0x0a1c26, emissiveIntensity: 0.5,
+        }),
+      );
+      banner.position.set(side * (gantryX - 6.4), 17.4, zone);
+      banner.rotation.y = side > 0 ? -Math.PI / 2 : Math.PI / 2;
+      banner.userData.base = banner.position.x;
+      scene.add(banner);
+      banners.push(banner);
+      // the rod it hangs from
+      plate(0.16, 0.16, 7.4, steelPale, side * (gantryX - 6.4), 22.3, zone);
+    }
+
+    // equipment crates and containers, stacked under the catwalks
+    const crateMats = [
+      new THREE.MeshStandardMaterial({ map: crateTexH, roughness: 0.7, metalness: 0.3 }),
+      new THREE.MeshStandardMaterial({ map: crateTexS, roughness: 0.7, metalness: 0.3 }),
+    ];
+    for (let i = 0; i < 26; i++) {
+      const side = i % 2 ? 1 : -1;
+      const z = HALL_MAX_Z - 34 - Math.random() * (HALL_LEN - 80);
+      const w = 5 + Math.random() * 7, d = 4 + Math.random() * 6, h = 2.4 + Math.random() * 1.6;
+      const mat = crateMats[i % 3 === 0 ? 1 : 0];
+      const crate = new THREE.Mesh(unitBox, mat);
+      crate.scale.set(w, h, d);
+      crate.position.set(side * (HALL_HALF - 16 - Math.random() * 6), h / 2, z);
+      crate.rotation.y = (Math.random() - 0.5) * 0.25;
+      scene.add(crate);
+      if (Math.random() > 0.55) {
+        const second = new THREE.Mesh(unitBox, mat);
+        second.scale.set(w * 0.72, h * 0.8, d * 0.78);
+        second.position.set(crate.position.x + (Math.random() - 0.5) * 1.4, h + h * 0.4, z + (Math.random() - 0.5) * 1.2);
+        second.rotation.y = crate.rotation.y + (Math.random() - 0.5) * 0.3;
+        scene.add(second);
+      }
+    }
+
+    /* kit stacks and light strips down the gate end: the clutter the camera walks past */
+    for (const [sx, sz, rot] of [[-19, 2, 0.2], [-21, -7, -0.15], [20, 1, 0.1], [22, -9, 0.25], [-24, -18, 0.05], [17, -20, -0.2]] as const) {
+      const w = 4.2 + Math.random() * 2.6, h = 2 + Math.random() * 0.9, d = 3 + Math.random() * 1.6;
+      const box = new THREE.Mesh(unitBox, crateMats[Math.random() > 0.5 ? 1 : 0]);
+      box.scale.set(w, h, d);
+      box.position.set(sx, h / 2, sz);
+      box.rotation.y = rot;
+      scene.add(box);
+      // a light strip along the front edge, the way the reference crates are marked
+      plate(w * 0.78, 0.16, 0.12, glowMat, sx + Math.sin(rot) * -(d / 2), h * 0.72, sz - d / 2 - 0.06);
+      const cap = new THREE.Mesh(unitBox, snowMat);
+      cap.scale.set(w * 1.02, 0.14, d * 1.02);
+      cap.position.set(sx, h + 0.06, sz);
+      cap.rotation.y = rot;
+      scene.add(cap);
+      // and a case on top of some of them
+      if (Math.random() > 0.45) {
+        const top = new THREE.Mesh(unitBox, crateMats[0]);
+        top.scale.set(w * 0.6, h * 0.62, d * 0.66);
+        top.position.set(sx + 0.4, h + 0.2 + h * 0.31, sz - 0.3);
+        top.rotation.y = rot - 0.12;
+        scene.add(top);
+      }
+    }
+
+    /* the launch rail: a lit centreline from the frost bay to the gate — pale steel, because a
+     * dark strip down the middle of the floor reads as a hole in it */
+    const railMat = new THREE.MeshStandardMaterial({ color: 0x8fa6b4, roughness: 0.42, metalness: 0.3 });
+    /* painted markings, not lamps: bright enough to read, dim enough not to bloom into blobs */
+    const markMat = new THREE.MeshStandardMaterial({ color: 0xdff2fb, roughness: 0.55, metalness: 0.1, emissive: 0x5fb2cf, emissiveIntensity: 0.8 });
+    plate(7, 0.08, HALL_LEN - 26, railMat, 0, 0.07, HALL_MID_Z - 6);
+    plate(0.3, 0.1, HALL_LEN - 30, markMat, -3.2, 0.11, HALL_MID_Z - 6);
+    plate(0.3, 0.1, HALL_LEN - 30, markMat, 3.2, 0.11, HALL_MID_Z - 6);
+    for (let z = HALL_MIN_Z + 24; z < HALL_MAX_Z - 10; z += 9) {
+      for (const side of [-1, 1]) {
+        plate(0.5, 0.16, 0.5, markMat, side * 5.2, 0.14, z);
+      }
+    }
+    /* lane markings: the dashed line a hangar floor always has down the taxi line */
+    for (let z = HALL_MIN_Z + 30; z < HALL_MAX_Z - 26; z += 12) {
+      plate(0.45, 0.02, 5, markMat, -14, 0.05, z);
+      plate(0.45, 0.02, 5, markMat, 14, 0.05, z);
+    }
+    /* aprons over the wells, painted with hazard stripes */
+    for (const wz of [-132, -186]) {
+      const apron = new THREE.Mesh(new THREE.PlaneGeometry(30, 24), hazardMat);
+      apron.rotation.x = -Math.PI / 2;
+      apron.position.set(0, 0.03, wz);
+      scene.add(apron);
     }
 
     /* ---------------- snow drifting in the air ---------------- */
-    const snowCount = 900;
+    const snowCount = 1100;
     const snowPos = new Float32Array(snowCount * 3);
     for (let i = 0; i < snowCount; i++) {
       snowPos[i * 3] = (Math.random() - 0.5) * HALL_HALF * 2;
       snowPos[i * 3 + 1] = Math.random() * 26;
-      snowPos[i * 3 + 2] = HALL_MAX_Z - Math.random() * (HALL_MAX_Z - HALL_MIN_Z);
+      snowPos[i * 3 + 2] = HALL_MAX_Z - Math.random() * HALL_LEN;
     }
     const snowGeo = new THREE.BufferGeometry();
     snowGeo.setAttribute('position', new THREE.BufferAttribute(snowPos, 3));
     const snow = new THREE.Points(snowGeo, new THREE.PointsMaterial({
-      color: 0xffffff, size: 0.34, transparent: true, opacity: 0.75, depthWrite: false,
+      map: glowTex, color: 0xe6f6ff, size: 0.44, transparent: true, opacity: 0.62,
+      depthWrite: false, blending: THREE.AdditiveBlending,
     }));
     scene.add(snow);
 
+    /* cold mist rolling along the floor: the haze in the reference is half the picture */
+    const mist: THREE.Mesh[] = [];
+    for (let i = 0; i < 10; i++) {
+      const m = new THREE.Mesh(
+        new THREE.PlaneGeometry(46 + Math.random() * 40, 26 + Math.random() * 18),
+        new THREE.MeshBasicMaterial({
+          map: glowTex, color: 0x9fd2e8, transparent: true, opacity: 0.05 + Math.random() * 0.05,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        }),
+      );
+      m.rotation.x = -Math.PI / 2;
+      m.position.set((Math.random() - 0.5) * HALL_HALF * 1.3, 0.9 + Math.random() * 1.6,
+        HALL_MAX_Z - Math.random() * HALL_LEN);
+      m.userData.drift = 0.4 + Math.random() * 0.8;
+      scene.add(m);
+      mist.push(m);
+    }
+
     /* ---------------- figures ---------------- */
+    /* The platoon has to read as people at ten paces, so the body is built from blocks with
+     * hard shoulders and a helmeted head — rounded capsules read as blobs at close range. */
+    const torsoGeo = new THREE.BoxGeometry(0.86, 0.8, 0.54);
+    const hipGeo = new THREE.BoxGeometry(0.7, 0.36, 0.46);
+    const thighGeo = new THREE.BoxGeometry(0.29, 0.56, 0.33);
+    const shinGeo = new THREE.BoxGeometry(0.26, 0.52, 0.3);
+    const armGeo = new THREE.BoxGeometry(0.24, 0.58, 0.26);
+    const padGeo = new THREE.SphereGeometry(0.21, 8, 6);
+    const kneeGeo = new THREE.BoxGeometry(0.27, 0.19, 0.11);
+    const headGeo = new THREE.SphereGeometry(0.23, 10, 8);
+    const helmetGeo = new THREE.SphereGeometry(0.3, 12, 8, 0, Math.PI * 2, 0, Math.PI / 1.7);
+    const packGeo = new THREE.BoxGeometry(0.6, 0.78, 0.34);
+    const bootGeo = new THREE.BoxGeometry(0.3, 0.22, 0.54);
+
     const makeFigure = (colours: { coat: number; helmet: number; visor: number }, hostile: boolean) => {
       const g = new THREE.Group();
-      const body = new THREE.Mesh(
-        new THREE.CapsuleGeometry(0.52, 1.05, 4, 10),
-        new THREE.MeshStandardMaterial({ color: colours.coat, roughness: 0.75, metalness: 0.1 }),
+      // snow camouflage over the coat: the blotches are what tells the platoon from the guards
+      const cloth = new THREE.MeshStandardMaterial({
+        map: snowCamoTex, color: hostile ? colours.coat : 0xffffff,
+        roughness: 0.86, metalness: 0.05,
+      });
+      const plate2 = new THREE.MeshStandardMaterial(
+        hostile
+          ? { color: colours.helmet, roughness: 0.6, metalness: 0.22 }
+          : { map: snowCamoTex, color: colours.helmet, roughness: 0.6, metalness: 0.22 },
       );
-      body.position.y = 1.15;
-      g.add(body);
-      const head = new THREE.Mesh(
-        new THREE.SphereGeometry(0.34, 12, 10),
-        new THREE.MeshStandardMaterial({ color: 0xe8d9c4, roughness: 0.8 }),
-      );
-      head.position.y = 2.03;
+      const skin = new THREE.MeshStandardMaterial({ color: hostile ? 0x8e9aa2 : 0xd9c3ab, roughness: 0.85 });
+      const dark = new THREE.MeshStandardMaterial({ color: 0x11181d, roughness: 0.75, metalness: 0.3 });
+
+      // legs: thigh, shin, knee pad and a boot, with a stance so they do not read as one column
+      for (const side of [-1, 1]) {
+        const thigh = new THREE.Mesh(thighGeo, cloth);
+        thigh.position.set(side * 0.19, 0.86, side * 0.03);
+        thigh.rotation.x = side > 0 ? 0.06 : -0.04;
+        g.add(thigh);
+        const shin = new THREE.Mesh(shinGeo, cloth);
+        shin.position.set(side * 0.19, 0.4, -0.02);
+        g.add(shin);
+        const knee = new THREE.Mesh(kneeGeo, dark);
+        knee.position.set(side * 0.19, 0.62, -0.17);
+        g.add(knee);
+        const boot = new THREE.Mesh(bootGeo, dark);
+        boot.position.set(side * 0.19, 0.11, -0.06);
+        g.add(boot);
+      }
+      // hips, torso and the hard shoulders a plate carrier gives you
+      const hips = new THREE.Mesh(hipGeo, cloth);
+      hips.position.y = 1.12;
+      g.add(hips);
+      const torso = new THREE.Mesh(torsoGeo, cloth);
+      torso.position.y = 1.5;
+      g.add(torso);
+      const vest = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.62, 0.62), plate2);
+      vest.position.set(0, 1.5, 0.01);
+      g.add(vest);
+      for (const side of [-1, 1]) {
+        const pad = new THREE.Mesh(padGeo, plate2);
+        pad.position.set(side * 0.46, 1.78, 0);
+        pad.scale.set(1.05, 0.72, 1.05);
+        g.add(pad);
+      }
+      // arms, one hand forward on the rifle
+      const armL = new THREE.Mesh(armGeo, cloth);
+      armL.position.set(-0.52, 1.44, -0.02);
+      armL.rotation.z = 0.16;
+      g.add(armL);
+      const armR = new THREE.Mesh(armGeo, cloth);
+      armR.position.set(0.5, 1.38, -0.26);
+      armR.rotation.set(-0.62, 0, -0.2);
+      g.add(armR);
+      // head, helmet, and the glow of a visor on the hostiles
+      const head = new THREE.Mesh(headGeo, skin);
+      head.position.y = 2.0;
       g.add(head);
-      const helmet = new THREE.Mesh(
-        new THREE.SphereGeometry(0.4, 12, 8, 0, Math.PI * 2, 0, Math.PI / 1.7),
-        new THREE.MeshStandardMaterial({ color: colours.helmet, roughness: 0.6, metalness: 0.25 }),
-      );
-      helmet.position.y = 2.09;
+      const helmet = new THREE.Mesh(helmetGeo, plate2);
+      helmet.position.y = 2.02;
+      helmet.scale.set(1.08, 1.02, 1.08);
       g.add(helmet);
+      const brim = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.07, 0.5), plate2);
+      brim.position.set(0, 1.93, -0.06);
+      g.add(brim);
       if (hostile) {
         const visor = new THREE.Mesh(
-          new THREE.BoxGeometry(0.5, 0.12, 0.1),
-          new THREE.MeshStandardMaterial({ color: colours.visor, emissive: colours.visor, emissiveIntensity: 2 }),
+          new THREE.BoxGeometry(0.4, 0.09, 0.07),
+          new THREE.MeshStandardMaterial({ color: colours.visor, emissive: colours.visor, emissiveIntensity: 2.4 }),
         );
-        visor.position.set(0, 2.02, -0.3);
+        visor.position.set(0, 1.98, -0.24);
         g.add(visor);
       }
-      // rifle
-      const rifle = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.12, 1.1), steelMat);
-      rifle.position.set(0.36, 1.32, -0.5);
+      // webbing, pack, and the antenna that makes the silhouette read at a glance
+      const pack = new THREE.Mesh(packGeo, dark);
+      pack.position.set(0, 1.56, 0.44);
+      g.add(pack);
+      const roll = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.22, 0.24), cloth);
+      roll.position.set(0, 1.9, 0.4);
+      g.add(roll);
+      const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.02, 0.78, 4), dark);
+      antenna.position.set(-0.26, 2.2, 0.5);
+      antenna.rotation.z = 0.14;
+      g.add(antenna);
+      // rifle held across the body
+      const rifle = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.14, 1.16), dark);
+      rifle.position.set(0.3, 1.3, -0.5);
+      rifle.rotation.x = -0.12;
       g.add(rifle);
-      // shield for the escort platoon: a slab of pale alloy
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.6, 6), steelPale);
+      barrel.rotation.x = Math.PI / 2;
+      barrel.position.set(0.3, 1.32, -1.15);
+      g.add(barrel);
+      const mag = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.26, 0.16), dark);
+      mag.position.set(0.3, 1.12, -0.34);
+      g.add(mag);
+      // the shield troopers carry a slab of pale alloy
       if (!hostile) {
+        // a riot slab, not a white board: smaller, translucent, with a lit rim so it reads
         const shield = new THREE.Mesh(
-          new THREE.BoxGeometry(1.05, 1.35, 0.1),
-          new THREE.MeshStandardMaterial({ color: 0xdff2ff, roughness: 0.25, metalness: 0.5, transparent: true, opacity: 0.86 }),
+          new THREE.BoxGeometry(0.66, 0.92, 0.06),
+          new THREE.MeshStandardMaterial({ color: 0x8fadbc, roughness: 0.22, metalness: 0.4, transparent: true, opacity: 0.62 }),
         );
-        shield.position.set(-0.62, 1.3, -0.42);
+        shield.position.set(-0.58, 1.36, -0.42);
+        shield.rotation.y = 0.16;
         g.add(shield);
+        const rim = new THREE.Mesh(
+          new THREE.BoxGeometry(0.7, 0.06, 0.08),
+          new THREE.MeshStandardMaterial({ color: 0xd7f4ff, emissive: 0x6fd8ff, emissiveIntensity: 1.3 }),
+        );
+        rim.position.set(-0.58, 1.8, -0.42);
+        rim.rotation.y = 0.16;
+        g.add(rim);
       }
+      // snow settled on the shoulders
+      const snowCap = new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.06, 0.5), snowMat);
+      snowCap.position.set(0, 1.83, 0);
+      g.add(snowCap);
       return g;
     };
 
     const colliders: { x: number; z: number; r: number }[] = [];
-    for (let i = 0; i < 14; i++) for (const side of [-1, 1]) colliders.push({ x: side * (HALL_HALF - 12), z: -6 - i * 21, r: 3.6 });
-    // the gantry legs are solid too
-    for (let i = 0; i <= 8; i++) colliders.push({ x: HALL_HALF - 13, z: -30 - i * 23, r: 2.2 });
+    for (const p of pillars) colliders.push({ x: p.x, z: p.z, r: 3.6 });
+    for (let i = 0; i <= 13; i++) {
+      for (const side of [-1, 1]) colliders.push({ x: side * gantryX, z: HALL_MAX_Z - 20 - i * 21, r: 2.2 });
+    }
 
     /* hostiles: an ice guard battalion spread down the hall */
     const foes: Foe[] = [];
     for (let i = 0; i < 22; i++) {
       const row = Math.floor(i / 4);
-      const mesh = makeFigure({ coat: 0x2b3a4d, helmet: 0x8fd8ff, visor: 0x8ff0ff }, true);
+      const mesh = makeFigure({ coat: 0x3a5065, helmet: 0x2b3a46, visor: 0x8ff0ff }, true);
       const x = -30 + (i % 4) * 20 + (row % 2) * 6;
       const z = -46 - row * 32;
       mesh.position.set(x, 0, z);
@@ -402,101 +1194,216 @@ export default function Glacier3D({ onExit }: Props) {
     /* escorts: the twenty frozen shield troopers, in winter camouflage */
     const escorts: Escort[] = [];
     for (let i = 0; i < 20; i++) {
-      const mesh = makeFigure({ coat: 0xd8e6ee, helmet: 0xe9f4f8, visor: 0x8ff0ff }, false);
+      const mesh = makeFigure({ coat: 0x9fb2bd, helmet: 0xc3d3dc, visor: 0x8ff0ff }, false);
       mesh.visible = false;
       scene.add(mesh);
       escorts.push({ mesh, x: 0, z: 0, hp: 120, maxHp: 120, cool: 0, alive: true, slot: i, flash: 0 });
     }
 
+    /* sentries at the gate end: static figures that give the room a sense of scale */
+    for (const [sx, sz, rot] of [[-13, 1.5, 0.5], [13.5, -2.5, -0.6], [-16, -13, 0.35], [18, -16, -0.3]] as const) {
+      const sentry = makeFigure({ coat: 0x8ba2b0, helmet: 0xb9ccd7, visor: 0x8ff0ff }, false);
+      sentry.position.set(sx, 0, sz);
+      sentry.rotation.y = Math.PI + rot;
+      sentry.userData.sentry = true;
+      scene.add(sentry);
+    }
+
     /* ---------------- the two aircraft wells ---------------- */
     const wells: { z: number; heli: THREE.Group; rotor: THREE.Mesh[]; risen: number }[] = [];
-    const wellRingMat = new THREE.MeshStandardMaterial({ color: 0x9fd8ff, emissive: 0x5fcaff, emissiveIntensity: 1.2, roughness: 0.3 });
+    const wellRingMat = new THREE.MeshStandardMaterial({ color: 0xbfeaff, emissive: 0x5fcaff, emissiveIntensity: 1.6, roughness: 0.25 });
+
+    /** A gunship that reads as a gunship: boom, mast, four blades, stub wings, rocket pods. */
+    const makeGunship = () => {
+      const heli = new THREE.Group();
+      // fuselage: a lathe profile tapering nose to tail
+      const profile: THREE.Vector2[] = [];
+      for (let i = 0; i <= 12; i++) {
+        const t = i / 12;
+        const r = 1.05 + Math.sin(t * Math.PI) * 1.15 - (t > 0.7 ? (t - 0.7) * 2.2 : 0);
+        profile.push(new THREE.Vector2(Math.max(0.24, r), (t - 0.5) * 9.2));
+      }
+      const hull = new THREE.Mesh(new THREE.LatheGeometry(profile, 14), hullMat);
+      hull.rotation.x = -Math.PI / 2;
+      hull.scale.set(1, 0.86, 1);
+      heli.add(hull);
+      // cockpit: a dark glass blister with a frame
+      const cockpit = new THREE.Mesh(new THREE.SphereGeometry(1.12, 14, 12, 0, Math.PI * 2, 0, Math.PI * 0.62), canopyMat);
+      cockpit.position.set(0, 0.3, -3.5);
+      cockpit.rotation.x = -0.28;
+      heli.add(cockpit);
+      plate0(0.1, 1.4, 0.1, steelDark, 0, 0.6, -4.1);
+      function plate0(w: number, h: number, d: number, mat: THREE.Material, x: number, y: number, z: number) {
+        const m = new THREE.Mesh(unitBox, mat);
+        m.scale.set(w, h, d);
+        m.position.set(x, y, z);
+        heli.add(m);
+        return m;
+      }
+      // engine deck and exhausts
+      plate0(1.7, 0.9, 3.4, steelDark, 0, 1.15, 0.4);
+      for (const side of [-1, 1]) plate0(0.5, 0.42, 0.9, steelPale, side * 0.85, 1.15, 1.9);
+      // mast, hub and four blades
+      plate0(0.36, 0.9, 0.36, steelPale, 0, 1.9, -0.2);
+      plate0(1.1, 0.22, 1.1, steelDark, 0, 2.3, -0.2);
+      const rotor: THREE.Mesh[] = [];
+      const bladeMat = new THREE.MeshStandardMaterial({ color: 0x25313a, roughness: 0.6, metalness: 0.45 });
+      for (let b = 0; b < 4; b++) {
+        const blade = new THREE.Mesh(new THREE.BoxGeometry(11.4, 0.11, 0.52), bladeMat);
+        blade.position.set(0, 2.36, -0.2);
+        blade.rotation.y = (b / 4) * Math.PI * 2;
+        blade.rotation.z = 0.02;
+        heli.add(blade);
+        rotor.push(blade);
+      }
+      // rotor blur: a faint disc is what makes a turning rotor read at a distance
+      const blur = new THREE.Mesh(
+        new THREE.CircleGeometry(5.7, 24),
+        new THREE.MeshBasicMaterial({
+          color: 0x0d151b, transparent: true, opacity: 0.16,
+          side: THREE.DoubleSide, depthWrite: false,
+        }),
+      );
+      blur.rotation.x = -Math.PI / 2;
+      blur.position.set(0, 2.3, -0.2);
+      heli.add(blur);
+      rotor.push(blur);
+      // chin gun
+      plate0(0.22, 0.22, 1.1, steelDark, 0, -0.72, -3.1);
+      const muzzle = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.9, 6), steelPale);
+      muzzle.rotation.x = Math.PI / 2;
+      muzzle.position.set(0, -0.72, -3.9);
+      heli.add(muzzle);
+      // tail boom, fin, tail rotor
+      plate0(0.52, 0.52, 5.2, hullMat, 0, 0.5, 5.2);
+      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.22, 1.9, 1.2), hullMat);
+      fin.position.set(0, 1.35, 7.6);
+      fin.rotation.z = 0.1;
+      heli.add(fin);
+      const tailHub = plate0(0.16, 0.16, 0.5, steelDark, 0.3, 1.5, 7.9);
+      tailHub.rotation.z = Math.PI / 2;
+      for (let b = 0; b < 3; b++) {
+        const tb = new THREE.Mesh(new THREE.BoxGeometry(0.1, 3.1, 0.3), bladeMat);
+        tb.position.set(0.36, 1.5, 7.9);
+        tb.rotation.x = (b / 3) * Math.PI * 2;
+        heli.add(tb);
+        rotor.push(tb);
+      }
+      plate0(2.4, 0.14, 0.8, hullMat, 0, 0.4, 7.1);
+      // stub wings and rocket pods
+      for (const side of [-1, 1]) {
+        plate0(3.2, 0.22, 1.3, hullMat, side * 2.1, 0.1, -0.3);
+        const pod = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 1.7, 10), steelDark);
+        pod.rotation.x = Math.PI / 2;
+        pod.position.set(side * 3.2, -0.2, -0.3);
+        heli.add(pod);
+        for (let k = 0; k < 7; k++) {
+          const tube = new THREE.Mesh(new THREE.CircleGeometry(0.09, 8), glowMat);
+          const a = (k / 7) * Math.PI * 2;
+          tube.position.set(side * 3.2 + Math.cos(a) * 0.22, -0.2 + Math.sin(a) * 0.22, -1.16);
+          tube.rotation.y = Math.PI;
+          heli.add(tube);
+        }
+        // skids
+        const skid = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 4.4, 6), steelPale);
+        skid.rotation.x = Math.PI / 2;
+        skid.position.set(side * 1.25, -1.5, 0.1);
+        heli.add(skid);
+        for (const zz of [-1.4, 1.4]) plate0(0.1, 1.1, 0.1, steelPale, side * 1.25, -0.95, zz);
+      }
+      // navigation lights
+      const navR = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 6), new THREE.MeshStandardMaterial({
+        color: 0xff5a5a, emissive: 0xff3a3a, emissiveIntensity: 3,
+      }));
+      navR.position.set(-1.35, -0.1, -0.5);
+      heli.add(navR);
+      const navG = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 6), new THREE.MeshStandardMaterial({
+        color: 0x6aff9a, emissive: 0x2aff77, emissiveIntensity: 3,
+      }));
+      navG.position.set(1.35, -0.1, -0.5);
+      heli.add(navG);
+      // snow on the rotor deck and the boom
+      const cap = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.08, 3.2), snowMat);
+      cap.position.set(0, 1.66, 0.4);
+      heli.add(cap);
+      heli.scale.setScalar(1.14);
+      return { heli, rotor };
+    };
+
     for (const wz of [-132, -186]) {
-      const ring = new THREE.Mesh(new THREE.TorusGeometry(7.2, 0.6, 8, 28), wellRingMat);
+      // the well: a steel collar sunk into the ice, lit from inside
+      const collar = new THREE.Mesh(new THREE.CylinderGeometry(9.4, 9.8, 1.2, 30, 1, true), steelMat);
+      collar.position.set(0, 0.2, wz);
+      scene.add(collar);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(7.4, 0.34, 8, 34), wellRingMat);
       ring.rotation.x = Math.PI / 2;
-      ring.position.set(0, 0.15, wz);
+      ring.position.set(0, 0.16, wz);
       scene.add(ring);
+      const shaftWall = new THREE.Mesh(
+        new THREE.CylinderGeometry(7.2, 7.2, 12, 26, 1, true),
+        new THREE.MeshStandardMaterial({ color: 0x08161f, emissive: 0x0d3346, emissiveIntensity: 0.9, side: THREE.BackSide }),
+      );
+      shaftWall.position.set(0, -6, wz);
+      scene.add(shaftWall);
       const hole = new THREE.Mesh(
-        new THREE.CircleGeometry(7, 24),
-        new THREE.MeshStandardMaterial({ color: 0x0d2230, emissive: 0x123c52, emissiveIntensity: 0.8 }),
+        new THREE.CircleGeometry(7.2, 28),
+        new THREE.MeshStandardMaterial({ color: 0x050d13, emissive: 0x0a2c3e, emissiveIntensity: 1 }),
       );
       hole.rotation.x = -Math.PI / 2;
-      hole.position.set(0, 0.05, wz);
+      hole.position.set(0, -11.6, wz);
       scene.add(hole);
+      glowSprite(0, 0.6, wz, 22, 0x8fe6ff, 0.28);
 
-      const heli = new THREE.Group();
-      const bodyM = new THREE.MeshStandardMaterial({ color: 0xdfeef4, roughness: 0.45, metalness: 0.35 });
-      const hull = new THREE.Mesh(new THREE.CapsuleGeometry(1.5, 5.2, 6, 12), bodyM);
-      hull.rotation.x = Math.PI / 2;
-      heli.add(hull);
-      const cockpit = new THREE.Mesh(
-        new THREE.SphereGeometry(1.45, 12, 10),
-        new THREE.MeshStandardMaterial({ color: 0x9fe6ff, roughness: 0.1, metalness: 0.2, transparent: true, opacity: 0.7 }),
-      );
-      cockpit.position.set(0, 0.3, -3.1);
-      heli.add(cockpit);
-      const tail = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 5.2), bodyM);
-      tail.position.set(0, 0.6, 4.4);
-      heli.add(tail);
-      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.24, 1.7, 1.3), bodyM);
-      fin.position.set(0, 1.4, 6.8);
-      heli.add(fin);
-      const rotors: THREE.Mesh[] = [];
-      for (const [ry, rl] of [[1.7, 6.4], [1.5, 2.4]] as const) {
-        const blade = new THREE.Mesh(
-          new THREE.BoxGeometry(rl, 0.1, 0.42),
-          new THREE.MeshStandardMaterial({ color: 0xd8e8f0, roughness: 0.4, metalness: 0.4 }),
-        );
-        blade.position.set(0, ry, ry > 1.6 ? -0.4 : 6.6);
-        heli.add(blade);
-        rotors.push(blade);
-      }
-      // skids
-      for (const side of [-1, 1]) {
-        const skid = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 5), steelMat);
-        skid.position.set(side * 1.3, -1.7, 0);
-        heli.add(skid);
-      }
+      const { heli, rotor } = makeGunship();
       heli.position.set(0, -9, wz);
       scene.add(heli);
-      wells.push({ z: wz, heli, rotor: rotors, risen: 0 });
+      wells.push({ z: wz, heli, rotor, risen: 0 });
     }
 
     /* ---------------- the Frostwing ---------------- */
     const plane = new THREE.Group();
-    const glassMat = new THREE.MeshStandardMaterial({
-      color: 0xd8f6ff, roughness: 0.06, metalness: 0.5, transparent: true, opacity: 0.86,
-      emissive: 0x7fe4ff, emissiveIntensity: 0.5,
+    const frostHull = new THREE.MeshStandardMaterial({
+      color: 0xa9d8ea, roughness: 0.18, metalness: 0.72,
+      emissive: 0x1d5468, emissiveIntensity: 0.5, transparent: true, opacity: 0.94,
     });
-    const fuselage = new THREE.Mesh(new THREE.CapsuleGeometry(1.35, 11, 8, 14), glassMat);
+    const fuselage = new THREE.Mesh(new THREE.CapsuleGeometry(1.32, 11, 8, 14), frostHull);
     fuselage.rotation.x = Math.PI / 2;
     plane.add(fuselage);
-    const nose = new THREE.Mesh(new THREE.ConeGeometry(1.32, 4.4, 12), glassMat);
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(1.3, 4.4, 12), frostHull);
     nose.rotation.x = -Math.PI / 2;
     nose.position.set(0, 0, -7.2);
     plane.add(nose);
-    const wing = new THREE.Mesh(new THREE.BoxGeometry(15.5, 0.34, 3.6), glassMat);
+    const wing = new THREE.Mesh(new THREE.BoxGeometry(15.5, 0.32, 3.4), frostHull);
     wing.position.set(0, -0.1, 0.6);
     plane.add(wing);
     for (const side of [-1, 1]) {
-      const tip = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.5, 3.2), new THREE.MeshStandardMaterial({
-        color: 0x9fe8ff, emissive: 0x5fd4ff, emissiveIntensity: 1.4,
+      const tip = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.46, 3.1), new THREE.MeshStandardMaterial({
+        color: 0x9fe8ff, emissive: 0x5fd4ff, emissiveIntensity: 1.6,
       }));
       tip.position.set(side * 7.4, 0.2, 0.9);
       plane.add(tip);
-      const canard = new THREE.Mesh(new THREE.BoxGeometry(5, 0.24, 1.5), glassMat);
+      const canard = new THREE.Mesh(new THREE.BoxGeometry(5, 0.22, 1.4), frostHull);
       canard.position.set(0, 0, -4.6);
       canard.rotation.y = side * 0.02;
       canard.scale.set(0.62, 1, 1);
       plane.add(canard);
-      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.2, 2.4, 2.1), glassMat);
+      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.2, 2.4, 2.1), frostHull);
       fin.position.set(side * 1.1, 1.2, 4.2);
       fin.rotation.z = side * 0.28;
       plane.add(fin);
+      // engine nacelles under the wings
+      const nacelle = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.72, 3.4, 12), steelPale);
+      nacelle.rotation.x = Math.PI / 2;
+      nacelle.position.set(side * 3.6, -0.5, 0.4);
+      plane.add(nacelle);
+      const exhaust = new THREE.Mesh(new THREE.CircleGeometry(0.6, 12), glowMat);
+      exhaust.position.set(side * 3.6, -0.5, 2.12);
+      plane.add(exhaust);
     }
-    const canopy = new THREE.Mesh(new THREE.SphereGeometry(1.1, 12, 10, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshStandardMaterial({
-      color: 0xffffff, roughness: 0.05, metalness: 0.3, transparent: true, opacity: 0.6,
-    }));
+    const canopy = new THREE.Mesh(
+      new THREE.SphereGeometry(1.05, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0xe8fbff, roughness: 0.03, metalness: 0.5, transparent: true, opacity: 0.5 }),
+    );
     canopy.position.set(0, 0.9, -2.6);
     plane.add(canopy);
     // Nose to the gate: the Frostwing is parked pointing at the way out, because in four
@@ -504,14 +1411,20 @@ export default function Glacier3D({ onExit }: Props) {
     plane.position.set(0, 3.2, -268);
     plane.rotation.y = Math.PI;
     scene.add(plane);
-    // the bay it sits in: a raised cradle and a cold lamp
+    // the bay it sits in: a raised cradle, clamps, and a cold lamp rig
     const cradle = new THREE.Mesh(
       new THREE.BoxGeometry(20, 0.8, 15),
-      new THREE.MeshStandardMaterial({ color: 0x86a6b4, roughness: 0.5, metalness: 0.55 }),
+      new THREE.MeshStandardMaterial({ color: 0x2a3942, roughness: 0.5, metalness: 0.7 }),
     );
     cradle.position.set(0, 0.4, -268);
     scene.add(cradle);
-    const planeGlow = new THREE.PointLight(0x8fe8ff, 40, 90, 2);
+    for (const side of [-1, 1]) {
+      plate(0.8, 3, 1.2, steelPale, side * 5.4, 1.9, -268);
+      plate(0.7, 0.7, 6, steelDark, side * 5.4, 3.3, -266);
+      plate(0.3, 8, 0.3, steelDark, side * 9, 4, -262);
+      glowSprite(side * 9, 8, -262, 7, 0x9fe8ff, 0.6);
+    }
+    const planeGlow = new THREE.PointLight(0x8fe8ff, 280, 95, 2);
     planeGlow.position.set(0, 5, -268);
     scene.add(planeGlow);
 
@@ -728,10 +1641,12 @@ export default function Glacier3D({ onExit }: Props) {
       // ---- escorts: follow, shoot what is in front
       for (const e of escorts) {
         if (!e.alive) continue;
-        const ring = 6 + (e.slot % 5) * 1.7;
-        const a = (e.slot / 20) * Math.PI * 2 + state.t * 0.25;
+        // A wide ring, weighted behind the operative: twenty riflemen who stand in the
+        // camera are twenty riflemen nobody can see past.
+        const ring = 9 + (e.slot % 5) * 2.1;
+        const a = (e.slot / 20) * Math.PI * 2 + state.t * 0.18;
         const tx = state.px + Math.cos(a) * ring;
-        const tz = state.pz + Math.sin(a) * ring + 2;
+        const tz = state.pz + Math.sin(a) * ring * 0.7 + 4.5;
         e.x += (tx - e.x) * Math.min(1, dt * 2.2);
         e.z += (tz - e.z) * Math.min(1, dt * 2.2);
         e.mesh.position.set(e.x, 0, e.z);
@@ -853,6 +1768,25 @@ export default function Glacier3D({ onExit }: Props) {
       pos.needsUpdate = true;
       // the gate seam breathes
       (gateSeam.material as THREE.MeshStandardMaterial).emissiveIntensity = 1.2 + Math.sin(state.t * 2) * 0.5;
+      // banners stir in the draught coming in through the mouth
+      banners.forEach((b, i) => {
+        b.rotation.z = Math.sin(state.t * 0.7 + i * 1.3) * 0.035;
+        b.position.y = 17.4 + Math.sin(state.t * 0.9 + i) * 0.06;
+      });
+      // cold mist rolls along the floor
+      mist.forEach((m, i) => {
+        m.position.z += m.userData.drift * dt * 0.6;
+        m.position.x += Math.sin(state.t * 0.3 + i) * dt * 0.25;
+        if (m.position.z > HALL_MAX_Z + 20) m.position.z = HALL_MIN_Z - 20;
+        (m.material as THREE.MeshBasicMaterial).opacity = 0.05 + (Math.sin(state.t * 0.5 + i) * 0.5 + 0.5) * 0.05;
+      });
+      // the daylight shafts breathe with the weather outside
+      shafts.forEach((sh, i) => {
+        const k = 0.14 + Math.sin(state.t * 0.6 + i * 1.7) * 0.03;
+        (sh.material as THREE.MeshBasicMaterial).opacity = k;
+      });
+      // the wells glow harder while the aircraft are climbing out of them
+      wellRingMat.emissiveIntensity = 1.1 + state.wellT * 1.6 + Math.sin(state.t * 3) * 0.25;
 
       // floating HUD camera shake when hit
       if (state.hp < 100 && state.hp > 0) {
