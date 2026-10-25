@@ -108,6 +108,12 @@ export interface PoiDef {
   name: string; sub: string;
   secret: boolean;
   gates: { x: number; y: number }[];
+  /**
+   * A soft target: not an objective and not capturable, but marked on the map from the
+   * first frame, because the whole point of a thinly held barracks or a dispersal strip
+   * is that an operative can find it and take it before the alarm goes up.
+   */
+  soft?: boolean;
 }
 
 /* Fortress layout (center-north of the map). These are final world coordinates. */
@@ -1215,6 +1221,19 @@ export function generateWorld(sector = 1): WorldData {
       { x: army.core.x + army.core.w - 420, y: army.core.y + 300 },
     );
     generalSpot = { x: army.hq.x, y: army.hq.y };
+
+    // THE SOFT SIDE: thinly held company barracks and the two forward strips. They are
+    // marked as secret sites, which means they show on the map but never become an uplink
+    // objective — they are loot and aircraft, not a base to capture. Their supply caches
+    // are seeded as ordinary cache spots, so breaking them yields the usual haul.
+    for (const sp of army.softTargets) {
+      pois.push({
+        id: sp.id, kind: 'depot', secret: true, soft: true,
+        x: sp.x + sp.w / 2, y: sp.y + sp.h / 2, r: Math.max(300, sp.w * 0.4),
+        name: sp.name, sub: sp.sub, gates: [],
+      });
+    }
+    for (const l of army.loot) cacheSpots.push(l);
 
     // A searched-then-seized S.H.I.E.L.D. outpost beside the approach, so the level opens
     // with a fight on your own side of the wire. It stands clear of the causeway: the road
