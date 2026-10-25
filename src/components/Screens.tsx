@@ -387,6 +387,9 @@ export function HudLayer({
                 <span className={hud.jetAutopilot ? 'text-emerald-200' : 'text-cyan-100/40'}>
                   {hud.jetAutopilot ? 'AUTOPILOT' : 'MANUAL'}
                 </span>
+                {hud.airThreat > 0 && (
+                  <span className="animate-pulse text-rose-300">⚠ {hud.airThreat} HUNTERS</span>
+                )}
               </div>
               <div className="font-tech mt-1 text-center text-[8px] tracking-widest text-cyan-100/50">
                 SHIFT BURN · S BRAKE · A/D ROLL · LMB FIRE · G MISSILE · X STATION · E ORBIT · SPACE FLARES · F EJECT
