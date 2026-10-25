@@ -56,7 +56,14 @@ export interface ArmyStrongpoint {
  * `standard`; a `prototype` is one of the two experimental machines the proving flight
  * keeps out east — heavier, faster, and worth stealing.
  */
-export type JetTier = 'standard' | 'prototype';
+/**
+ * What kind of airframe a parked jet is.
+ *
+ *  standard  — the army's line interceptor
+ *  prototype — the proving-flight experimental machine (much stronger, and a prize)
+ *  frostwing — the one-off ice interceptor kept in the glacier vault
+ */
+export type JetTier = 'standard' | 'prototype' | 'frostwing';
 
 /** One of the army's soft spots: a company barracks you can walk into and clear. */
 export interface ArmySoftTarget {

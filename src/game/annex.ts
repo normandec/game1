@@ -74,7 +74,7 @@ export function buildSectorAnnex(ctx: AnnexContext): AnnexPlan {
 
   const entry = { x: CX, y: y0 + 260 };
   /** The glacier gate, in the middle of the north wall of the arctic annex. */
-  const glacierDoor = { x: 9700 + 3 * 290 + 140, y: y0 + 1620 };
+  const glacierDoor = { x: 10690, y: y0 + 1600 };
 
   /* ================================================================== *
    * 1 · THE FALLEN HUB — rain, standing water, a district that drowned
@@ -202,18 +202,34 @@ export function buildSectorAnnex(ctx: AnnexContext): AnnexPlan {
     squad(8300, y0 + 1300, 7, T, 110);
 
     post('glacier-face', 'GLACIER WALL', 9600, y0 + 780, 2100, 1500);
-    // The mountain wall: the glacier itself rises here, pale and enormous — and there is
-    // a way into it. The middle column of ice is a gate, not rock.
+    /* THE GLACIER MOUTH.
+     *
+     * The wall used to be a solid row of ice blocks with one 260-pixel slot in it, and the
+     * gate was a door hidden at the back of that slot: from the road it read as a dead end
+     * with invisible walls, and the operative could not tell where the entrance was.
+     * It is now a proper forecourt cut into the mountain — a 900-pixel mouth at ground
+     * level, the rock still hanging over it, a concrete apron leading in off the road, and
+     * the frozen bulkhead at the back of the apron with its lamp on.
+     */
+    const MOUTH_X = 10690;              // centre of the opening
     for (let i = 0; i < 7; i++) {
-      if (i === 3) continue;
-      add(9700 + i * 290, y0 + 850, 260, 520, 'rock', 150 + (i % 3) * 40, '#c9dde4');
-      add(9700 + i * 290, y0 + 1420, 260, 400, 'rock', 120 + (i % 2) * 50, '#b6ccd4');
+      const bx = 9700 + i * 290;
+      // The face of the mountain is unbroken: the doorway is a hole at its foot, not a
+      // shaft cut all the way up through the wall.
+      add(bx, y0 + 850, 260, 520, 'rock', 150 + (i % 3) * 40, '#c9dde4');
+      // At ground level the three middle columns are gone, so the forecourt is 900 pixels
+      // wide instead of a slot canyon the width of one man.
+      if (i === 2 || i === 3 || i === 4) continue;
+      add(bx, y0 + 1420, 260, 400, 'rock', 120 + (i % 2) * 50, '#b6ccd4');
     }
-    // the gate: two frozen leaves and a lit seam between them
-    add(9700 + 3 * 290 + 10, y0 + 1360, 280, 120, 'icegate', 110, '#cfecf6');
-    add(9800, y0 + 1900, 1800, 26, 'fence', 44, '#c8d8de');
-    man(10500, y0 + 1850, 'shieldman');
-    man(11000, y0 + 1880, 'sentinel');
+    // the frozen bulkhead at the back of the forecourt, with its apron in front of it
+    zone(MOUTH_X - 430, y0 + 1400, 860, 480, 'concrete');
+    add(MOUTH_X - 130, y0 + 1355, 260, 145, 'icegate', 110, '#cfecf6');
+    // The perimeter fence no longer runs across the apron: it stops short on both sides.
+    add(9800, y0 + 1900, 500, 26, 'fence', 44, '#c8d8de');
+    add(11080, y0 + 1900, 520, 26, 'fence', 44, '#c8d8de');
+    man(10360, y0 + 1840, 'shieldman');
+    man(11020, y0 + 1860, 'sentinel');
 
     post('snow-camp', 'SNOW CAMP', 900, y0 + 2600, 4000, 400);
     for (let i = 0; i < 8; i++) add(1000 + i * 300, y0 + 2650, 260, 150, 'tent', 44, '#c2d2d8');
@@ -314,6 +330,9 @@ export function buildSectorAnnex(ctx: AnnexContext): AnnexPlan {
     const x = rnd(760, 11500), y = rnd(y0 + 760, y0 + 3050);
     if (Math.abs(x - CX) < 280) continue;                       // the road in stays clear
     if (y > y0 + 1460 && y < y0 + 1640) continue;               // and so does the ring road
+    // The glacier forecourt is the only way into a hidden base: nothing is allowed to be
+    // parked in it, ever again.
+    if (sector === 3 && x > 10100 && x < 11300 && y > y0 + 1150 && y < y0 + 1950) continue;
     const kind = kinds[Math.floor(rnd(0, kinds.length))];
     const big = kind === 'railcar' || kind === 'truck' || kind === 'pillar';
     const w = kind === 'sandbag' ? (rnd(0, 1) < 0.5 ? 170 : 26) : big ? rnd(90, 180) : 52;

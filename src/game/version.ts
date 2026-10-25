@@ -20,15 +20,15 @@ export interface GameVersion {
 
 export const GAME_VERSION: GameVersion = {
   major: 1,
-  minor: 37,
+  minor: 38,
   patch: 0,
-  round: 37,
-  codename: 'SOLAR ECLIPSE',
+  round: 38,
+  codename: 'THIN ICE',
   date: '2026-10-25',
 };
 
-/** `v1.37.0` — the short label that goes on the start screen. */
+/** `v1.38.0` — the short label that goes on the start screen. */
 export const VERSION_LABEL = `v${GAME_VERSION.major}.${GAME_VERSION.minor}.${GAME_VERSION.patch}`;
 
-/** `v1.37.0 · ROUND 37 · 2026-10-25` — the full stamp for the footer. */
+/** `v1.38.0 · ROUND 38 · 2026-10-25` — the full stamp for the footer. */
 export const BUILD_STAMP = `${VERSION_LABEL} · ROUND ${GAME_VERSION.round} · ${GAME_VERSION.date}`;
