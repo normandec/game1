@@ -65,7 +65,10 @@ export type StructKind =
   // ARCTIC: the frozen gate that opens into the hidden ice base.
   | 'icegate'
   // Motor pool and the roads: civilian and military vehicles, parked and solid.
-  | 'car' | 'humvee' | 'bus' | 'tanker';
+  | 'car' | 'humvee' | 'bus' | 'tanker'
+  // ROADSIDE INFRASTRUCTURE: the things that make a road read as a road from above —
+  // street lighting, signage, propaganda hoardings, the power line that feeds the district.
+  | 'lamp' | 'sign' | 'billboard' | 'pylon' | 'busstop';
 
 export interface Rect {
   x: number; y: number; w: number; h: number;
@@ -1230,6 +1233,118 @@ export function generateWorld(sector = 1): WorldData {
       name: 'IRON RESERVE', sub: 'ARMY GROUP SOUTH / NO HYDRA INSIGNIA',
       secret: false, gates: army.gates.map((g) => ({ x: g.x + g.w / 2, y: g.y + g.h / 2 })),
     });
+  }
+
+  /* ---------------------------------------------------------------- *
+   * MONUMENTS
+   *
+   * A HYDRA district built out of identically sized sheds reads like a level editor
+   * screenshot. The big civic and industrial buildings are therefore grown around their
+   * own centres — never by more than a third of their own span on a side, never into a
+   * road, never within 18 px of another building (decor is allowed to be overlapped) —
+   * and every building is raised so the skyline has depth. Nothing that is part of a wall run or an authored strongpoint is touched,
+   * so gates stay gates and corridors stay open.
+   * ---------------------------------------------------------------- */
+  {
+    const GROW: Partial<Record<StructKind, number>> = {
+      megahangar: 78, hangar: 58, warehouse: 50, motorpool: 44, laboratory: 40, library: 36,
+      power: 38, armory: 38, radar: 32, keep: 40, towerblock: 58, kazemat: 42, silo: 34,
+      cellblock: 42, bastion: 32, dronebay: 34, watertower: 28,
+      barrack: 30, bunker: 24, checkpoint: 18, tower: 24, vault: 28, stockade: 26, plane: 18,
+    };
+    const BUILDING: StructKind[] = ['megahangar', 'hangar', 'warehouse', 'motorpool', 'laboratory',
+      'library', 'power', 'armory', 'radar', 'keep', 'towerblock', 'kazemat', 'silo', 'cellblock',
+      'bastion', 'dronebay', 'watertower', 'barrack', 'bunker', 'checkpoint', 'tower', 'vault',
+      'stockade', 'curtain', 'rampart', 'pillar', 'gate'];
+    const roads = zones.filter((z) => z.kind === 'road');
+    const hitsRoad = (x: number, y: number, w: number, h: number) => roads.some((z) =>
+      x < z.x + z.w + 10 && x + w > z.x - 10 && y < z.y + z.h + 10 && y + h > z.y - 10);
+    // Decor is not a neighbour: sandbag lines, crates and fences sit right against a
+    // building and must never stop it from being rebuilt larger. Only other buildings and
+    // the authored compounds count.
+    const DECOR = new Set<StructKind>(['crate', 'sandbag', 'fence', 'barrel', 'pine', 'rock',
+      'target', 'tent', 'bladder', 'lamp', 'sign', 'billboard', 'pylon', 'busstop', 'barrier',
+      'car', 'humvee', 'bus', 'tanker', 'truck', 'plane']);
+    const clearOf = (r: Rect, nx: number, ny: number, nw: number, nh: number) => {
+      for (const o of rects) {
+        if (o === r || o.dead) continue;
+        if (r.structuralGroup !== undefined && o.structuralGroup === r.structuralGroup) continue;
+        const pad = DECOR.has(o.kind) ? 6 : 18;
+        if (nx < o.x + o.w + pad && nx + nw > o.x - pad && ny < o.y + o.h + pad && ny + nh > o.y - pad) return false;
+      }
+      return true;
+    };
+    let grown = 0;
+    for (const r of rects) {
+      if (r.dead || r.structuralGroup !== undefined || r.armyWall || r.armyGate) continue;
+      const grow = GROW[r.kind];
+      if (grow) {
+        for (const f of [1, 0.6, 0.35]) {
+          const gx = Math.min(grow * f, r.w * 0.3), gy = Math.min(grow * f, r.h * 0.3);
+          const nx = r.x - gx, ny = r.y - gy, nw = r.w + gx * 2, nh = r.h + gy * 2;
+          if (nx < 120 || ny < 120 || nx + nw > GEN_W - 120 || ny + nh > ARENA_H - 120) continue;
+          if (hitsRoad(nx, ny, nw, nh)) continue;
+          if (!clearOf(r, nx, ny, nw, nh)) continue;
+          r.x = nx; r.y = ny; r.w = nw; r.h = nh;
+          grown++;
+          break;
+        }
+      }
+      // Height: extruded faces only, so this changes the skyline and nothing else.
+      if (r.kind !== 'crate' && r.kind !== 'barrel' && r.kind !== 'pine' && r.kind !== 'sandbag'
+        && r.kind !== 'fence' && r.kind !== 'target' && r.kind !== 'bladder' && r.kind !== 'tent') {
+        const lift = BUILDING.includes(r.kind) ? 1.5 : 1.2;
+        r.h3d = Math.min(320, Math.round(r.h3d * lift));
+      }
+    }
+    void grown;
+  }
+
+  /* ---------------------------------------------------------------- *
+   * ROADSIDE INFRASTRUCTURE
+   *
+   * Lighting, signage, hoardings and the power line. Every piece is placed on the shoulder
+   * of a real road zone and only where the ground is already free, so nothing here can
+   * ever block a carriageway or seal a gate.
+   * ---------------------------------------------------------------- */
+  {
+    const free = (x: number, y: number, w: number, h: number) => !rects.some((r) =>
+      !r.dead && x < r.x + r.w + 26 && x + w > r.x - 26 && y < r.y + r.h + 26 && y + h > r.y - 26);
+    const mainRoads = zones.filter((z) => z.kind === 'road' && Math.max(z.w, z.h) > 620);
+    const roadAll = zones.filter((z) => z.kind === 'road');
+    let placed = 0;
+    for (const [ri, z] of mainRoads.entries()) {
+      const horizontal = z.w >= z.h;
+      const len = horizontal ? z.w : z.h;
+      const thick = horizontal ? z.h : z.w;
+      const step = 330;
+      let k = 0;
+      for (let d = 140; d < len - 140; d += step, k++) {
+        for (const side of [-1, 1]) {
+          const roll = (ri * 7 + k * 3 + (side > 0 ? 1 : 0)) % 9;
+          const kind: StructKind = roll === 0 ? 'billboard' : roll === 3 ? 'pylon'
+            : roll === 5 ? 'busstop' : roll === 7 ? 'sign' : 'lamp';
+          const w = kind === 'billboard' ? 132 : kind === 'pylon' ? 74 : kind === 'busstop' ? 96 : kind === 'sign' ? 44 : 22;
+          const h = kind === 'billboard' ? 26 : kind === 'pylon' ? 74 : kind === 'busstop' ? 54 : kind === 'sign' ? 18 : 22;
+          // The whole footprint stands clear of the tarmac: half the carriageway, half its
+          // own width across the road, and a shoulder's worth of gravel.
+          const off = thick / 2 + (horizontal ? h : w) / 2 + 16;
+          const x = horizontal ? z.x + d : z.x + z.w / 2 + side * off;
+          const y = horizontal ? z.y + z.h / 2 + side * off : z.y + d;
+          if (x < 200 || y < 200 || x > GEN_W - 200 || y > ARENA_H - 200) continue;
+          if (!free(x - w / 2, y - h / 2, w, h)) continue;
+          // Junctions: a shoulder beside one road can be the middle of another.
+          if (roadAll.some((rz: { x: number; y: number; w: number; h: number }) => x - w / 2 < rz.x + rz.w && x + w / 2 > rz.x
+            && y - h / 2 < rz.y + rz.h && y + h / 2 > rz.y)) continue;
+          // The tower and the board stand behind the pole line, not in the lane.
+          const h3d = kind === 'pylon' ? 190 : kind === 'billboard' ? 120 : kind === 'lamp' ? 96
+            : kind === 'busstop' ? 62 : 70;
+          add(x - w / 2, y - h / 2, w, h, kind, h3d);
+          placed++;
+        }
+      }
+    }
+    void placed;
   }
 
   /* ---------------------------------------------------------------- *

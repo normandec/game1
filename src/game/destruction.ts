@@ -53,6 +53,12 @@ export function structuralHealth(kind: StructKind) {
   if (kind === 'armory') return 300;       // hardened magazine
   if (kind === 'plane') return 320;        // parked airframe, not a hangar
   if (kind === 'icegate') return 650;      // a hundred tonnes of ancient ice and steel
+  // Roadside infrastructure: a lamp goes down to a burst, a pylon does not.
+  if (kind === 'lamp') return 60;
+  if (kind === 'sign') return 40;
+  if (kind === 'billboard') return 90;
+  if (kind === 'pylon') return 240;
+  if (kind === 'busstop') return 120;
   return 220;
 }
 

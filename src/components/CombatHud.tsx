@@ -8,6 +8,8 @@ interface Props {
   onDash: () => void; onSecondary: () => void;
   /** Shoulder a carried weapon from the kit (touch players have no number keys). */
   onWeapon: (short: string) => void;
+  /** Top the gun up from the banked reserve — the same thing R does on a keyboard. */
+  onReload: () => void;
 }
 
 export default function CombatHud(p: Props) {
@@ -83,8 +85,10 @@ export default function CombatHud(p: Props) {
                     return (
                       <li key={`${group.group}-${i}`}
                         className={`tone-${it.tone} ${isCurrent ? 'is-current' : ''} ${selectable ? 'is-pick' : ''}`}
-                        onClick={selectable ? () => p.onWeapon(it.label) : undefined}
-                        title={selectable ? `Shoulder ${it.label} — number keys also work` : undefined}>
+                        onClick={selectable ? () => (isCurrent ? p.onReload() : p.onWeapon(it.label)) : undefined}
+                        title={selectable
+                          ? (isCurrent ? `Reload ${it.label} from reserve — R also works` : `Shoulder ${it.label} — number keys also work`)
+                          : undefined}>
                         <span>{it.label}</span>
                         <b>{it.detail}</b>
                       </li>
@@ -99,7 +103,7 @@ export default function CombatHud(p: Props) {
             <span>ARMOR {h.shieldHp}</span>
             <span>FRAGS {h.grenades}</span>
             <span>{h.frostwing ? 'FROSTWING CLEARANCE' : 'NO SPECIAL CLEARANCE'}</span>
-            <span className="inv-hint">1-6 SHOULDER · I CLOSE</span>
+            <span className="inv-hint">1-7 SHOULDER · R RELOAD · I CLOSE</span>
           </footer>
         </div>
       )}

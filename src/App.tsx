@@ -281,6 +281,7 @@ export default function App() {
           onAegis={() => gameRef.current?.activateAegis()}
           onGuide={() => gameRef.current?.toggleVaultRoute()}
           onMouse={cycleMouse}
+          onReload={() => gameRef.current?.reloadWeapon()}
           onWeapon={(short) => gameRef.current?.selectWeapon(
             Object.keys(WEAPONS).find((id) => WEAPONS[id].short === short) ?? 'rifle',
           )}
