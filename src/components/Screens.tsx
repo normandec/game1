@@ -359,13 +359,13 @@ export function HudLayer({
           )}
           {hud.flyingPlane && (
             <div className="mt-2 rounded-sm border border-sky-300/60 bg-sky-400/15 px-2 py-1 text-center text-[10px] font-bold tracking-[0.18em] text-sky-100">
-              ✈ S.H.I.E.L.D. BOMBER · MOUSE FLIES IT · S TO LAND · G BOMB CARPET
+              ✈ S.H.I.E.L.D. BOMBER · WASD FLY · G BOMB CARPET
             </div>
           )}
           {hud.jet && (
-            <div className="mt-2 rounded-sm border border-cyan-200/70 bg-cyan-300/15 px-2 py-1 text-cyan-50">
+            <div className={`mt-2 rounded-sm border px-2 py-1 text-cyan-50 ${hud.jetRwr ? 'animate-pulse border-rose-400/80 bg-rose-500/20' : 'border-cyan-200/70 bg-cyan-300/15'}`}>
               <div className="flex items-baseline justify-between text-[10px] font-bold tracking-[0.18em]">
-                <span>{hud.jetAce ? '⚡ PROTOTYPE' : hud.frostwing ? '❄ FROSTWING' : '🛩 INTERCEPTOR'}</span>
+                <span>{hud.jetTier === 'PROTOTYPE' ? '⚡ PROTOTYPE' : hud.jetTier === 'FROSTWING' ? '❄ FROSTWING' : '🛩 INTERCEPTOR'}</span>
                 <span className="font-tech text-[9px] text-cyan-100/70">{hud.vehicleHp}/{hud.vehicleMax} HULL</span>
               </div>
               <div className="mt-1 flex items-center justify-between font-tech text-[10px] tracking-widest text-cyan-100/80">
@@ -376,9 +376,27 @@ export function HudLayer({
                 </span>
                 <span>FLR {hud.jetFlares}</span>
               </div>
+              {/* burner */}
               <div className="mt-1 h-1 overflow-hidden rounded-sm bg-black/60">
                 <div className={`h-full ${hud.jetBoost > 0.5 ? 'bg-gradient-to-r from-cyan-200 to-white' : 'bg-cyan-400/60'}`}
                   style={{ width: `${Math.round(hud.jetBoost * 100)}%` }} />
+              </div>
+              {/* cannon heat */}
+              <div className="mt-1 flex items-center gap-1.5">
+                <span className={`font-tech text-[8px] tracking-widest ${hud.jetJam ? 'text-rose-300' : 'text-cyan-100/50'}`}>
+                  {hud.jetJam ? 'JAMMED' : 'HEAT'}
+                </span>
+                <div className="h-1 flex-1 overflow-hidden rounded-sm bg-black/60">
+                  <div className={`h-full ${hud.jetJam ? 'bg-rose-400' : hud.jetHeat > 0.75 ? 'bg-gradient-to-r from-amber-300 to-rose-400' : 'bg-gradient-to-r from-teal-300 to-amber-300'}`}
+                    style={{ width: `${Math.round(hud.jetHeat * 100)}%` }} />
+                </div>
+                <span className="font-tech text-[8px] tracking-widest text-cyan-100/50">{hud.jetView}</span>
+              </div>
+              {/* ordnance */}
+              <div className="font-tech mt-1 flex justify-between text-[9px] tracking-widest">
+                <span className="text-cyan-100/80">AAM <b className="text-white">{hud.jetMissiles}</b></span>
+                <span className="text-cyan-100/80">RKT <b className="text-white">{hud.jetRockets}</b></span>
+                <span className={hud.jetLance > 0 ? 'text-sky-100' : 'text-cyan-100/30'}>LANCE <b>{hud.jetLance}</b></span>
               </div>
               <div className="font-tech mt-0.5 flex justify-between text-[9px] tracking-widest">
                 <span className={hud.jetLock ? 'text-rose-200' : 'text-cyan-100/40'}>
@@ -391,8 +409,18 @@ export function HudLayer({
                   <span className="animate-pulse text-rose-300">⚠ {hud.airThreat} HUNTERS</span>
                 )}
               </div>
-              <div className="font-tech mt-1 text-center text-[8px] tracking-widest text-cyan-100/50">
-                SHIFT BURN · S BRAKE · A/D ROLL · LMB FIRE · G MISSILE · X STATION · E ORBIT · SPACE FLARES · F EJECT
+              {hud.jetRwr && (
+                <div className="mt-1 rounded-sm border border-rose-400/70 bg-rose-500/25 px-1 py-0.5 text-center text-[9px] font-bold tracking-[0.16em] text-rose-100">
+                  ⚠ MISSILE INBOUND · SPACE FOR FLARES
+                </div>
+              )}
+              <div className="font-tech mt-1 grid grid-cols-2 gap-x-2 text-[8px] leading-relaxed tracking-widest text-cyan-100/50">
+                <span>W/S THROTTLE · A/D ROLL</span>
+                <span>SHIFT BURN · S BRAKE</span>
+                <span>LMB CANNON · G MISSILE</span>
+                <span>H ROCKETS · R LANCE</span>
+                <span>SPACE FLARES · V VIEW</span>
+                <span>E ORBIT · F EJECT</span>
               </div>
             </div>
           )}
