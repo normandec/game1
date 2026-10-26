@@ -20,11 +20,11 @@ export interface GameVersion {
 
 export const GAME_VERSION: GameVersion = {
   major: 1,
-  minor: 42,
+  minor: 43,
   patch: 0,
-  round: 42,
-  codename: 'IRON RESERVE ORDERED',
-  date: '2026-10-25',
+  round: 43,
+  codename: 'CHAIN OF CAUSE',
+  date: '2026-10-26',
 };
 
 /** `v1.40.0` — the short label that goes on the start screen. */

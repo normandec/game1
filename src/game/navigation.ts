@@ -31,6 +31,12 @@ export class RoutePlanner {
   readonly cols: number;
   readonly rows: number;
   private blocked: Uint8Array;
+  /**
+   * Ground the route may never use, independent of what is built on it. The sea is the
+   * reason this exists: a soldier in this game cannot swim, so water is an infinite-cost
+   * cell and the planner routes around it rather than through it.
+   */
+  private terrain: Uint8Array | null = null;
   private scores: Float32Array;
   private parents: Int32Array;
   private visited: Int32Array;
@@ -45,8 +51,24 @@ export class RoutePlanner {
     this.parents = new Int32Array(n); this.visited = new Int32Array(n); this.closed = new Int32Array(n);
   }
 
+  /**
+   * Paint permanent no-go ground into the planner. Called once per sector, before any
+   * route is asked for, so the cost is paid at load time and not per query.
+   */
+  setTerrain(allowed: (x: number, y: number) => boolean) {
+    if (!this.terrain) this.terrain = new Uint8Array(this.cols * this.rows);
+    for (let y = 0; y < this.rows; y++) {
+      for (let x = 0; x < this.cols; x++) {
+        const px = (x + 0.5) * this.cell, py = (y + 0.5) * this.cell;
+        this.terrain[y * this.cols + x] = allowed(px, py) ? 0 : 1;
+      }
+    }
+    this.revision++;
+  }
+
   rebuild(blocks: Block[]) {
     this.blocked.fill(0);
+    if (this.terrain) this.blocked.set(this.terrain);
     for (const b of blocks) {
       const x0 = Math.max(0, Math.floor((b.x - this.clearance) / this.cell));
       const x1 = Math.min(this.cols - 1, Math.floor((b.x + b.w + this.clearance) / this.cell));
