@@ -20,10 +20,10 @@ export interface GameVersion {
 
 export const GAME_VERSION: GameVersion = {
   major: 1,
-  minor: 41,
+  minor: 42,
   patch: 0,
-  round: 41,
-  codename: 'GLACIER VAULT LIT',
+  round: 42,
+  codename: 'IRON RESERVE ORDERED',
   date: '2026-10-25',
 };
 

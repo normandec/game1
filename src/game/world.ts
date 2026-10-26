@@ -12,6 +12,7 @@ import {
   addCampaignSites, GOLIATH, MNEMOSYNE, HQ_YARD, KRAKEN_YARD, type CampaignSites, type PatrolRoute,
 } from './campaignSites';
 import { buildPowerYard, type PowerCell, type PowerSite } from './powerGrid';
+import { tidyWorld } from './tidy';
 
 /**
  * The legacy theatre is 12000 × 8200, and it is NEVER moved: not a single existing
@@ -185,6 +186,8 @@ const EMPTY: number[] = [];
 /* ------------------------------------------------------------------ */
 
 export interface WorldData {
+  /** What the survey pass had to move or cut (report / tests only). */
+  tidy: import('./tidy').TidyReport;
   rects: Rect[];
   zones: Zone[];
   serverSpots: { x: number; y: number }[];
@@ -1419,7 +1422,14 @@ export function generateWorld(sector = 1): WorldData {
     }
   }
 
+  /* THE SURVEY PASS. World generation paints several layers in isolation — roads, aprons,
+   * helipads, vehicle parks, the army district — so they cross: paint under buildings,
+   * pads under hangars, vans inside each other. `tidyWorld` moves the loose kit and cuts
+   * the paint, and nothing else: the map itself is untouched. */
+  const tidy = tidyWorld({ rects, zones, vanSpots, helipads, parkedHelis, army });
+
   return {
+    tidy,
     rects, zones, serverSpots, generalSpot, coderSpots, garrisonSpots,
     cacheSpots, gateSpots, helipads, hangarSpot, beaconSpots, satcomSpots, barrelSpots, spotlightSpots,
     hangars, vanSpots, paradeSpots, parkedHelis, laserSpots, pois, vaultSpot, planeSpot,
