@@ -33,19 +33,37 @@ export default function CombatHud(p: Props) {
   const vehicleName = h.flyingPlane ? 'NIGHTJAR' : h.piloting ? 'KESTREL' : h.tank ? 'HYDRA TANK' : h.driving ? 'HYDRA TRANSPORT' : 'OPERATIVE';
   return <div className="combat-hud">
     <header className="combat-top"><div className="combat-score"><small>PROTOCOL SOLAR ECLIPSE</small><strong>{h.score.toLocaleString()}</strong><span>BEST {p.best.toLocaleString()}</span></div><div className="combat-sector"><small>SECTOR {h.sector} / 06</small><b>{h.sectorName}</b><span>WAVE {String(h.wave).padStart(2, '0')} <i>/</i> {h.enemiesLeft} HOSTILES</span>{h.devInfinite && <em className="combat-dev">DEV · INFINITE LIVES</em>}</div><div className="combat-settings"><button onClick={p.onMute} aria-label={p.muted ? 'Enable sound' : 'Mute sound'}>{p.muted ? 'SOUND OFF' : 'SOUND ON'}</button><button onClick={p.onFullscreen} aria-label={p.fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} title={p.fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>{p.fullscreen ? 'EXIT FULL' : 'FULLSCREEN'}</button><button onClick={p.onMouse} aria-label="Mouse sensitivity" title="Mouse sensitivity — also the mouse wheel in game">{`MOUSE ${h.mouseSens.toFixed(2)}x`}</button><button onClick={p.onPause} aria-label="Pause game">II <kbd>ESC</kbd></button></div></header>
-    {h.blackoutHud && <div className="combat-blackout"><b>NIGHT</b><span>HEADLAMPS INBOUND</span></div>}
-    <div className="combat-objective"><small>PRIMARY OBJECTIVE</small><p>{h.objective}</p><span>MAINFRAMES {h.serversTotal - h.serversLeft}/{h.serversTotal} <i>/</i> {h.generalShield ? 'COMMAND SHIELDED' : 'GENERAL EXPOSED'}</span></div>
-    <div className="combat-position"><span>{h.coords}</span><button onClick={p.onGuide} title="Toggle guide to the concealed vault entrance">VAULT GUIDE <kbd>V</kbd></button></div>
-    {h.facilityLabel && <div className={`combat-facility ${h.facilityStatus.startsWith('SECURED') ? 'secured' : ''}`}><small>LOCAL INSTALLATION</small><b>{h.facilityLabel}</b><span>{h.facilityStatus}</span></div>}
-    {(h.alarmActive || h.alarmExposure > 0.05 || h.alarmJammed > 0) && <div className={`combat-security ${h.alarmActive ? 'tracking' : ''}`}>
-      <small>{h.alarmJammed > 0 ? 'CARTER CIPHER / IFF MASK' : h.alarmActive ? 'HYDRA SEARCH NETWORK' : 'SEARCHLIGHT EXPOSURE'}</small>
-      <b>{h.alarmJammed > 0 ? `${Math.ceil(h.alarmJammed)}s / IDENTITY HIDDEN` : h.alarmActive ? 'SPOTLIGHTS TRACKING YOU' : 'LEAVE THE BEAM'}</b>
-      <div><span style={{ width: `${h.alarmActive ? 100 : Math.min(100, h.alarmExposure * 100)}%` }}/></div>
-      {h.responseRemaining > 0 && <span>{h.responseRemaining} TROOPS / LOADING RESERVES</span>}
-    </div>}
-    {h.bannerT > 0 && <div key={`${h.wave}${h.banner}`} className="combat-banner" style={{ opacity: Math.min(1, h.bannerT * 2) }}><strong>{h.banner}</strong><span>{h.bannerSub}</span></div>}
-    {h.overrideActive && <div className="combat-override"><small>BASE NETWORK OVERRIDE</small><b>{h.overrideBase}</b><div><span style={{ width: `${h.overrideProgress}%` }}/></div><strong>{h.overrideProgress}%</strong><p>HOLD WITHIN 205m OF THE UPLINK / QRF ACTIVE</p></div>}
-    {h.mult > 1 && <div className="combat-combo">x{h.mult}<span>{h.streak} KILL CHAIN</span></div>}
+    {/* The overlay is three stacks, not a dozen elements pinned to the same corners.
+        Left: position and the installation you are standing in. Right: objective, the
+        searchlight net, the counter-assault warning, the transmission. Centre: override,
+        blackout, wave banner, kill chain. Panels inside a stack are laid out by flexbox
+        with a gap, so no two of them can land on top of each other — the old absolute
+        tops collided below ~900 px tall, and the counter-assault warning sat on the
+        searchlight panel at every size. */}
+    <div className="combat-left">
+      <div className="combat-position"><span>{h.coords}</span><button onClick={p.onGuide} title="Toggle guide to the concealed vault entrance">VAULT GUIDE <kbd>V</kbd></button></div>
+      {h.facilityLabel && <div className={`combat-facility ${h.facilityStatus.startsWith('SECURED') ? 'secured' : ''}`}><small>LOCAL INSTALLATION</small><b>{h.facilityLabel}</b><span>{h.facilityStatus}</span></div>}
+    </div>
+    <div className="combat-center">
+      {h.overrideActive && <div className="combat-override"><small>BASE NETWORK OVERRIDE</small><b>{h.overrideBase}</b><div><span style={{ width: `${h.overrideProgress}%` }}/></div><strong>{h.overrideProgress}%</strong><p>HOLD WITHIN 205m OF THE UPLINK / QRF ACTIVE</p></div>}
+      {h.blackoutHud && <div className="combat-blackout"><b>NIGHT</b><span>HEADLAMPS INBOUND</span></div>}
+      {h.bannerT > 0 && <div key={`${h.wave}${h.banner}`} className="combat-banner" style={{ opacity: Math.min(1, h.bannerT * 2) }}><strong>{h.banner}</strong><span>{h.bannerSub}</span></div>}
+      {h.mult > 1 && <div className="combat-combo">x{h.mult}<span>{h.streak} KILL CHAIN</span></div>}
+    </div>
+    <div className="combat-right">
+      <div className="combat-objective"><small>PRIMARY OBJECTIVE</small><p>{h.objective}</p><span>MAINFRAMES {h.serversTotal - h.serversLeft}/{h.serversTotal} <i>/</i> {h.generalShield ? 'COMMAND SHIELDED' : 'GENERAL EXPOSED'}</span></div>
+      {(h.alarmActive || h.alarmExposure > 0.05 || h.alarmJammed > 0) && <div className={`combat-security ${h.alarmActive ? 'tracking' : ''}`}>
+        <small>{h.alarmJammed > 0 ? 'CARTER CIPHER / IFF MASK' : h.alarmActive ? 'HYDRA SEARCH NETWORK' : 'SEARCHLIGHT EXPOSURE'}</small>
+        <b>{h.alarmJammed > 0 ? `${Math.ceil(h.alarmJammed)}s / IDENTITY HIDDEN` : h.alarmActive ? 'SPOTLIGHTS TRACKING YOU' : 'LEAVE THE BEAM'}</b>
+        <div><span style={{ width: `${h.alarmActive ? 100 : Math.min(100, h.alarmExposure * 100)}%` }}/></div>
+        {h.responseRemaining > 0 && <span>{h.responseRemaining} TROOPS / LOADING RESERVES</span>}
+      </div>}
+      {h.siegeActive && <div className="combat-warning">HYDRA COUNTER-ASSAULT <span>HOLD THE PERIMETER</span></div>}
+      {h.storyTitle && <aside className={`combat-transmission ${storyExpanded ? 'expanded' : ''}`} aria-label="Mission transmission">
+        <button onClick={() => { setDismissedStory(storyExpanded ? h.storyTitle : ''); setOpenedStory(storyExpanded ? '' : h.storyTitle); }}><span>{h.storyChannel}</span><b>{storyExpanded ? '-' : '+'}</b></button>
+        {storyExpanded && <><strong>{h.storyTitle}</strong><p>{h.storyText}</p></>}
+      </aside>}
+    </div>
     <div className="combat-bottom-vitals"><div className="combat-vitals-title"><b>{vehicleName}</b><span>{Math.ceil(hp)} / {max}</span></div><div className="combat-health" role="meter" aria-label={vehicle ? 'Vehicle hull integrity' : 'Health'} aria-valuemin={0} aria-valuemax={max} aria-valuenow={hp}><div className={hp / max < 0.3 ? 'critical' : ''} style={{ width: `${Math.max(0, hp / max) * 100}%` }}/></div>
       <div className="combat-armor"><span>{vehicle && !h.driving ? `FUEL ${Math.ceil(h.vehicleFuel)}%` : `ARMOR ${h.shieldHp}`}</span><span>{h.tank ? 'LMB / MAIN GUN' : vehicle ? 'LMB / MOUNTED CANNON' : `${h.weapon} / ${h.ammo < 0 ? 'UNLIMITED' : h.ammo}`}</span></div>
       {!vehicle && h.shieldMax > 0 && <div className="combat-armor-bar"><div style={{ width: `${h.shieldHp / h.shieldMax * 100}%` }}/></div>}
@@ -62,7 +80,6 @@ export default function CombatHud(p: Props) {
         {h.gatePrompt && <button onClick={p.onGate} className="context-action"><kbd>L</kbd><span>LOCK</span></button>}
       </div>
     </div>
-    {h.siegeActive && <div className="combat-warning">HYDRA COUNTER-ASSAULT <span>HOLD THE PERIMETER</span></div>}
     {/* THE KIT: a real inventory, grouped the way it is packed, not a row of numbers */}
     <div className={`combat-inventory ${invOpen ? 'open' : ''}`}>
       <button className="inv-toggle" onClick={() => setInvOpen(v => !v)} title="Kit / I">
@@ -108,9 +125,6 @@ export default function CombatHud(p: Props) {
         </div>
       )}
     </div>
-    {h.storyTitle && <aside className={`combat-transmission ${storyExpanded ? 'expanded' : ''}`} aria-label="Mission transmission">
-      <button onClick={() => { setDismissedStory(storyExpanded ? h.storyTitle : ''); setOpenedStory(storyExpanded ? '' : h.storyTitle); }}><span>{h.storyChannel}</span><b>{storyExpanded ? '-' : '+'}</b></button>
-      {storyExpanded && <><strong>{h.storyTitle}</strong><p>{h.storyText}</p></>}
-    </aside>}
+
   </div>;
 }

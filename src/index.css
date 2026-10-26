@@ -278,6 +278,33 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 @media (prefers-reduced-motion: reduce) { .animate-float-up, .animate-pulse-ring, .animate-sweep, .operation-hero, .operation-panel, .vault-loading span { animation: none; } }
 
 .combat-hud { position: absolute; inset: 0; pointer-events: none; color: #d2e1e2; font-family: 'Share Tech Mono', monospace; padding: 20px 24px; }
+/* Three layout stacks. Every overlay panel lives inside one of them and the stack does the
+   spacing, so no two panels can occupy the same pixels at any viewport: the left and right
+   stacks have fixed widths that cannot meet, the centre stack is narrower than the gap
+   between them, and inside a stack the gap is the only separation needed. Before this the
+   panels were pinned to absolute tops — the counter-assault warning sat on the searchlight
+   panel at every size, and the override card grew into the wave banner under 900 px tall. */
+.combat-left { position: absolute; left: 24px; top: 107px; width: 252px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.combat-right { position: absolute; right: 24px; top: 110px; bottom: 24px; width: 290px; display: flex; flex-direction: column; align-items: flex-end; gap: 12px; overflow-y: auto; scrollbar-width: none; }
+.combat-right::-webkit-scrollbar { width: 0; }
+.combat-center { position: absolute; left: 50%; top: 100px; transform: translateX(-50%); width: min(520px, calc(100vw - 620px)); display: flex; flex-direction: column; align-items: center; gap: 18px; }
+/* Tablet and phone: the side stacks are capped at a share of the viewport and the centre
+   band is placed just below them, so the three stacks tile the screen instead of stacking
+   on top of each other. Everything here is expressed in vh/vw so it holds for any size. */
+@media (max-width: 900px) {
+  .combat-left { left: 12px; top: 88px; width: 44vw; max-width: 200px; gap: 9px; }
+  .combat-right { right: 12px; top: 88px; width: 44vw; max-width: 200px; bottom: auto; gap: 9px; }
+  .combat-facility, .combat-warning { display: none; }
+  .combat-center { top: 46vh; width: 94vw; gap: 10px; }
+  .combat-bottom-vitals { bottom: 96px; }
+  .combat-transmission { width: 100%; max-width: 200px; margin-top: 0; }
+}
+/* Landscape phones: no vertical room between the header and the action bar, so the centre
+   band moves up between the two side stacks, which are narrow enough to leave a corridor. */
+@media (max-height: 560px) and (min-width: 560px) {
+  .combat-center { top: 96px; width: calc(100vw - 470px); gap: 8px; }
+  .combat-objective p { font-size: 9px; }
+}
 .combat-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
 .combat-score { min-width: 165px; }
 .combat-score small { color: #759eab; font-size: 8px; letter-spacing: 1.7px; display: block; }
@@ -293,20 +320,20 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 .combat-settings { display: flex; gap: 8px; pointer-events: auto; }
 .combat-settings button { color: #9abcbe; border: 1px solid #5e969c40; background: #081824df; font: 9px 'Share Tech Mono', monospace; padding: 10px 12px; }
 .combat-settings kbd { margin-left: 9px; color: #5b7e8c; }
-.combat-objective { position: absolute; top: 110px; right: 24px; max-width: 235px; text-align: right; background: linear-gradient(270deg, #0817249e, transparent); padding: 10px 0 10px 20px; }
+.combat-objective { max-width: 235px; text-align: right; background: linear-gradient(270deg, #0817249e, transparent); padding: 10px 0 10px 20px; }
 .combat-objective small { color: #ccac77; font-size: 8px; letter-spacing: 2px; }
 .combat-objective p { font: 500 12px 'Chakra Petch', sans-serif; line-height: 1.5; color: #bdcfcf; margin: 6px 0 9px; }
 .combat-objective > span { font-size: 8px; color: #648d99; line-height: 1.6; }
-.combat-position { position: absolute; top: 107px; left: 24px; display: flex; flex-direction: column; align-items: start; gap: 8px; }
+.combat-position { display: flex; flex-direction: column; align-items: start; gap: 8px; }
 .combat-position > span { color: #7698a2; font-size: 9px; letter-spacing: 1px; background: #0917226e; padding: 3px 0; }
 .combat-position button { pointer-events: auto; color: #8aafa9; font: 8px 'Share Tech Mono', monospace; padding: 8px 10px; border: 1px solid #719b962e; background: #0b2126b8; }
 .combat-position kbd { margin-left: 7px; color: #b9e6d4; }
-.combat-facility { position: absolute; left: 24px; top: 178px; max-width: 232px; padding: 8px 16px 8px 0; background: linear-gradient(90deg, #071822bd, transparent); }
+.combat-facility { max-width: 232px; padding: 8px 16px 8px 0; background: linear-gradient(90deg, #071822bd, transparent); }
 .combat-facility small { display: block; color: #688d96; font-size: 7px; letter-spacing: 1.6px; }
 .combat-facility b { display: block; color: #c7d9d4; font: 500 11px 'Chakra Petch', sans-serif; letter-spacing: 1px; margin: 5px 0; }
 .combat-facility > span { color: #c8ac86; font-size: 8px; letter-spacing: .7px; }
 .combat-facility.secured > span { color: #8de2b8; }
-.combat-banner { position: absolute; top: 28%; left: 15%; right: 15%; text-align: center; animation: float-up .3s ease-out both; text-shadow: 0 3px 22px #000; }
+.combat-banner { width: 100%; text-align: center; animation: float-up .3s ease-out both; text-shadow: 0 3px 22px #000; }
 .combat-banner strong { display: block; font: 600 clamp(20px, 3vw, 41px) 'Chakra Petch', sans-serif; letter-spacing: 3px; color: #e8c890; }
 .combat-banner > span { display: block; color: #a0c4c1; margin-top: 10px; font-size: 10px; letter-spacing: 2px; }
 .combat-bottom-vitals { position: absolute; left: 24px; bottom: 25px; width: 244px; background: linear-gradient(90deg, #081522de, transparent); padding: 12px 14px 0 0; }
@@ -327,23 +354,23 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 .combat-action-buttons button:hover { background: #24434d; border-color: #9edac7; }.combat-action-buttons button:disabled { opacity: .3; cursor: default; }.combat-action-buttons button.aegis-active { background: #195879d9; border-color: #9cecff; color: #d1faff; }.combat-action-buttons button.context-action { color: #c9e5ce; border-color: #83cbb660; }
 .combat-interact-hint { display: inline-block; font-size: 10px; color: #b7e9ce; padding: 8px 13px; border-bottom: 1px solid #95d7b74a; background: #102734e0; white-space: nowrap; }
 .combat-gate-hint { color: #d3bc96; font-size: 8px; letter-spacing: 1px; margin-top: 8px; }
-.combat-combo { position: absolute; top: 102px; left: 50%; transform: translateX(-50%); color: #e5c68c; font-size: 24px; text-align: center; }.combat-combo span { display: block; font-size: 7px; letter-spacing: 2px; color: #b1a383; }
-.combat-warning { position: absolute; top: 210px; right: 24px; text-align: right; font-size: 10px; color: #f39a88; letter-spacing: 1px; }.combat-warning span { display: block; font-size: 8px; margin-top: 4px; opacity: .6; }
-.combat-override { position: absolute; left: 50%; top: 17%; transform: translateX(-50%); width: min(370px, 70vw); text-align: center; padding: 11px 16px; border: 1px solid #d4ad6b66; background: #111f29d9; }
+.combat-combo { color: #e5c68c; font-size: 24px; text-align: center; }.combat-combo span { display: block; font-size: 7px; letter-spacing: 2px; color: #b1a383; }
+.combat-warning { text-align: right; font-size: 10px; color: #f39a88; letter-spacing: 1px; }.combat-warning span { display: block; font-size: 8px; margin-top: 4px; opacity: .6; }
+.combat-override { width: min(370px, 70vw); text-align: center; padding: 11px 16px; border: 1px solid #d4ad6b66; background: #111f29d9; }
 .combat-override small { display: block; color: #a99470; font-size: 7px; letter-spacing: 1.8px; }.combat-override b { display: block; color: #e5ca94; font: 500 12px 'Chakra Petch', sans-serif; letter-spacing: 1px; margin: 5px 0 8px; }
 .combat-override > div { height: 5px; background: #24313a; overflow: hidden; }.combat-override > div > span { display: block; height: 100%; background: linear-gradient(90deg,#5acdbf,#e3bf7c); transition: width .15s; }
 .combat-override > strong { display: block; color: #d8e5db; font: 10px 'Share Tech Mono', monospace; margin-top: 6px; }.combat-override p { color: #778f96; font-size: 7px; letter-spacing: 1px; margin: 5px 0 0; }
-.combat-blackout { position: absolute; left: 50%; top: 24%; transform: translateX(-50%); text-align: center; pointer-events: none; }
+.combat-blackout { text-align: center; pointer-events: none; }
 .combat-blackout b { display: block; font: 900 clamp(34px, 6.5vw, 86px)/.9 'Chakra Petch', sans-serif; letter-spacing: .3em; color: #c8d6e2; opacity: 0.07; }
 .combat-blackout span { display: block; font: 700 11px 'Chakra Petch', sans-serif; letter-spacing: .55em; color: #b7d3e6; opacity: .3; }
-.combat-security { position: absolute; right: 24px; top: 207px; width: 232px; padding: 10px 12px; border-right: 2px solid #77cbb6; background: linear-gradient(270deg, #102731ed, #10273186); text-align: right; }
+.combat-security { width: 232px; padding: 10px 12px; border-right: 2px solid #77cbb6; background: linear-gradient(270deg, #102731ed, #10273186); text-align: right; }
 .combat-security small { display: block; color: #84aab1; font-size: 7px; letter-spacing: 1.4px; }
 .combat-security b { display: block; color: #b1e8d6; font-size: 10px; letter-spacing: .6px; margin-top: 5px; font-weight: 400; }
 .combat-security > div { height: 3px; margin-top: 9px; background: #17252e; overflow: hidden; }
 .combat-security > div > span { display: block; height: 100%; background: #94d8c1; transition: width .12s; }
 .combat-security > span { display: block; font-size: 8px; color: #acb5ac; margin-top: 7px; }
 .combat-security.tracking { border-color: #e7997f; }.combat-security.tracking b { color: #f4b197; }.combat-security.tracking > div > span { background: #ea9e7c; }
-.combat-transmission { position: absolute; right: 24px; bottom: 164px; width: 285px; color: #c7dada; border-left: 1px solid #81bdb36b; background: #0b1c26dd; pointer-events: auto; touch-action: pan-y; }
+.combat-transmission { width: 285px; margin-top: auto; color: #c7dada; border-left: 1px solid #81bdb36b; background: #0b1c26dd; pointer-events: auto; touch-action: pan-y; }
 .combat-transmission > button { display: flex; align-items: center; justify-content: space-between; gap: 15px; width: 100%; padding: 11px 13px; text-align: left; border: 0; background: transparent; color: #89b9b0; font: 8px 'Share Tech Mono', monospace; letter-spacing: .6px; }
 .combat-transmission > button b { font-size: 15px; font-weight: 400; }
 .combat-transmission > strong { display: block; padding: 0 13px; font: 500 14px 'Chakra Petch', sans-serif; line-height: 1.4; color: #dcc7a4; }
@@ -380,15 +407,15 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 @media (max-width: 700px) {
   .combat-hud { padding: 13px 12px; }.combat-score { min-width: 64px; }.combat-score small { font-size: 6px; letter-spacing: .6px; }.combat-score strong { font-size: 23px; }.combat-score > span { font-size: 6px; }
   .combat-sector { padding: 3px 0; max-width: 135px; }.combat-sector small { font-size: 8px; }.combat-sector b { font-size: 9px; letter-spacing: .6px; }.combat-sector > span { font-size: 7px; }.combat-sector i { margin: 0 3px; }
-  .combat-settings { gap: 5px; }.combat-settings button { font-size: 7px; padding: 9px 6px; }.combat-settings kbd { display: none; }.combat-objective { right: 12px; top: 95px; max-width: 145px; }.combat-objective p { font-size: 9px; }.combat-objective small { font-size: 7px; letter-spacing: .8px; }.combat-objective > span { font-size: 6px; }
-  .combat-position { top: 91px; left: 12px; }.combat-position > span { font-size: 8px; }.combat-position button { padding: 8px; font-size: 7px; }
-  .combat-facility { left: 12px; top: 152px; max-width: 153px; }.combat-facility b { font-size: 9px; letter-spacing: .3px; }.combat-facility > span { font-size: 7px; }.combat-facility small { font-size: 6px; }
+  .combat-settings { gap: 5px; }.combat-settings button { font-size: 7px; padding: 9px 6px; }.combat-settings kbd { display: none; }.combat-objective { max-width: 145px; }.combat-objective p { font-size: 9px; }.combat-objective small { font-size: 7px; letter-spacing: .8px; }.combat-objective > span { font-size: 6px; }
+  .combat-left { left: 10px; top: 84px; width: 46vw; gap: 8px; }.combat-position > span { font-size: 8px; }.combat-position button { padding: 8px; font-size: 7px; }
+  .combat-facility { max-width: 153px; }.combat-facility b { font-size: 9px; letter-spacing: .3px; }.combat-facility > span { font-size: 7px; }.combat-facility small { font-size: 6px; }
   .combat-bottom-vitals { bottom: 94px; left: 12px; width: 172px; padding-top: 0; }.combat-vitals-title { font-size: 8px; }.combat-vitals-title > span { font-size: 8px; }.combat-armor { font-size: 6px; }.combat-intel { display: none; }
   .combat-action-area { bottom: 14px; }.combat-action-buttons button { min-width: 54px; min-height: 48px; padding: 6px; }.combat-action-buttons button > span { font-size: 7px; }.combat-interact-hint { font-size: 8px; padding: 6px; max-width: 90vw; white-space: normal; }.combat-gate-hint { font-size: 7px; }
-  .combat-banner { left: 5%; right: 5%; top: 30%; }.combat-banner strong { font-size: 22px; letter-spacing: 1px; }.combat-banner > span { font-size: 8px; letter-spacing: 1px; }.combat-combo { top: 70px; font-size: 17px; }.combat-combo > span { font-size: 6px; }
-  .combat-security { right: 12px; top: 183px; width: 164px; padding: 8px; }.combat-security small { font-size: 6px; letter-spacing: .6px; }.combat-security b { font-size: 8px; }
-  .combat-transmission { right: 12px; bottom: 203px; width: 177px; }.combat-transmission > button { padding: 6px 8px; font-size: 6px; }.combat-transmission > strong { padding: 0 8px; font-size: 11px; }.combat-transmission > p { padding: 0 8px 8px; max-height: 111px; font-size: 8px; line-height: 1.75; }
-  .combat-override { top: 20%; padding: 7px; }.combat-override b { font-size: 10px; }.combat-override p { display: none; }
+  .combat-center { top: 47vh; width: 94vw; gap: 9px; }.combat-banner strong { font-size: 22px; letter-spacing: 1px; }.combat-banner > span { font-size: 8px; letter-spacing: 1px; }.combat-combo { font-size: 17px; }.combat-combo > span { font-size: 6px; }
+  .combat-right { right: 10px; top: 84px; bottom: auto; width: 46vw; gap: 8px; }.combat-security { width: 164px; padding: 8px; }.combat-security small { font-size: 6px; letter-spacing: .6px; }.combat-security b { font-size: 8px; }
+  .combat-transmission { width: 177px; }.combat-transmission > button { padding: 6px 8px; font-size: 6px; }.combat-transmission > strong { padding: 0 8px; font-size: 11px; }.combat-transmission > p { padding: 0 8px 8px; max-height: 111px; font-size: 8px; line-height: 1.75; }
+  .combat-override { padding: 7px; }.combat-override b { font-size: 10px; }.combat-override p { display: none; }
   .operation-briefing { justify-content: start; padding: 22px 6%; }.briefing-stamp svg { width: 34px; }.briefing-stamp > b { font-size: 7px; letter-spacing: .5px; }.briefing-classification { font-size: 7px; letter-spacing: 1px; margin: 16px 0 22px; }.briefing-document > p { font-size: 11px; line-height: 1.85; }.briefing-orders { gap: 11px; flex-direction: column; padding: 13px 0; }.briefing-orders ol { font-size: 9px; }.briefing-actions { flex-wrap: wrap; gap: 12px; margin-top: 19px; }.briefing-actions > small { display: none; }.briefing-signal { font-size: 6px; letter-spacing: 1px; line-height: 1.7; margin-bottom: 15px; }
 }
 
