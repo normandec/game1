@@ -265,6 +265,34 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
     add(2220, y0 + 880 + row * 182, 142, 220, 'tank', 38);
     tanks.push({ x: 2291, y: y0 + 951 + row * 182, ang: Math.PI / 2 });
   }
+  /* THE WING'S OWN DEFENCE TROOP.
+   * Six fuelled hulls on the flight line between the megahangars and the runway. They are
+   * parked here in the world and they are live sortie positions too, so an alarm over the
+   * airfield puts armour on the field where the aircraft are — not four kilometres away in
+   * the park. The user's report was "there are no tanks anywhere" while flying: this is
+   * the ground the battalion was missing. */
+  for (let i = 0; i < 6; i++) {
+    const tx = base.x + 4480 + i * 330, ty = y0 + 1090;
+    tanks.push({ x: tx, y: ty, ang: 0 });
+    tankPatrols.push({ x: tx, y: ty, ang: 0 });
+    /* Earth-and-sandbag revetments, open toward the runway: the flight line now reads as a
+     * dispersal with protected parking rather than six hulls on open concrete. */
+    add(tx - 120, ty + 78, 240, 24, 'sandbag', 22);
+    add(tx - 120, ty - 24, 22, 102, 'sandbag', 22);
+    add(tx + 98, ty - 24, 22, 102, 'sandbag', 22);
+    // a hardstand light and a grounding point at every bay
+    add(tx + 118, ty + 96, 16, 16, 'lamp', 12, '#6d7360');
+  }
+  /* The wing's fuel point and bowser park, on the apron between the bays and the hall. */
+  add(base.x + 6600, y0 + 1010, 190, 90, 'bladder', 40, '#5c5c44');
+  for (let i = 0; i < 5; i++) add(base.x + 6820 + i * 58, y0 + 1016, 46, 46, 'barrel', 24, '#6e6234');
+  add(base.x + 6560, y0 + 960, 260, 16, 'sandbag', 16);
+  /* Two aircraft shelters on the south side of the runway, so the wing has hardened
+   * parking as well as the two megahangars. */
+  for (let i = 0; i < 2; i++) {
+    const sx = base.x + 7400 + i * 900;
+    add(sx, y0 + 1180, 380, 300, 'hangar', 120, '#3b4136');
+  }
   // every second hull here is a live sortie position as well
   for (let row = 0; row < 12; row++) {
     for (let col = 0; col < 4; col++) {

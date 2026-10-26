@@ -114,6 +114,36 @@ export function drawGate(ctx: CanvasRenderingContext2D, g: HydraulicGate, time: 
   if (g.hp <= 0) return;
   ctx.save(); ctx.translate(g.x, g.y); ctx.rotate(g.ang);
   const color = g.locked ? '#ff777c' : '#64edc9', s = g.span / 2;
+  /* A GATE IS AN OPENING IN A WALL, NOT A DOOR LYING ON IT.
+   * The leaves used to be drawn straight onto the wall band, which read as a pair of
+   * doors embedded in solid masonry. The opening is now cut first — a recessed threshold,
+   * a shadowed reveal, jambs with a concrete cap and a lintel behind the leaves — so the
+   * gap reads as a real gatehouse from any angle. Every hydraulic gate in the game draws
+   * through this function, so every door gets the same treatment. */
+  ctx.fillStyle = '#1a1410';
+  ctx.fillRect(-s, -20, g.span, 58);
+  const reveal = ctx.createLinearGradient(0, -20, 0, 38);
+  reveal.addColorStop(0, 'rgba(0,0,0,0.72)');
+  reveal.addColorStop(0.55, 'rgba(0,0,0,0.30)');
+  reveal.addColorStop(1, 'rgba(0,0,0,0.62)');
+  ctx.fillStyle = reveal;
+  ctx.fillRect(-s, -20, g.span, 58);
+  // threshold: the apron runs through the gate
+  ctx.fillStyle = '#2b2721';
+  ctx.fillRect(-s, 26, g.span, 12);
+  ctx.fillStyle = 'rgba(214,196,140,0.25)';
+  for (let i = -s + 8; i < s - 8; i += 26) ctx.fillRect(i, 30, 14, 3);
+  // jambs and the concrete cap over the opening
+  for (const side of [-1, 1]) {
+    ctx.fillStyle = '#3a352c';
+    ctx.fillRect(side * s - (side < 0 ? 14 : 0), -30, 14, 70);
+    ctx.fillStyle = '#4d473a';
+    ctx.fillRect(side * s - (side < 0 ? 18 : 4), -36, 22, 10);
+  }
+  ctx.fillStyle = '#3a352c';
+  ctx.fillRect(-s - 14, -42, g.span + 28, 12);
+  ctx.fillStyle = 'rgba(190,180,150,0.35)';
+  ctx.fillRect(-s - 14, -42, g.span + 28, 3);
   ctx.fillStyle = '#0008'; ctx.fillRect(-s - 18, -10, g.span + 36, 48);
   for (const side of [-1, 1]) {
     ctx.fillStyle = '#17252b'; ctx.fillRect(side * s - 15, -28, 30, 66);

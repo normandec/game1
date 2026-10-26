@@ -365,6 +365,21 @@ interface ArmyJet {
   ace?: boolean;
   /** Airframe damage flash, 0..1. */
   hitFlash?: number;
+  /**
+   * This hull is gone. A wreck is not a parked aircraft: it never flies again, it is never
+   * re-armed, and it cannot be boarded. Losing an airframe is permanent.
+   */
+  wreck?: boolean;
+  /** Seconds the wreck has been burning (smoke thins out after a while). */
+  wreckT?: number;
+  /** The aircraft has completed its take-off chain and is cleared to fly. */
+  ready?: boolean;
+  /** Serial of the airframe in the wing's inventory — printed on the HUD. */
+  serial?: string;
+  /** Take-off chain link in progress, for the apron animation. */
+  crewT?: number;
+  /** Where a recalled aircraft is putting down (its runway). */
+  taxiX?: number; taxiY?: number;
 }
 /** Unguided salvo rockets and piercing lance shots fired from the interceptor. */
 interface JetRocket { x: number; y: number; vx: number; vy: number; life: number; dmg: number; }
@@ -388,6 +403,12 @@ interface VTOL {
 }
 interface SupplyDrop { x: number; y: number; t: number; }
 /** Hangar shell: sealed roof outside, splits open once the operative is within. */
+/** What the take-off chain needs from a hangar: a roof, a footprint and a door. */
+type LaunchHangar = {
+  x: number; y: number; w: number; h: number; doorX: number; doorY: number; ruined?: boolean;
+  /** The structure itself, when the roof is a real building that can be knocked down. */
+  rect?: Rect;
+};
 interface HangarState { x: number; y: number; w: number; h: number; doorX: number; doorY: number; open: number; ruined?: boolean; }
 /** Parked / drivable Hydra transport van. */
 interface Van {
@@ -648,6 +669,48 @@ export class Game {
   armyJets: ArmyJet[] = [];
   /** The army interceptor the operative is flying, if any. */
   playerJet: ArmyJet | null = null;
+  /**
+   * THE TAKE-OFF CHAIN. Nothing leaves the ground because a key was pressed: the order
+   * starts a physical sequence, and every link has to complete before the next one opens.
+   *
+   *   walk  — the operative crosses the apron from the hangar to the airframe
+   *   board — canopy closes, the crew hooks up the aircraft
+   *   taxi  — the aircraft rolls from its parking spot to the runway threshold
+   *   roll  — take-off run; the wheels leave the ground at the end of it
+   *
+   * If the hangar behind the airframe is destroyed at any point, the chain is broken and
+   * the aircraft never flies.
+   */
+  private launch: {
+    jet: ArmyJet;
+    phase: 'walk' | 'board' | 'taxi' | 'roll';
+    t: number;
+    /** where the operative started walking / where the aircraft must taxi to */
+    fromX: number; fromY: number;
+    taxiX: number; taxiY: number;
+    rollX: number; rollY: number;
+    hangar: LaunchHangar | null;
+    serial: string;
+  } | null = null;
+  /** Ground crew walking out to the airframe during the boarding link. */
+  launchCrew: { x: number; y: number; tx: number; ty: number; t: number; kind: 'crew' | 'pilot' }[] = [];
+  /** Aircraft ditched in the water: the operative is in a boat, and the wing stands down. */
+  private ditching = false;
+  /** Airframes left in the squadron reserve that can fly in from off the map. */
+  private airReserve = 10;
+  private airReserveSpent = false;
+  private ditchT = 0;
+  /** Stride clock for the walk-out to the aircraft. */
+  private launchStride = 0;
+  /**
+   * FIRST TIME, EVERY TIME. The first time the operative does something new — takes an
+   * aircraft, takes a tank, takes a boat, takes a gunship, ends up in the brig — the game
+   * stops and explains the controls. Each card appears once per run.
+   */
+  private tutorialsSeen = new Set<string>();
+  tutorial: { title: string; lines: string[]; hint: string } | null = null;
+  /** Last time the boundary wall had to speak. */
+  private airspaceWarnT = -99;
   /** Air-to-air / air-to-ground missiles in flight from the interceptor. */
   jetMissiles: { x: number; y: number; vx: number; vy: number; life: number; air: boolean; dmg: number }[] = [];
   /** Player salvo rockets and lance beams. */
@@ -814,6 +877,8 @@ export class Game {
   private squadMembers = new Map<number, Enemy[]>();
   private postNavigation = new WeakMap<Enemy, { path: Point[]; node: number; expires: number; revision: number; goal: Point }>();
   private routes = new RoutePlanner(ARENA_W, ARENA_H);
+  /** Terrain signature the planners were last painted with (sector + bridge state). */
+  private terrainKey = '';
   private navigationDirty = false;
   private pathBudget = 1;
   private convoyMotion = new WeakMap<Truck, { path: Point[]; node: number; revision: number; replan: number; idle: number; home: Point; stage: string; door: number; loaded: number; loadTime: number; depart: boolean; trafficTime?: number; doorWait?: number; stall?: number; bypass?: Point; reversing?: number }>();
@@ -1173,6 +1238,8 @@ export class Game {
     this.armyGuardsData = world.armyGuards || [];
     this.armyAlarm = 0; this.armyAlerted = false; this.armyWakeT = 0; this.armyWaves = 0;
     this.playerJet = null; this.armyTankWaveT = 0; this.armyTankSent = 0;
+    this.launch = null; this.launchCrew = []; this.airReserve = 10; this.airReserveSpent = false;
+    this.ditching = false; this.ditchT = 0;
     this.jetMissiles = []; this.jetTrail = []; this.jetRockets = []; this.lanceBeams = [];
     this.enemyRockets = []; this.airResponse = 0; this.airResponseHeat = 0;
     this.airResponseWave = 0; this.airResponseT = 0; this.jetFlareT = 0;
@@ -1827,6 +1894,7 @@ export class Game {
   private onKeyDown = (e: KeyboardEvent) => {
     const k = e.key.toLowerCase();
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    if (this.tutorial) { this.tutorial = null; e.preventDefault(); return; }
     if (this.status === 'interior') return;
     if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
     if (this.keys[k]) return;
@@ -1881,6 +1949,7 @@ export class Game {
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
   private onPointerDown = (e: PointerEvent) => {
+    if (this.tutorial) { this.tutorial = null; return; }
     if (this.status !== 'playing') return;
     // Pull the trigger first: anything below that can throw must never leave the
     // weapon dead. (setPointerCapture used to abort the handler on some browsers.)
@@ -2379,9 +2448,25 @@ export class Game {
     if (this.plane && this.flyingPlane && this.plane.hp < 1) this.plane.hp = 1;
     if (this.piloting && this.playerHeli && this.playerHeli.hp < 1) this.playerHeli.hp = 1;
     if (this.playerTank && this.playerTank.hp < 1) this.playerTank.hp = 1;
+    /* AIRCRAFT AND VESSELS COUNT TOO. The dev switch used to protect the man on foot and
+     * the airframes he was sitting in, but a boat could still be sunk under him and end the
+     * run while he was in dev mode. Everything he can drive or fly is now held alive. */
+    if (this.drivingBoat && this.drivingBoat.hp < 1) this.drivingBoat.hp = 1;
+    if (this.drivingVan && this.drivingVan.hp < 1) this.drivingVan.hp = 1;
+  }
+
+  /** Stop the world and teach one thing. Never shown twice for the same activity. */
+  private showTutorial(id: string, title: string, lines: string[], hint = 'PRESS ANY KEY OR CLICK TO CONTINUE') {
+    if (this.tutorialsSeen.has(id) || this.tutorial) return;
+    this.tutorialsSeen.add(id);
+    this.tutorial = { title, lines, hint };
+    this.clearInput();
+    sfx.click();
   }
 
   private update(dt: number) {
+    // A tutorial card is a hard stop: nothing moves until it is dismissed.
+    if (this.tutorial) return;
     if (this.devInfiniteLives) this.devHoldTheLine();
     this.lockGrace = Math.max(0, this.lockGrace - dt);
     this.syncLockedAim();
@@ -2389,13 +2474,17 @@ export class Game {
     this.infantryBudget = 1;
     this.rebuildEnemyBuckets();
     this.simulationTime += dt;
+    this.ditchT = Math.max(0, this.ditchT - dt);
+    if (this.ditchT <= 0) this.ditching = false;
     this.storyTime = Math.max(0, this.storyTime - dt);
     this.archiveReadCooldown = Math.max(0, this.archiveReadCooldown - dt);
     this.aegisTime = Math.max(0, this.aegisTime - dt);
     this.iFrames = Math.max(0, this.iFrames - dt);
     this.updateGates(dt);
     if (this.navigationDirty) this.rebuildNavigation();
-    this.updatePlayer(dt);
+    // The take-off chain owns the operative while it runs: nothing else moves them.
+    if (this.launch) this.updateTakeoffChain(dt);
+    else this.updatePlayer(dt);
     if (this.status !== 'playing') return;
     this.updateSecurity(dt);
     this.updateResponseOrders(dt);
@@ -2539,14 +2628,21 @@ export class Game {
     const inside = (b: { x: number; y: number; w: number; h: number }) =>
       this.px > b.x && this.px < b.x + b.w && this.py > b.y && this.py < b.y + b.h;
     const inBase = inside(a.base);
+    /* An approach run over the district is an attack on the district. Flying in used to
+     * leave the armour asleep unless the operative happened to touch the compound on foot,
+     * which is why the battlefield looked empty from the air: the alarm is now raised by an
+     * aircraft overhead as well as by a man at the wire. */
+    const airborneOverDistrict = !!this.playerJet && inside(a.region);
 
     // The alarm: crossing into the compound wakes the whole district.
-    if (!this.armyAlerted && inBase) {
+    if (!this.armyAlerted && (inBase || airborneOverDistrict)) {
       this.armyAlerted = true;
       this.armyAlarm = 1;
       this.armyWakeT = 0.6;
       this.armyLaunchT = 2.5;
-      this.setBanner('IRON RESERVE · GENERAL QUARTERS', 'A THOUSAND MEN, AND EVERY AIRCRAFT THEY OWN');
+      this.setBanner('IRON RESERVE · GENERAL QUARTERS',
+        airborneOverDistrict ? 'AIRCRAFT OVER THE DISTRICT — EVERY GUN AND HULL IS COMING UP'
+          : 'A THOUSAND MEN, AND EVERY AIRCRAFT THEY OWN');
       this.addText(this.px, this.py - 70, '⚠ BASE ALARM — THE PARADE IS WAKING', '#ffd166', 20);
       sfx.rotor();
     }
@@ -2605,17 +2701,41 @@ export class Game {
     if (this.armyAlerted) {
       this.armyTankWaveT -= dt;
       const live = this.tanks.filter((q) => !q.dead && !q.captured).length;
+      /* From the air the battalion does not chase a jet it cannot catch: it rolls out of
+       * the park and takes up the air-defence posts around the field, which is where the
+       * operative flies over it. Same hulls, same park, real posts. */
+      const flyingThreat = !!this.playerJet;
       if (this.armyTankWaveT <= 0 && live < 34 && a.tankPatrols.length) {
-        this.armyTankWaveT = 6;
-        const batch = Math.min(10, 34 - live);
+        this.armyTankWaveT = flyingThreat ? 3 : 6;
+        const batch = Math.min(flyingThreat ? 8 : 10, 34 - live);
+        /* The hulls come out of the park nearest the shooting, not out of the next slot on
+         * a list: armour that spawns four kilometres from the fight is armour nobody ever
+         * sees. Each wave spreads across its own line so no two hulls share a spot. */
+        let line = a.tankPatrols[0], lineD = Infinity;
+        for (const p of a.tankPatrols) {
+          const d = Math.hypot(p.x - this.px, p.y - this.py);
+          if (d < lineD) { lineD = d; line = p; }
+        }
         for (let i = 0; i < batch; i++) {
-          const spot = a.tankPatrols[this.armyTankSent % a.tankPatrols.length];
+          const spot = line;
           this.armyTankSent++;
           const ang = Math.atan2(this.py - spot.y, this.px - spot.x);
-          const jx = spot.x + rand(-40, 40), jy = spot.y + rand(-40, 40);
+          let jx = spot.x + ((i % 4) - 1.5) * 190 + rand(-20, 20);
+          let jy = spot.y + (Math.floor(i / 4) % 2 ? 150 : -150) + rand(-20, 20);
+          /* The park holds a hundred and twelve hulls bumper to bumper. A live tank that
+           * spawns inside a rank of parked ones digs in and never moves, which is exactly
+           * why an alerted base could look empty. It starts on the nearest clear lane. */
+          if (!this.routes.clear({ x: jx, y: jy })) {
+            const lane = this.routes.nearest({ x: jx, y: jy });
+            jx = lane.x; jy = lane.y;
+          }
+          const post = flyingThreat
+            ? this.airDefencePost(jx, jy, a)
+            : { x: clamp(this.px - Math.cos(ang) * 360, 300, ARENA_W - 300),
+                y: clamp(this.py - Math.sin(ang) * 360, 300, ARENA_H - 300) };
           this.tanks.push({
             x: jx, y: jy,
-            goalX: this.px - Math.cos(ang) * 360, goalY: this.py - Math.sin(ang) * 360,
+            goalX: post.x, goalY: post.y,
             ang, turret: ang, lean: 0,
             hp: 1900, maxHp: 1900, speed: 0,
             cool: rand(1.4, 3.4), dead: false, announced: true, captured: false,
@@ -2630,6 +2750,23 @@ export class Game {
     }
 
     this.updateArmyTurrets(dt);
+  }
+
+  /**
+   * Where a hull from the park should sit to shoot at the sky: a ring of posts around the
+   * airfield and the parade ground, on dry ground, spread out so the battalion reads as a
+   * deployed force rather than a traffic jam.
+   */
+  private airDefencePost(fx: number, fy: number, a: ArmyPlan) {
+    const cx = a.base.x + a.base.w / 2, cy = a.base.y + a.base.h / 2;
+    for (let i = 0; i < 10; i++) {
+      const ang = (this.armyTankSent * 0.7 + i * 0.63) % TAU;
+      const r = 700 + ((this.armyTankSent + i) % 5) * 260;
+      const x = clamp(cx + Math.cos(ang) * r * 1.5, a.base.x + 120, a.base.x + a.base.w - 120);
+      const y = clamp(cy + Math.sin(ang) * r, a.base.y + 120, a.base.y + a.base.h - 120);
+      if (this.onDryGround(x, y) && !this.pointBlocked(x, y)) return { x, y };
+    }
+    return { x: fx, y: fy };
   }
 
   /** Jets, missiles in flight and the air-defence response. Runs in every sector. */
@@ -2687,7 +2824,12 @@ export class Game {
    * wreck falls out of the sky instead of simply disappearing.
    */
   private downJet(j: ArmyJet, cause: string) {
-    j.hp = 0; j.state = 'parked'; j.alt = 0; j.speed = 0;
+    /* A shot-down airframe is a WRECK, not a parked aircraft. It burns where it fell, it
+     * cannot be boarded, it cannot be re-armed and it never flies again: the wing is one
+     * airframe smaller for the rest of the run. */
+    j.hp = 0; j.state = 'wreck' as ArmyJet['state']; j.alt = 0; j.speed = 0;
+    j.wreck = true; j.wreckT = 0; j.manned = false; j.ready = false;
+    if (this.launch?.jet === j) this.abortTakeoff('THE AIRFRAME WAS DESTROYED ON THE APRON');
     const worth = j.ace ? 4200 : j.hunter ? 1800 : 1400;
     this.score += worth;
     this.explode(j.x, j.y, 220, 90, true);
@@ -2950,7 +3092,7 @@ export class Game {
 
   private hunterCount() {
     let n = 0;
-    for (const j of this.armyJets) if (j.hunter && j.state !== 'parked' && j.hp > 0) n++;
+    for (const j of this.armyJets) if (j.hunter && j.state !== 'parked' && !j.wreck && j.hp > 0) n++;
     return n;
   }
 
@@ -2959,8 +3101,33 @@ export class Game {
     this.airResponseWave++;
     const want = clamp(1 + Math.round(heat * 0.55), 2, 5);
     let sent = 0;
-    for (let i = 0; i < want; i++) {
+    /* FIRST THE WING THAT IS ALREADY ON THE FIELD. Every parked, serviceable airframe on
+     * the apron is a real aircraft with a real pilot: it launches from where it stands.
+     * Nothing appears in the sky out of an empty hangar. */
+    for (const j of this.armyJets) {
+      if (sent >= want || this.hunterCount() >= 6) break;
+      if (j.wreck || j.manned || j.hunter || j.state !== 'parked' || j.hp <= 0) continue;
+      j.hunter = true;
+      j.state = 'launch'; j.alt = 0; j.speed = 0; j.t = 0;
+      j.ang = Math.atan2(this.py - j.y, this.px - j.x);
+      j.rockets = (j.tier === 'prototype' ? 4 : 2) + Math.round(heat * 0.4);
+      j.ready = true;
+      this.addText(j.x, j.y - 80, `${this.airframeSerial(j)} SCRAMBLED`, '#ffb08a', 13);
+      sent++;
+    }
+    /* THEN THE RESERVE. The squadron's own field is off the map, so reinforcements fly in
+     * from the boundary — but only while there are airframes left in the reserve. When the
+     * reserve is spent, the air defence is spent, and it says so. */
+    for (let i = sent; i < want; i++) {
       if (this.hunterCount() >= 6) break;
+      if (this.airReserve <= 0) {
+        if (!this.airReserveSpent) {
+          this.airReserveSpent = true;
+          this.setBanner('AIR DEFENCE SPENT', 'NO AIRFRAMES LEFT IN THE SQUADRON RESERVE');
+          this.addText(this.px, this.py - 110, 'THAT WAS THE LAST INTERCEPTOR THEY HAD', '#ffd166', 14);
+        }
+        break;
+      }
       // They come from the edge of the map, not from the apron, so the fight starts in the sky.
       const a = rand(0, TAU);
       const x = clamp(this.px + Math.cos(a) * rand(1900, 2700), 400, ARENA_W - 400);
@@ -2975,6 +3142,7 @@ export class Game {
         rockets: (isAce ? 4 : 2) + Math.round(heat * 0.4),
       });
       if (isAce) this.addText(x, y - 80, 'SQUADRON ACE AIRBORNE', '#ffe0a0', 17);
+      this.airReserve--;
       sent++;
     }
     if (sent > 0) {
@@ -3064,7 +3232,10 @@ export class Game {
     // The sky belongs to one aircraft at a time. While the operative is flying a seized
     // interceptor, the army keeps everything else on the apron.
     if (this.playerJet && this.airResponse <= 0) return;
-    const jet = this.armyJets.find((j) => j.state === 'parked' && !j.manned && !j.hunter);
+    /* The airframe the operative is currently walking out to, strapping into or taxiing is
+     * NOT available to the wing. It used to be launched out from under the pilot. */
+    const jet = this.armyJets.find((j) => j.state === 'parked' && !j.manned && !j.hunter
+      && !j.wreck && j.hp > 0 && j !== this.launch?.jet && !j.ready);
     if (jet) {
       jet.state = 'launch';
       jet.alt = 40; jet.speed = 260; jet.t = 0; jet.cool = 1.2;
@@ -3111,6 +3282,11 @@ export class Game {
       if (!has) { t.rounds = 0; continue; }
       const d = Math.hypot(tx - t.x, ty - t.y);
       if (d > range) { t.rounds = 0; continue; }
+      /* DEAD ZONE. The barrels are 44 m long and the pit is 40 m across: a target standing
+       * on top of the emplacement is inside the mount, not in front of it. The old code
+       * happily swung the guns round and fired, which read on screen as the turret shooting
+       * itself. Inside 150 m the crew holds fire. */
+      if (d < 150) { t.rounds = 0; continue; }
       // Lead the target: an emplacement that fires at where you *are* can never hit a jet.
       const flight = d / 1520;
       const want = Math.atan2(ty + vy * flight - t.y, tx + vx * flight - t.x);
@@ -3156,9 +3332,29 @@ export class Game {
     }
   }
 
+  /**
+   * THE EDGE OF THE WORLD IS A WALL. Nothing flies out into empty space: an airframe that
+   * reaches the boundary is stopped at it and turned back toward the arena. Returns true
+   * when the wall had to do work, so the caller can say so on the HUD.
+   */
+  private keepInsideAirspace(j: { x: number; y: number; ang: number }, margin = 260) {
+    let hit = false;
+    if (j.x < margin) { j.x = margin; hit = true; }
+    else if (j.x > ARENA_W - margin) { j.x = ARENA_W - margin; hit = true; }
+    if (j.y < margin) { j.y = margin; hit = true; }
+    else if (j.y > ARENA_H - margin) { j.y = ARENA_H - margin; hit = true; }
+    if (!hit) return false;
+    // Turn-back: aim at the middle of the arena and let the airframe come round.
+    const back = Math.atan2(ARENA_H / 2 - j.y, ARENA_W / 2 - j.x);
+    j.ang = lerpAngle(j.ang, back, 0.16);
+    return true;
+  }
+
   private updateArmyJets(dt: number) {
     for (const j of this.armyJets) {
       if (j.manned) continue;
+      // A wreck stays a wreck: it does not launch, hunt, egress or come back.
+      if (j.wreck || j.hp <= 0) { j.wreckT = (j.wreckT ?? 0) + dt; continue; }
       if (this.playerJet && !j.hunter && this.airResponse <= 0 && j.state !== 'parked') {
         j.state = 'parked'; j.alt = 0; j.speed = 0; continue;
       }
@@ -3250,6 +3446,11 @@ export class Game {
       if (dist < (j.hunter ? 190 : 320)) { j.state = 'egress'; j.t = 0; }
       if (j.t > (j.hunter ? 30 : 22)) { j.state = 'egress'; j.t = 0; }
     }
+    // Nothing leaves the map. Every airframe that reached the wall is turned back inside it.
+    for (const j of this.armyJets) {
+      if (j.manned || j.wreck || j.state === 'parked') continue;
+      this.keepInsideAirspace(j);
+    }
   }
 
   /* ---------------- the seized interceptor ---------------- */
@@ -3258,7 +3459,7 @@ export class Game {
   private nearArmyJet(): ArmyJet | null {
     let best: ArmyJet | null = null, bd = 240;
     for (const j of this.armyJets) {
-      if (j.manned || j.state !== 'parked') continue;
+      if (j.manned || j.state !== 'parked' || j.wreck || j.hp <= 0) continue;
       const d = Math.hypot(j.x - this.px, j.y - this.py);
       if (d < bd) { bd = d; best = j; }
     }
@@ -3266,15 +3467,246 @@ export class Game {
   }
 
   /**
-   * Take the interceptor. From this moment the operative *is* the air force: the army's
-   * own jets go back on the apron and its gunships are waved off, because a dogfight
-   * against scripted aircraft is not a fight — it is a cutscene with a health bar.
+   * F on a parked interceptor. This is an ORDER, not a teleport: everything between the
+   * order and the wheels leaving the ground happens physically on the apron first, and
+   * any broken link in that chain stops the take-off dead.
    */
   private seizeJet(j: ArmyJet) {
+    if (j.wreck || j.hp <= 0) {
+      this.addText(this.px, this.py - 60, 'AIRFRAME WRECKED — IT NEVER FLIES AGAIN', '#ff9d9d', 14);
+      sfx.click();
+      return;
+    }
+    if (this.launch) return;
+    // Crewed and cleared earlier in this run: the chain has already been walked.
+    if (j.ready) { this.boardJet(j); return; }
+    this.orderTakeoff(j);
+  }
+
+  /**
+   * The nearest hangar that is still standing, within reach of an airframe. Both kinds
+   * count: the hangars on the airfield and the two cathedral-span megahangars the wing
+   * actually lives in. No roof, no airframe, no take-off.
+   */
+  private hangarFor(j: ArmyJet): LaunchHangar | null {
+    let best: LaunchHangar | null = null, bd = 1500;
+    for (const h of this.hangars) {
+      if (h.ruined) continue;
+      const d = Math.hypot(h.doorX - j.x, h.doorY - j.y);
+      if (d < bd) { bd = d; best = { x: h.x, y: h.y, w: h.w, h: h.h, doorX: h.doorX, doorY: h.doorY, ruined: false }; }
+    }
+    for (const o of this.obstacles) {
+      if (o.dead || (o.kind !== 'hangar' && o.kind !== 'megahangar')) continue;
+      const nx = clamp(j.x, o.x, o.x + o.w), ny = clamp(j.y, o.y, o.y + o.h);
+      const d = Math.hypot(nx - j.x, ny - j.y);
+      if (d < bd) { bd = d; best = { x: o.x, y: o.y, w: o.w, h: o.h, doorX: nx, doorY: ny, ruined: false, rect: o }; }
+    }
+    if (best) return best;
+    /* A dispersal strip has no hangar: the crew comes out of the control tent beside the
+     * airframes. The link is still a real structure with real people in it. */
+    let tent: LaunchHangar | null = null, td = 900;
+    for (const o of this.obstacles) {
+      if (o.dead || o.kind !== 'tent') continue;
+      const d = Math.hypot(o.x + o.w / 2 - j.x, o.y + o.h / 2 - j.y);
+      if (d < td) { td = d; tent = { x: o.x, y: o.y, w: o.w, h: o.h, doorX: o.x + o.w / 2, doorY: o.y + o.h / 2, rect: o }; }
+    }
+    return tent;
+  }
+
+  /** Has the roof over this airframe stopped existing? */
+  private hangarSmashed(h: LaunchHangar) {
+    if (h.ruined) return true;
+    const r = h.rect;
+    if (!r) return false;
+    return !!r.dead || (typeof r.hp === 'number' && r.hp <= 0);
+  }
+
+  /** Where a runway centreline comes closest to this airframe (null if there is none). */
+  private nearestRunwayPoint(x: number, y: number, reach = 2600): { x: number; y: number } | null {
+    let best: { x: number; y: number } | null = null, bd = reach;
+    for (const z of this.zones) {
+      if (z.kind !== 'runway') continue;
+      const cy = z.y + z.h / 2;
+      const cx = clamp(x, z.x + 120, z.x + z.w - 120);
+      const d = Math.hypot(cx - x, cy - y);
+      if (d < bd) { bd = d; best = { x: cx, y: cy }; }
+    }
+    return best;
+  }
+
+  /**
+   * CAUSE 1: the player orders a take-off. Everything that follows is a consequence of
+   * this one order — and every link is visible on the ground.
+   */
+  private orderTakeoff(j: ArmyJet) {
+    const hangar = this.hangarFor(j);
+    // The glacier airframe is the one aircraft in the game with no hangar behind it: it was
+    // buried in the ice, and it comes out of a sealed bay rather than a hall.
+    const glacier = j.tier === 'frostwing';
+    if (!hangar && !glacier) {
+      this.setBanner('NO GROUND SUPPORT', 'NO INTACT HANGAR HOLDS THIS AIRFRAME — IT CANNOT BE CREWED');
+      this.addText(j.x, j.y - 96, 'NO HANGAR · NO CREW · NO TAKE-OFF', '#ff9d9d', 14);
+      sfx.click();
+      return;
+    }
+    const runway = this.nearestRunwayPoint(j.x, j.y);
+    const taxiX = runway ? runway.x : j.x + Math.cos(j.ang) * 620;
+    const taxiY = runway ? runway.y : j.y + Math.sin(j.ang) * 620;
+    const rollX = runway ? clamp(taxiX + Math.cos(0) * 1400, 200, ARENA_W - 200) : taxiX + Math.cos(j.ang) * 1400;
+    const rollY = runway ? runway.y : taxiY + Math.sin(j.ang) * 1400;
+    this.launch = {
+      jet: j, phase: 'walk', t: 0,
+      fromX: this.px, fromY: this.py,
+      taxiX, taxiY, rollX, rollY,
+      hangar, serial: this.airframeSerial(j),
+    };
+    // Ground crew come out of the hangar door with the pilot's helmet and the tow bar.
+    this.launchCrew = [];
+    const door = hangar ? { x: hangar.doorX, y: hangar.doorY } : { x: j.x - 180, y: j.y + 120 };
+    for (let i = 0; i < 3; i++) {
+      this.launchCrew.push({
+        x: door.x + rand(-30, 30), y: door.y + rand(-30, 30),
+        tx: j.x + Math.cos(j.ang + Math.PI) * 40 + rand(-40, 40),
+        ty: j.y + Math.sin(j.ang + Math.PI) * 40 + rand(-40, 40),
+        t: 0, kind: i === 0 ? 'pilot' : 'crew',
+      });
+    }
+    this.setBanner('TAKE-OFF ORDER', hangar
+      ? `CREW MUSTERS AT HANGAR · ${this.launch.serial}`
+      : 'SEALED BAY OPEN — CREW TO THE ICE AIRFRAME');
+    this.addText(j.x, j.y - 100, 'CHAIN: CREW → BOARD → TAXI → ROLL → AIRBORNE', '#a9ecff', 13);
+    sfx.click();
+  }
+
+  /** Airframe serials are per run and per hull: a lost airframe's number is never reissued. */
+  private airframeSerial(j: ArmyJet) {
+    if (!j.serial) {
+      const used = this.armyJets.filter((o) => o.serial).length + 1;
+      j.serial = `${j.tier === 'prototype' ? 'XP' : j.tier === 'frostwing' ? 'FW' : 'LN'}-${String(100 + used).slice(-3)}`;
+    }
+    return j.serial;
+  }
+
+  /**
+   * The chain, one link per frame. Each link has to finish before the next opens, and the
+   * whole thing is void if the hangar behind the aircraft stops existing.
+   */
+  private updateTakeoffChain(dt: number) {
+    const L = this.launch;
+    if (!L) return;
+    const j = L.jet;
+    // ---- THE LINK THAT BREAKS EVERYTHING ----
+    if (j.wreck || j.hp <= 0) { this.abortTakeoff('THE AIRFRAME IS DESTROYED'); return; }
+    if (L.hangar && this.hangarSmashed(L.hangar)) {
+      this.abortTakeoff('THE HANGAR IS GONE — NO CREW, NO CLEARANCE');
+      return;
+    }
+    if (this.status !== 'playing' || this.hp <= 0) { this.abortTakeoff('ORDER CANCELLED'); return; }
+    L.t += dt;
+
+    // ---- crew walking out of the hangar, always, whatever the player is doing ----
+    for (const c of this.launchCrew) {
+      c.t += dt;
+      const dx = c.tx - c.x, dy = c.ty - c.y, d = Math.hypot(dx, dy);
+      if (d > 8) {
+        const sp = c.kind === 'pilot' ? 96 : 82;
+        c.x += (dx / d) * sp * dt; c.y += (dy / d) * sp * dt;
+      }
+    }
+
+    switch (L.phase) {
+      case 'walk': {
+        // CONSEQUENCE 1: the pilot crosses the apron on foot.
+        const cx = j.x + Math.cos(j.ang) * 24, cy = j.y + Math.sin(j.ang) * 24;
+        const dx = cx - this.px, dy = cy - this.py, d = Math.hypot(dx, dy);
+        const sp = 250;
+        if (d > 14) {
+          this.px += (dx / d) * Math.min(sp * dt, d);
+          this.py += (dy / d) * Math.min(sp * dt, d);
+          this.pang = Math.atan2(dy, dx);
+          this.launchStride += dt * 9;
+        } else if (L.t > 1.4) {
+          L.phase = 'board'; L.t = 0;
+          this.addText(j.x, j.y - 84, 'PILOT IN THE COCKPIT · CANOPY DOWN', '#a9ecff', 13);
+          sfx.click();
+        }
+        break;
+      }
+      case 'board': {
+        // CONSEQUENCE 2: straps, canopy, crew under the wings. Then the aircraft is ours.
+        if (L.t > 1.2) {
+          L.phase = 'taxi'; L.t = 0;
+          this.setBanner('CLEARED TO TAXI', `${this.launch?.serial ?? ''} · HOLD THE APRON — RUNWAY AHEAD`);
+        }
+        break;
+      }
+      case 'taxi': {
+        // CONSEQUENCE 3: it rolls from the parking spot to the runway threshold.
+        const dx = L.taxiX - j.x, dy = L.taxiY - j.y, d = Math.hypot(dx, dy);
+        const want = d > 6 ? Math.atan2(dy, dx) : this.runwayHeading(L);
+        j.ang = lerpAngle(j.ang, want, Math.min(1, dt * 3));
+        j.speed = Math.min(110, j.speed + dt * 90);
+        if (d > 6) {
+          const step = Math.min(j.speed * dt, d);
+          j.x += (dx / d) * step; j.y += (dy / d) * step;
+        } else if (L.t > 0.9) {
+          L.phase = 'roll'; L.t = 0;
+          this.setBanner('TAKE-OFF ROLL', `${this.launch?.serial ?? ''} · BURNERS`);
+          sfx.rotor();
+        }
+        break;
+      }
+      case 'roll': {
+        // FINAL LINK: only now does it accelerate and leave the ground.
+        const want = this.runwayHeading(L);
+        j.ang = lerpAngle(j.ang, want, Math.min(1, dt * 2.2));
+        j.speed = Math.min(420, j.speed + dt * 300);
+        j.x += Math.cos(j.ang) * j.speed * dt;
+        j.y += Math.sin(j.ang) * j.speed * dt;
+        j.alt = Math.min(90, j.alt + dt * 40);
+        if (j.speed > 330) {
+          this.boardJet(j);
+        }
+        break;
+      }
+    }
+    /* From the moment the canopy closes the operative IS the aircraft, so the camera and
+     * the HUD follow the hull. During the walk the operative is still on their own feet. */
+    if (L.phase === 'board' || L.phase === 'taxi' || L.phase === 'roll') {
+      this.px = j.x; this.py = j.y;
+      this.pang = j.ang;
+    }
+  }
+
+  /** The direction the runway runs, so a take-off roll follows the tarmac. */
+  private runwayHeading(L: NonNullable<Game['launch']>) {
+    const dx = L.rollX - L.taxiX, dy = L.rollY - L.taxiY;
+    if (Math.hypot(dx, dy) < 40) return L.jet.ang;
+    return Math.atan2(dy, dx);
+  }
+
+  /** A broken link: the chain is void and the aircraft stays on the ground. */
+  private abortTakeoff(why: string) {
+    const L = this.launch;
+    this.launch = null;
+    this.launchCrew = [];
+    if (!L) return;
+    L.jet.ready = false;
+    L.jet.speed = 0; L.jet.alt = 0; L.jet.state = 'parked';
+    this.setBanner('TAKE-OFF ABORTED', why);
+    this.addText(L.jet.x, L.jet.y - 90, `CHAIN BROKEN · ${why}`, '#ff9d9d', 14);
+    sfx.hit();
+  }
+
+  /** Called when the chain is complete: from here the operative is the pilot. */
+  private boardJet(j: ArmyJet) {
+    this.launch = null;
+    this.launchCrew = [];
+    j.ready = true;
     this.playerJet = j;
     j.manned = true;
-    j.alt = 0; j.speed = 120; j.boost = 0;
-    j.mode = 'cannon'; j.flares = 6; j.autopilot = false; j.lock = null;
+    j.alt = Math.max(j.alt, 0); j.speed = Math.max(j.speed, 120); j.boost = 0;
+    j.mode = 'cannon'; j.flares = j.flares ?? 6; j.autopilot = false; j.lock = null;
     const ace = j.tier === 'prototype';
     const frost = j.tier === 'frostwing';
     /* THE LOADOUT.
@@ -3295,11 +3727,19 @@ export class Game {
       j.flares = ace ? 16 : 10;
       j.tuned = true;
     } else {
-      j.hp = Math.max(j.hp, j.maxHp * 0.8);
+      /* NO FREE AIRFRAME REPAIR. The hull that comes back from a sortie comes back with
+       * the holes it took: a second sortie starts on whatever structure is left. */
+      j.hp = Math.min(j.hp, j.maxHp);
       if (ace) j.flares = Math.max(j.flares, 12);
     }
     if (frost) j.flares = Math.max(j.flares, 20);
     this.px = j.x; this.py = j.y; this.pvx = 0; this.pvy = 0;
+    this.showTutorial('jet', 'YOU ARE FLYING THE INTERCEPTOR', [
+      'A / D or the mouse steers · W throttle · S brake · SHIFT afterburner',
+      'LMB cannon · G missile · H rockets · R lance (experimental hulls)',
+      'SPACE flares · X wing station · E autopilot · V camera · F eject',
+      'The airframe is finite: land it or lose it, and a wreck never flies again.',
+    ]);
     for (const o of this.armyJets) {
       if (o === j) continue;
       o.state = 'parked'; o.alt = 0; o.speed = 0;
@@ -3328,7 +3768,12 @@ export class Game {
       this.setBanner('INTERCEPTOR SEIZED', 'LMB FIRE · G MISSILE · X STATION · E AUTOPILOT · SPACE FLARES · SHIFT BURN');
       this.addText(j.x, j.y - 90, 'AIRSPACE IS YOURS — NOTHING ELSE FLIES', '#a9ecff', 17);
     }
-    this.flash = 0.35; this.flashColor = '150,235,255';
+    /* No screen flash on taking an aircraft. The old 0.35 white-cyan wash painted the
+     * whole viewport the moment the operative strapped in; a light on the apron does the
+     * same job without blinding the player. */
+    this.addLight(j.x, j.y, 260, '150,235,255', 0.22);
+    if (frost) this.flash = 0.12, this.flashColor = '150,235,255';
+    else if (ace) this.flash = 0.1, this.flashColor = '255,215,140';
     sfx.rotor();
   }
 
@@ -3588,11 +4033,15 @@ export class Game {
     const m = this.moveVector();
     if (j.hp <= 0) {
       this.explode(j.x, j.y, 260, 90, true);
-      this.addText(j.x, j.y - 80, 'INTERCEPTOR DOWN', '#ff9d9d', 18);
-      j.manned = false; j.state = 'parked'; j.hp = 0;
+      j.manned = false; j.hp = 0; j.wreck = true; j.wreckT = 0;
+      j.state = 'wreck' as ArmyJet['state']; j.alt = 0; j.speed = 0; j.ready = false;
       this.playerJet = null;
-      this.px = j.x; this.py = j.y; this.pvx = 0; this.pvy = 0;
       this.jetMissiles = [];
+      // DITCHING: a hull that comes down in open water puts the pilot in a boat.
+      if (this.inWater(j.x, j.y)) { this.ditchAircraft(j); return; }
+      this.addText(j.x, j.y - 80, 'INTERCEPTOR DOWN · AIRFRAME LOST', '#ff9d9d', 18);
+      this.addText(j.x, j.y - 58, 'THE WRECK WILL NOT FLY AGAIN', '#ffb0a0', 13);
+      this.px = j.x; this.py = j.y; this.pvx = 0; this.pvy = 0;
       return;
     }
     const lock = this.jetSeeker(j);
@@ -3660,8 +4109,15 @@ export class Game {
 
     j.x += Math.cos(j.ang) * j.speed * dt;
     j.y += Math.sin(j.ang) * j.speed * dt;
-    if (j.x < 220 || j.x > ARENA_W - 220) { j.x = clamp(j.x, 220, ARENA_W - 220); j.ang = Math.PI - j.ang; }
-    if (j.y < 220 || j.y > ARENA_H - 220) { j.y = clamp(j.y, 220, ARENA_H - 220); j.ang = -j.ang; }
+    /* THE BOUNDARY IS A WALL, NOT A MIRROR. The old code reflected the heading off the
+     * edge, which left the aircraft flying into the same wall again a second later. Now the
+     * airframe is stopped at the wall and turned back inside the arena. */
+    if (this.keepInsideAirspace(j)) {
+      if (this.simulationTime - this.airspaceWarnT > 2) {
+        this.airspaceWarnT = this.simulationTime;
+        this.addText(j.x, j.y - 88, 'AIRSPACE BOUNDARY · TURNING BACK', '#ffd166', 14);
+      }
+    }
 
     // A hurt airframe trails smoke: black when it is nearly out of airframe, grey before.
     const frac = j.hp / Math.max(1, j.maxHp);
@@ -3717,6 +4173,57 @@ export class Game {
     this.px = j.x; this.py = j.y;
     this.pvx = Math.cos(j.ang) * j.speed; this.pvy = Math.sin(j.ang) * j.speed;
     this.pang = j.ang;
+  }
+
+  /**
+   * DITCHING. A shot-down interceptor that comes down in open water does not leave the
+   * operative swimming: the wreck goes in, a survival boat is on the water, and — because
+   * the wing has just lost an airframe in front of everyone — every aircraft in the
+   * district is recalled and the air battle is stood down.
+   */
+  private ditchAircraft(j: ArmyJet) {
+    this.ditching = true;
+    const bx = clamp(j.x, SEA.x + 140, ARENA_W - 200), by = clamp(j.y, 160, ARENA_H - 160);
+    const boat = makeBoat('skiff', 'player', bx, by, j.ang + Math.PI / 2, { state: 'cruise' });
+    this.boats.push(boat);
+    this.enterBoat(boat);
+    this.setBanner('DITCHED', 'THE AIRFRAME IS AT THE BOTTOM — YOU ARE IN A BOAT');
+    this.addText(bx, by - 90, 'INTERCEPTOR LOST AT SEA', '#ff9d9d', 18);
+    this.addText(bx, by - 66, 'SURVIVAL SKIFF · W/S THROTTLE · F DISEMBARK', '#a9ecff', 13);
+    for (let i = 0; i < 3; i++) {
+      this.addParticle(bx, by, rand(-90, 90), rand(-90, 90), rand(0.6, 1.2), rand(3, 7), i ? '#cfd8dd' : '#fff0c0', true);
+    }
+    this.shocks.push({ x: bx, y: by, r: 20, max: 300, life: 0.7, t: 0.7, color: '207,232,255', width: 6 });
+    this.recallAllAirForces('AIRFRAME DOWN IN THE WATER');
+    this.ditchT = 9;
+    sfx.wave();
+  }
+
+  /**
+   * Every aircraft goes home. This is the consequence of losing an airframe over water:
+   * no new sorties, no hunters, no air response — the wing stands down where it stands.
+   */
+  recallAllAirForces(why: string) {
+    this.airResponse = 0;
+    this.airResponseHeat = 0;
+    this.airResponseWave = 0;
+    this.airResponseIdle = 99;
+    this.enemyRockets = [];
+    let sent = 0;
+    for (const o of this.armyJets) {
+      if (o.manned || o.wreck) continue;
+      if (o.state !== 'parked') {
+        // Fly it to the nearest runway point and put it on the ground: no vanishing.
+        const rw = this.nearestRunwayPoint(o.x, o.y, 6000);
+        o.state = 'egress';
+        o.t = 0;
+        if (rw) { o.taxiX = rw.x; o.taxiY = rw.y; }
+        sent++;
+      }
+    }
+    for (const h of this.helis) if (h.state !== 'egress' && h.state !== 'landing' && h.state !== 'taxi-in' && h.state !== 'service') { h.state = 'egress'; sent++; }
+    this.addText(this.px, this.py - 130, `ALL AIRCRAFT RECALLED · ${sent} AIRFRAMES`, '#a9ecff', 15);
+    this.setBanner('AIR OPERATIONS SUSPENDED', why);
   }
 
   /** Missiles in flight: they fly straight at where the target was and go off on contact. */
@@ -4100,10 +4607,12 @@ export class Game {
       // If the operative slips away the escort rolls after them: armour follows
       // the column, and the column is wherever the shooting is.
       t.aimT = (t.aimT ?? 0) - dt;
-      if (pd > 1150 && t.aimT <= 0) {
+      /* Armour chases a man on foot. It does NOT chase an aircraft it cannot catch: while
+       * the operative is airborne the hulls stay on their air-defence posts and shoot up. */
+      if (!this.playerJet && pd > 1150 && t.aimT <= 0) {
         t.aimT = 2.5;
-        t.goalX = this.px - Math.cos(Math.atan2(pdy, pdx)) * 360;
-        t.goalY = this.py - Math.sin(Math.atan2(pdy, pdx)) * 360;
+        t.goalX = clamp(this.px - Math.cos(Math.atan2(pdy, pdx)) * 360, 300, ARENA_W - 300);
+        t.goalY = clamp(this.py - Math.sin(Math.atan2(pdy, pdx)) * 360, 300, ARENA_H - 300);
       }
       const gx = t.goalX - t.x, gy = t.goalY - t.y;
       const gd = Math.hypot(gx, gy) || 1;
@@ -4268,6 +4777,16 @@ export class Game {
 
   private rebuildNavigation() {
     const locked = this.gates.filter(g => g.locked && g.hp > 0).flatMap(g => gateBlocks({ ...g, open: 0 }));
+    /* THE SEA IS NOT ROUTEABLE. Water is painted into both planners as permanent no-go
+     * ground — infinite move cost — so a route plan can never send a soldier, a lorry or a
+     * tank out over open water, however tempting the straight line looks. */
+    const key = `${this.sector}:${this.dryLand.length}:${this.bridgeDown ? 1 : 0}`;
+    if (key !== this.terrainKey) {
+      this.terrainKey = key;
+      const dry = (x: number, y: number) => !this.inWater(x, y);
+      this.routes.setTerrain(dry);
+      this.infantryRoutes.setTerrain(dry);
+    }
     this.routes.rebuild([...this.obstacles.filter(o => !o.dead), ...locked]);
     this.infantryRoutes.rebuild([...this.obstacles.filter(o => !o.dead), ...locked]);
     this.navigationDirty = false;
@@ -4528,6 +5047,8 @@ export class Game {
 
   /** Master interact: aircraft, vans, beam batteries, barricades, the black vault. */
   interactHeli() {
+    // Mid-chain, F is the abort: the order is the operative's, and so is cancelling it.
+    if (this.launch) { this.abortTakeoff('CHAIN CANCELLED BY THE PILOT'); return; }
     // Taking a suppressed emplacement comes first: it is the same key, and it only
     // ever fires when the operative is standing inside one.
     if (this.tryCaptureTurret()) return;
@@ -4548,7 +5069,14 @@ export class Game {
     }
     const poiCore = this.pois.find((p) => !p.secret && !p.captured && Math.hypot(this.px - p.x, this.py - p.y) < 170);
     if (poiCore && !this.baseOverride.active) {
-      const defenders = this.enemies.filter(e => !e.def.civilian && e.hp > 0 && Math.hypot(e.x - poiCore.x, e.y - poiCore.y) < Math.max(420, poiCore.r * 0.8)).length;
+      /* WHO IS ACTUALLY DEFENDING? Sleeping parade ranks, men still materialising into the
+       * world, civilians and anyone already in a transport are not holding the ground. The
+       * old count included all of them, so a cleared objective kept claiming defenders it
+       * did not have and the operative could never take it. */
+      const defenders = this.enemies.filter((e) =>
+        !e.def.civilian && e.hp > 0 && e.spawnT <= 0 && !e.dormant
+        && e.boardingTruck === undefined
+        && Math.hypot(e.x - poiCore.x, e.y - poiCore.y) < Math.max(420, poiCore.r * 0.8)).length;
       if (defenders > 0) this.addText(this.px, this.py - 48, `UPLINK LOCKED / ${defenders} DEFENDERS REMAIN`, '#ff9d9d', 13);
       else this.startBaseOverride(poiCore);
       return;
@@ -5248,6 +5776,11 @@ export class Game {
   /** Step through the sally port on the island, or wake up here after an arrest. */
   enterPrison(mode: 'arrest' | 'visit') {
     if (this.status === 'prison') return;
+    this.showTutorial('prison', 'THE CAGE', [
+      'You are inside the military prison on the island. Move with WASD, aim with the mouse.',
+      'The sally port is the way out: a visit can be walked away from, an arrest cannot.',
+      'Guards will be posted at the doors. Fighting your way out is allowed.',
+    ]);
     this.prisonVisits++;
     this.status = 'prison';
     this.clearInput();
@@ -5565,6 +6098,11 @@ export class Game {
     h.landed = false;
     h.vx = 0; h.vy = 0;
     this.px = h.x; this.py = h.y;
+    this.showTutorial('heli', 'YOU ARE FLYING THE GUNSHIP', [
+      'W / S collective · A / D attitude · the mouse aims the nose',
+      '1 chain gun · 2 Hellfire (ground) · 3 Sidewinder (air) · LMB fire',
+      'F lands the aircraft where you are hovering; it stays there for the next sortie.',
+    ]);
     this.setBanner('CAPTURED GUNSHIP', '1 CHAIN GUN · 2 HELLFIRE (GROUND) · 3 SIDEWINDER (AIR) · LMB FIRE · F LAND');
     this.addText(h.x, h.y - 84, 'THREE STATIONS ARMED — 1 / 2 / 3', '#a9ecff', 14);
     sfx.rotor();
@@ -5579,6 +6117,11 @@ export class Game {
     t.speed = 0;
     this.px = t.x; this.py = t.y;
     this.pang = t.ang;
+    if (!reboard) this.showTutorial('tank', 'YOU HAVE A TANK', [
+      'W / S throttle · A / D steer the hull · the mouse lays the turret',
+      'LMB main gun · F dismount (the hull stays where you leave it)',
+      'Your hull is captured armour: friendly tanks will not shoot it, enemy ones will.',
+    ]);
     if (reboard) {
       this.setBanner('S.H.I.E.L.D. TANK', 'WASD DRIVE · LMB MAIN GUN · F DISMOUNT');
       sfx.click();
@@ -6559,6 +7102,11 @@ export class Game {
   }
 
   private enterBoat(b: Boat) {
+    this.showTutorial('boat', 'YOU HAVE A BOAT', [
+      'W / S throttle · A / D helm · F disembark on a beach',
+      'The sea is open water: hulls ram each other at speed and both sink.',
+      'If your aircraft comes down in the water you end up in one of these.',
+    ]);
     this.drivingBoat = b;
     b.faction = 'player';
     b.crewed = true;
@@ -6672,6 +7220,25 @@ export class Game {
     const cx = LAND.x + LAND.w / 2, cy = LAND.y + LAND.h / 2;
     const ex = (x - cx) / (LAND.w / 2), ey = (y - cy) / (LAND.h / 2);
     return ex * ex + ey * ey <= 0.93;
+  }
+
+  /**
+   * WATER IS A WALL. No infantryman in this game can swim, so the shoreline is a hard
+   * collision: a step that would put a man in the sea is refused, and the axis that is
+   * still on dry land is kept so he slides along the beach instead of stopping dead.
+   * Vehicles and pilots are handled elsewhere — nobody takes a tank for a swim either.
+   */
+  private holdOnLand(prevX: number, prevY: number, e: { x: number; y: number; vx?: number; vy?: number }) {
+    if (!this.inWater(e.x, e.y)) return false;
+    if (!this.inWater(e.x, prevY)) { e.y = prevY; if (e.vy !== undefined) e.vy = 0; return true; }
+    if (!this.inWater(prevX, e.y)) { e.x = prevX; if (e.vx !== undefined) e.vx = 0; return true; }
+    if (!this.inWater(prevX, prevY)) {
+      e.x = prevX; e.y = prevY;
+      if (e.vx !== undefined) e.vx = 0;
+      if (e.vy !== undefined) e.vy = 0;
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -8446,7 +9013,9 @@ export class Game {
       // far-away units get cheap ticks (huge map performance guard)
       const far = dist > 2600;
       if (far && !e.garrison) {
+        const fx = e.x, fy = e.y;
         e.x += e.vx * dt; e.y += e.vy * dt;
+        this.holdOnLand(fx, fy, e);
         e.vx = lerp(e.vx, (dx / dist) * def.speed, 1 - Math.pow(0.02, dt));
         e.vy = lerp(e.vy, (dy / dist) * def.speed, 1 - Math.pow(0.02, dt));
         continue;
@@ -8641,9 +9210,12 @@ export class Game {
         }
       }
 
+      const prevX = e.x, prevY = e.y;
       e.x = clamp(e.x + e.vx * dt, def.r, ARENA_W - def.r);
       e.y = clamp(e.y + e.vy * dt, def.r, ARENA_H - def.r);
       const n = this.collide(e, def.r);
+      // the sea is solid ground for the infantry: a wall, not a slow-down
+      this.holdOnLand(prevX, prevY, e);
       if (n) {
         const tX = -n.ny, tY = n.nx;
         const dot = e.vx * tX + e.vy * tY;
@@ -8804,8 +9376,11 @@ export class Game {
       e.vx = lerp(e.vx, (gdx / gd) * sp, 1 - Math.pow(0.004, dt));
       e.vy = lerp(e.vy, (gdy / gd) * sp, 1 - Math.pow(0.004, dt));
     } else { e.vx *= 0.86; e.vy *= 0.86; }
+    const cx0 = e.x, cy0 = e.y;
     e.x += e.vx * dt; e.y += e.vy * dt;
     this.collide(e, e.def.r);
+    // HQ staff cannot swim either.
+    this.holdOnLand(cx0, cy0, e);
   }
 
   private enemyShot(e: Enemy, a: number, dmg: number, speed: number, color: string, r: number) {
@@ -9720,7 +10295,7 @@ export class Game {
     this.pickups.push({ kind, weapon, x, y, t: 0, life: 20 });
   }
 
-  private explode(x: number, y: number, radius: number, dmg: number, sound: boolean, opts?: { ownBomb?: boolean; grenade?: boolean }) {
+  private explode(x: number, y: number, radius: number, dmg: number, sound: boolean, opts?: { ownBomb?: boolean; grenade?: boolean; shell?: boolean }) {
     if (sound) sfx.explode();
     this.hurtBridge(x, y, dmg, radius);
     this.hitstop = Math.max(this.hitstop, 0.06);
@@ -9813,6 +10388,10 @@ export class Game {
       // Convoy armour: explosives only, and even then at half effect.
       for (const tk of this.tanks) {
         if (tk.dead) continue;
+        /* A MAIN-GUN SHELL IS NOT A SATURATION BOMB. The battalion's own hulls used to be
+         * caught by a neighbouring tank's shell and blew each other up — tanks shooting
+         * tanks. Only the operative's captured hull can be hit by one of these. */
+        if (opts?.shell && !tk.captured) continue;
         if (Math.hypot(tk.x - x, tk.y - y) < radius + 62) this.hurtTank(tk, dmg);
       }
       for (const v of this.vans) if (!v.dead && !v.reserved && !v.driving && Math.hypot(v.x - x, v.y - y) < radius + 45) {
@@ -9883,7 +10462,7 @@ export class Game {
       g.x = lerp(g.x, g.tx, dt * 3.6); g.y = lerp(g.y, g.ty, dt * 3.6);
       g.z = Math.sin(k * Math.PI) * 100;
       if (Math.random() < 0.5) this.addParticle(g.x, g.y - g.z, rand(-14, 14), rand(-30, -8), 0.35, 2, '#c1cfc9', false);
-      if (g.t <= 0) { this.explode(g.x, g.y, g.radius ?? 145, g.dmg ?? 64, true); this.enemyNades.splice(i, 1); }
+      if (g.t <= 0) { this.explode(g.x, g.y, g.radius ?? 145, g.dmg ?? 64, true, { shell: !!g.shell }); this.enemyNades.splice(i, 1); }
     }
     // fuel barrel chains ripple outward one fuse at a time
     for (let i = this.barrelFuses.length - 1; i >= 0; i--) {
@@ -10303,12 +10882,17 @@ export class Game {
     this.drawMarks(ctx);
     this.drawEnemies(ctx, camX, camY);
     if (this.support === 'drone' && !this.piloting) this.drawSupportDrone(ctx);
-    if (this.status !== 'over' && !this.piloting && !this.flyingPlane && !this.drivingVan && !this.playerTank) this.drawPlayer(ctx);
+    // While the take-off chain is running the operative is either walking to the aircraft
+    // (drawn) or already inside it (not drawn) — never a figure standing on the wing.
+    const launchHidden = !!this.launch && this.launch.phase !== 'walk';
+    if (this.status !== 'over' && !this.piloting && !this.flyingPlane && !this.drivingVan
+      && !this.playerTank && !this.playerJet && !launchHidden) this.drawPlayer(ctx);
     this.drawArmyWorks(ctx, camX, camY);
     if (this.playerHeli) this.drawPlayerHeli(ctx, camX, camY);
     this.drawTanks(ctx, camX, camY);
     this.drawVans(ctx, camX, camY);
     this.drawBoats(ctx, camX, camY);
+    this.drawArmyAircraft(ctx, camX, camY);
     this.drawLasers(ctx, camX, camY);
     this.drawAllies(ctx);
     this.drawPlane(ctx);
@@ -10385,6 +10969,8 @@ export class Game {
     this.drawBlackoutLamps(ctx, camX, camY);
     this.drawWeather(ctx);
     if (this.playerJet) this.drawJetOverlay(ctx);
+    if (this.launch) this.drawLaunchHud(ctx);
+    if (this.ditching) this.drawRecallHud(ctx);
     if (this.status === 'playing' || this.status === 'paused' || this.status === 'upgrade') {
       this.drawThreatArrows(ctx, this.camX, this.camY);
       this.drawBossBar(ctx);
@@ -10392,6 +10978,7 @@ export class Game {
     }
     if (this.isTouch && this.status === 'playing') this.drawSticks(ctx);
     this.drawReticle(ctx);
+    if (this.tutorial) this.drawTutorial(ctx);
   }
 
   /** In-game crosshair. The old build relied on the OS cursor, which pointer lock
@@ -11752,10 +12339,14 @@ export class Game {
     // is pale ice-blue with a lit spine.
     const ace = tier === 'prototype';
     const frost = tier === 'frostwing';
-    const body = ace ? (friendly ? '#54525c' : parked ? '#3f3e46' : '#46454e')
-      : frost ? (parked ? '#b9d8e2' : '#cbe8f1')
-      : friendly ? '#a9bdb4' : parked ? '#63705a' : '#57614f';
-    const dark = ace ? '#26252c' : frost ? '#5d7f8c' : friendly ? '#5d6f68' : '#39412f';
+    /* FRIENDLY AIRFRAMES USED TO BE PAINTED PALE SAGE (#a9bdb4). Close up, that filled the
+     * viewport with a near-white slab the moment the operative strapped in. The finish is
+     * now a proper low-contrast grey-green, and the icy machine is a colder steel blue:
+     * readable against tarmac and cloud, and no longer a white-out. */
+    const body = ace ? (friendly ? '#4c4a53' : parked ? '#39383f' : '#403f47')
+      : frost ? (parked ? '#7fa6b4' : '#8fb9c8')
+      : friendly ? '#77897f' : parked ? '#5a6650' : '#4f5947';
+    const dark = ace ? '#232228' : frost ? '#4d6d78' : friendly ? '#4b5a54' : '#333a2b';
     // wings: diamond planform, leaning back from the intakes to the tail
     ctx.fillStyle = body;
     ctx.beginPath();
@@ -11816,16 +12407,16 @@ export class Game {
     ctx.stroke();
     // canopy: tinted glass with a razor highlight along the rail
     const glass = ctx.createLinearGradient(12, -6, 40, 6);
-    glass.addColorStop(0, frost ? 'rgba(226,252,255,0.95)' : ace ? 'rgba(190,215,240,0.9)' : 'rgba(186,232,244,0.85)');
+    glass.addColorStop(0, frost ? 'rgba(196,236,246,0.8)' : ace ? 'rgba(160,190,214,0.8)' : 'rgba(150,196,210,0.72)');
     glass.addColorStop(1, frost ? 'rgba(120,196,224,0.8)' : 'rgba(70,104,120,0.85)');
     ctx.fillStyle = glass;
     ctx.beginPath();
     ctx.ellipse(26, 0, 15, 6, 0, 0, TAU);
     ctx.fill();
-    ctx.strokeStyle = 'rgba(240,255,255,0.55)';
+    ctx.strokeStyle = 'rgba(220,240,248,0.4)';
     ctx.lineWidth = 0.9;
     ctx.beginPath(); ctx.ellipse(26, 0, 15, 6, 0, 0, TAU); ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = 'rgba(235,248,255,0.38)';
     ctx.fillRect(16, -2.4, 16, 1.8);
 
     /* WING STATIONS: a loaded aircraft reads as armed from above. */
@@ -11914,6 +12505,145 @@ export class Game {
     ctx.restore();
   }
 
+  /** A burnt-out airframe on the deck: broken spine, no canopy, smoke off the engines. */
+  private drawJetWreck(ctx: CanvasRenderingContext2D, j: ArmyJet) {
+    const t = j.wreckT ?? 0;
+    ctx.save();
+    ctx.translate(j.x, j.y);
+    ctx.rotate(j.ang);
+    // scorched ground and the shadow of a hull that is never moving again
+    ctx.fillStyle = 'rgba(10,10,10,0.45)';
+    ctx.beginPath(); ctx.ellipse(0, 0, 120, 66, 0, 0, TAU); ctx.fill();
+    // the airframe, canted: one wing in the dirt, the spine broken behind the cockpit
+    ctx.rotate(0.22);
+    ctx.fillStyle = '#2b2a28';
+    ctx.beginPath();
+    ctx.moveTo(96, 12); ctx.lineTo(46, -16); ctx.lineTo(-34, -22); ctx.lineTo(-112, -6);
+    ctx.lineTo(-96, 26); ctx.lineTo(-6, 34); ctx.lineTo(52, 30);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#1b1a19';
+    ctx.beginPath(); ctx.moveTo(-8, 24); ctx.lineTo(-96, 74); ctx.lineTo(-128, 60); ctx.lineTo(-52, 18); ctx.closePath(); ctx.fill();
+    // burnt through: a hole where the cockpit was, hot metal still glowing
+    ctx.fillStyle = '#0d0c0b';
+    ctx.beginPath(); ctx.ellipse(30, 0, 26, 15, 0.1, 0, TAU); ctx.fill();
+    const heat = Math.max(0, 1 - t / 40);
+    if (heat > 0) {
+      ctx.fillStyle = `rgba(255,${110 + 70 * heat},60,${0.25 * heat})`;
+      ctx.beginPath(); ctx.ellipse(-40, 6, 30, 12, 0.2, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+    // smoke: thinning as it cools
+    if (heat > 0 && Math.random() < 0.5) {
+      this.addParticle(j.x + rand(-30, 30), j.y + rand(-16, 16),
+        rand(-14, 14), rand(-46, -14), rand(0.8, 1.7), rand(4, 9),
+        heat > 0.5 ? '#3a3a3a' : '#6f7376', true);
+    }
+    ctx.fillStyle = 'rgba(255,150,140,0.8)';
+    ctx.font = 'bold 10px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`WRECK · ${j.serial ?? 'AIRFRAME LOST'}`, j.x, j.y - 84);
+    ctx.textAlign = 'left';
+  }
+
+  /**
+   * The airframes, drawn in their own pass ABOVE the ground war. A tank must never be
+   * painted over an aircraft: whatever is on the ground is below the aircraft, always.
+   */
+  private drawArmyAircraft(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    const on = (x: number, y: number, pad = 220) =>
+      x > camX - pad && x < camX + this.w + pad && y > camY - pad && y < camY + this.h + pad;
+    // Interceptors: modelled on a real fifth-generation fighter — long nose, diamond
+    // wing, canted twin tails, twin engines — and big enough to read from the ground.
+    for (const j of this.armyJets) {
+      if (!on(j.x, j.y, 300)) continue;
+      const flying = j.state !== 'parked' && !j.wreck && !j.manned;
+      // Squadron aces fly a heavier airframe: a longer wingspan reads at a glance.
+      const scale = j.ace ? 2.42 : flying ? 2.1 : 2.1;
+      /* A WRECK IS A WRECK. A shot-down hull is drawn burnt, canted over on one wing and
+       * smoking where it lies — nobody can mistake it for a serviceable aircraft, and
+       * there is no board prompt on it. */
+      if (j.wreck) {
+        this.drawJetWreck(ctx, j);
+        continue;
+      }
+      if (this.playerJet === j) {
+        // the operative's own airframe sits in a cold pool of light, so it can be found
+        // in a four-aircraft dogfight without looking at the HUD
+        const glow = ctx.createRadialGradient(j.x, j.y, 10, j.x, j.y, 130);
+        glow.addColorStop(0, 'rgba(150,235,255,0.09)');
+        glow.addColorStop(1, 'rgba(150,235,255,0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath(); ctx.arc(j.x, j.y, 130, 0, TAU); ctx.fill();
+      }
+      if (this.playerJet === j || flying) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.28)';
+        ctx.beginPath();
+        ctx.ellipse(j.x, j.y + (j.alt * 0.22) + 6, 96, 34, j.ang, 0, TAU);
+        ctx.fill();
+        ctx.restore();
+      }
+      this.drawFighter(ctx, j.x, j.y, j.ang, this.playerJet === j ? j.alt : flying ? j.alt : 0,
+        scale, this.playerJet === j ? (j.boost || 0) : flying ? 0.35 : 0, this.playerJet === j,
+        !this.playerJet && !flying, j.tier,
+        this.playerJet === j ? (j.missiles ?? 0) : 0, !!j.ace, 1 - j.hp / Math.max(1, j.maxHp));
+      if (this.playerJet === j || flying) {
+        const frac = Math.max(0, j.hp / j.maxHp);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(j.x - 40, j.y - 96, 80, 6);
+        ctx.fillStyle = frac > 0.4 ? '#ffd8a0' : '#ff7a6a';
+        ctx.fillRect(j.x - 40, j.y - 96, 80 * frac, 6);
+      }
+      if (this.playerJet === j) {
+        // The cockpit overlay in drawJetOverlay carries the instruments; the only thing
+        // worth drawing over the airframe is the burner flame it is already inside.
+      } else if (!flying && !j.wreck && !this.playerJet && this.nearArmyJet() === j) {
+        ctx.fillStyle = j.tier === 'prototype' ? 'rgba(255,222,160,0.95)'
+          : j.tier === 'frostwing' ? 'rgba(200,246,255,0.98)' : 'rgba(200,240,255,0.9)';
+        ctx.font = 'bold 12px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(j.ready ? 'F · BOARD'
+          : j.tier === 'prototype' ? 'F · ORDER PROTOTYPE OUT'
+          : j.tier === 'frostwing' ? 'F · ORDER THE FROSTWING OUT'
+          : 'F · ORDER TAKE-OFF', j.x, j.y - 96);
+        ctx.textAlign = 'left';
+      } else if (!flying && j.tier === 'frostwing' && on(j.x, j.y, 60)) {
+        ctx.fillStyle = 'rgba(190,244,255,0.85)';
+        ctx.font = 'bold 10px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('FROSTWING', j.x, j.y - 92);
+        ctx.textAlign = 'left';
+      } else if (!flying && j.tier === 'prototype' && on(j.x, j.y, 60)) {
+        // Even from a distance the experimental machine is marked, so it can be found.
+        ctx.fillStyle = 'rgba(223,189,120,0.75)';
+        ctx.font = 'bold 10px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('PROTOTYPE', j.x, j.y - 92);
+        ctx.textAlign = 'left';
+      }
+    }
+
+    /* GROUND CREW, on foot, on their way to the aircraft. This is the visible first link of
+     * the take-off chain: if nobody walks out, nothing flies. */
+    for (const c of this.launchCrew) {
+      if (!on(c.x, c.y, 60)) continue;
+      const bob = Math.sin(c.t * 9) * 1.6;
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.beginPath(); ctx.ellipse(2, 8, 9, 5, 0, 0, TAU); ctx.fill();
+      // hi-vis vest and a helmet, not a soldier: these are the fitters and the pilot
+      ctx.fillStyle = c.kind === 'pilot' ? '#8fb9c8' : '#d8c07a';
+      ctx.beginPath(); ctx.roundRect(-6, -6 + bob, 12, 15, 4); ctx.fill();
+      ctx.fillStyle = c.kind === 'pilot' ? '#4d6d78' : '#8a7434';
+      ctx.beginPath(); ctx.arc(0, -9 + bob, 5.2, 0, TAU); ctx.fill();
+      ctx.fillStyle = 'rgba(232,246,255,0.85)';
+      ctx.beginPath(); ctx.arc(-1.2, -10 + bob, 2.1, 0, TAU); ctx.fill();
+      ctx.restore();
+    }
+
+  }
+
   /** Emplacements, jets, the base banner: everything that belongs to the army. */
   private drawArmyWorks(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     // Interceptors are not tied to a base: a jet taken out of the glacier flies wherever it
@@ -11977,9 +12707,9 @@ export class Game {
         if (!on(b.x, b.y, 400)) continue;
         const k = Math.max(0, b.t / 0.55);
         ctx.strokeStyle = pjTrail && pjTrail.tier === 'frostwing'
-          ? `rgba(196,246,255,${0.34 * k})`
-          : `rgba(198,224,240,${0.28 * k})`;
-        ctx.lineWidth = 2 + 12 * k;
+          ? `rgba(186,236,246,${0.22 * k})`
+          : `rgba(176,206,222,${0.17 * k})`;
+        ctx.lineWidth = 2 + 7 * k;
         ctx.lineCap = 'round';
         ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
       }
@@ -12111,68 +12841,6 @@ export class Game {
       ctx.fillText(`${l.label} · ${Math.round(d)}m`, l.x, l.y - 38);
       ctx.textAlign = 'left';
       ctx.restore();
-    }
-
-    // Interceptors: modelled on a real fifth-generation fighter — long nose, diamond
-    // wing, canted twin tails, twin engines — and big enough to read from the ground.
-    for (const j of this.armyJets) {
-      if (!on(j.x, j.y, 300)) continue;
-      const flying = j.state !== 'parked' && !j.manned;
-      // Squadron aces fly a heavier airframe: a longer wingspan reads at a glance.
-      const scale = j.ace ? 2.42 : flying ? 2.1 : 2.1;
-      if (this.playerJet === j) {
-        // the operative's own airframe sits in a cold pool of light, so it can be found
-        // in a four-aircraft dogfight without looking at the HUD
-        const glow = ctx.createRadialGradient(j.x, j.y, 10, j.x, j.y, 130);
-        glow.addColorStop(0, 'rgba(150,235,255,0.18)');
-        glow.addColorStop(1, 'rgba(150,235,255,0)');
-        ctx.fillStyle = glow;
-        ctx.beginPath(); ctx.arc(j.x, j.y, 130, 0, TAU); ctx.fill();
-      }
-      if (this.playerJet === j || flying) {
-        ctx.save();
-        ctx.fillStyle = 'rgba(0,0,0,0.28)';
-        ctx.beginPath();
-        ctx.ellipse(j.x, j.y + (j.alt * 0.22) + 6, 96, 34, j.ang, 0, TAU);
-        ctx.fill();
-        ctx.restore();
-      }
-      this.drawFighter(ctx, j.x, j.y, j.ang, this.playerJet === j ? j.alt : flying ? j.alt : 0,
-        scale, this.playerJet === j ? (j.boost || 0) : flying ? 0.35 : 0, this.playerJet === j,
-        !this.playerJet && !flying, j.tier,
-        this.playerJet === j ? (j.missiles ?? 0) : 0, !!j.ace, 1 - j.hp / Math.max(1, j.maxHp));
-      if (this.playerJet === j || flying) {
-        const frac = Math.max(0, j.hp / j.maxHp);
-        ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fillRect(j.x - 40, j.y - 96, 80, 6);
-        ctx.fillStyle = frac > 0.4 ? '#ffd8a0' : '#ff7a6a';
-        ctx.fillRect(j.x - 40, j.y - 96, 80 * frac, 6);
-      }
-      if (this.playerJet === j) {
-        // The cockpit overlay in drawJetOverlay carries the instruments; the only thing
-        // worth drawing over the airframe is the burner flame it is already inside.
-      } else if (!flying && !this.playerJet && this.nearArmyJet() === j) {
-        ctx.fillStyle = j.tier === 'prototype' ? 'rgba(255,222,160,0.95)'
-          : j.tier === 'frostwing' ? 'rgba(200,246,255,0.98)' : 'rgba(200,240,255,0.9)';
-        ctx.font = 'bold 12px ui-monospace, monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(j.tier === 'prototype' ? 'F · SEIZE PROTOTYPE'
-          : j.tier === 'frostwing' ? 'F · FLY THE FROSTWING' : 'F · SEIZE', j.x, j.y - 96);
-        ctx.textAlign = 'left';
-      } else if (!flying && j.tier === 'frostwing' && on(j.x, j.y, 60)) {
-        ctx.fillStyle = 'rgba(190,244,255,0.85)';
-        ctx.font = 'bold 10px ui-monospace, monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText('FROSTWING', j.x, j.y - 92);
-        ctx.textAlign = 'left';
-      } else if (!flying && j.tier === 'prototype' && on(j.x, j.y, 60)) {
-        // Even from a distance the experimental machine is marked, so it can be found.
-        ctx.fillStyle = 'rgba(223,189,120,0.75)';
-        ctx.font = 'bold 10px ui-monospace, monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText('PROTOTYPE', j.x, j.y - 92);
-        ctx.textAlign = 'left';
-      }
     }
 
     // base signage on the approach and over the parade ground
@@ -15839,6 +16507,110 @@ export class Game {
       ctx.fillStyle = `rgba(${this.flashColor},${clamp(this.flash, 0, 1) * 0.45})`;
       ctx.fillRect(0, 0, this.w, this.h);
     }
+  }
+
+  /** The take-off chain, drawn as a checklist so no link is invisible. */
+  private drawLaunchHud(ctx: CanvasRenderingContext2D) {
+    const L = this.launch;
+    if (!L) return;
+    const steps: { key: 'walk' | 'board' | 'taxi' | 'roll'; label: string }[] = [
+      { key: 'walk', label: 'CREW TO AIRFRAME' },
+      { key: 'board', label: 'BOARD' },
+      { key: 'taxi', label: 'TAXI' },
+      { key: 'roll', label: 'TAKE-OFF ROLL' },
+    ];
+    const order = steps.map((x) => x.key);
+    const at = order.indexOf(L.phase);
+    ctx.save();
+    ctx.translate(this.w / 2, this.h - (this.isTouch ? 210 : 148));
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 12px ui-monospace, monospace';
+    const banner = `${L.serial} · TAKE-OFF CHAIN`;
+    ctx.fillStyle = 'rgba(6,12,14,0.62)';
+    const width = Math.max(320, banner.length * 8 + 60);
+    ctx.fillRect(-width / 2, -26, width, 64);
+    ctx.fillStyle = '#9fe8ff';
+    ctx.fillText(banner, 0, -8);
+    let x = -width / 2 + 22;
+    for (let i = 0; i < steps.length; i++) {
+      const done = i < at, active = i === at;
+      ctx.fillStyle = done ? '#7cf6d4' : active ? '#ffd166' : 'rgba(190,220,230,0.35)';
+      ctx.textAlign = 'left';
+      ctx.fillText(`${done ? '✓' : active ? '▸' : '·'} ${steps[i].label}`, x, 16);
+      x += steps[i].label.length * 8 + 34;
+    }
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(190,220,230,0.6)';
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillText('F · ABORT THE ORDER', 0, 32);
+    ctx.restore();
+    void ctx.canvas;
+  }
+
+  /** After a ditching: the wing is on the ground and the operative is in a boat. */
+  private drawRecallHud(ctx: CanvasRenderingContext2D) {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 13px ui-monospace, monospace';
+    ctx.fillStyle = 'rgba(8,16,20,0.66)';
+    const w = 380, h = 52;
+    ctx.fillRect(this.w / 2 - w / 2, this.h - (this.isTouch ? 280 : 216), w, h);
+    ctx.fillStyle = '#ff9d9d';
+    ctx.fillText('AIR OPERATIONS SUSPENDED', this.w / 2, this.h - (this.isTouch ? 262 : 198));
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillStyle = '#a9ecff';
+    ctx.fillText('ALL AIRCRAFT RECALLED · W/S THROTTLE IN THE BOAT', this.w / 2, this.h - (this.isTouch ? 246 : 182));
+    ctx.restore();
+  }
+
+  /**
+   * The first-time card. The simulation is frozen while this is up (see update()), so it is
+   * a genuine pause with instructions, not a banner that scrolls away.
+   */
+  private drawTutorial(ctx: CanvasRenderingContext2D) {
+    const card = this.tutorial;
+    if (!card) return;
+    ctx.save();
+    ctx.fillStyle = 'rgba(4,8,10,0.78)';
+    ctx.fillRect(0, 0, this.w, this.h);
+    const wide = Math.min(this.w - 80, 760);
+    const lineH = 24;
+    const h = 132 + card.lines.length * lineH;
+    const x = (this.w - wide) / 2, y = (this.h - h) / 2;
+    ctx.fillStyle = 'rgba(8,16,20,0.94)';
+    ctx.fillRect(x, y, wide, h);
+    ctx.strokeStyle = 'rgba(150,235,255,0.7)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 0.5, y + 0.5, wide - 1, h - 1);
+    // corner ticks: the same language as the rest of the HUD
+    ctx.strokeStyle = 'rgba(150,235,255,0.95)';
+    ctx.lineWidth = 3;
+    for (const [sx, sy] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) {
+      ctx.beginPath();
+      ctx.moveTo(x + sx * wide, y + sy * h - sy * 22);
+      ctx.lineTo(x + sx * wide, y + sy * h);
+      ctx.lineTo(x + sx * wide - sx * 22, y + sy * h);
+      ctx.stroke();
+    }
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#9fe8ff';
+    ctx.font = 'bold 13px ui-monospace, monospace';
+    ctx.fillText('FIELD MANUAL / NEW EQUIPMENT', x + 32, y + 40);
+    ctx.fillStyle = '#eaf8ff';
+    ctx.font = 'bold 24px ui-monospace, monospace';
+    ctx.fillText(card.title, x + 32, y + 76);
+    ctx.font = '14px ui-monospace, monospace';
+    card.lines.forEach((line, i) => {
+      ctx.fillStyle = i === 0 ? '#cfe8ff' : '#a9c2cf';
+      ctx.fillText(`·  ${line}`, x + 32, y + 112 + i * lineH);
+    });
+    const pulse = 0.55 + Math.sin(this.simulationTime * 4) * 0.35;
+    ctx.fillStyle = `rgba(255,209,102,${pulse})`;
+    ctx.font = 'bold 12px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(card.hint, x + wide / 2, y + h - 20);
+    ctx.textAlign = 'left';
+    ctx.restore();
   }
 
   private drawThreatArrows(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
