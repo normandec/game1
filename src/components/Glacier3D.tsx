@@ -80,6 +80,11 @@ interface Escort {
 }
 
 export default function Glacier3D({ onExit }: Props) {
+  /* Escape is a real pause in here: this level runs its own simulation and the surface
+   * pause screen cannot reach it. */
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
+  pausedRef.current = paused;
   const host = useRef<HTMLDivElement>(null);
   const [hud, setHud] = useState({
     hp: 100, kills: 0, foes: 0, escorts: 0, phase: 'gate' as Phase,
@@ -1456,6 +1461,18 @@ export default function Glacier3D({ onExit }: Props) {
     const onKeyDown = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
       if (['w', 'a', 's', 'd', ' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        const next = !pausedRef.current;
+        pausedRef.current = next;
+        setPaused(next);
+        if (next) {
+          for (const key of Object.keys(keys)) keys[key] = false;
+          if (document.pointerLockElement) document.exitPointerLock?.();
+        }
+        return;
+      }
+      if (pausedRef.current) return;
       keys[k] = true;
       if (k === 'f' || k === 'e') interact();
     };
@@ -1562,6 +1579,8 @@ export default function Glacier3D({ onExit }: Props) {
     /* ---------------- loop ---------------- */
     const tick = (now: number) => {
       raf = requestAnimationFrame(tick);
+      // Paused in the ice: the guard battalion holds position until the operative resumes.
+      if (pausedRef.current) { last = now; renderer.render(scene, camera); return; }
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       state.t += dt;
@@ -1845,6 +1864,16 @@ export default function Glacier3D({ onExit }: Props) {
   return (
     <div className="absolute inset-0 z-40 bg-[#0a1620]">
       <div ref={host} className="absolute inset-0" />
+      {paused && (
+        <div className="absolute inset-0 z-50 grid place-items-center bg-[#040a0fee] font-mono">
+          <div className="border border-cyan-200/40 bg-[#071820f2] px-10 py-7 text-center">
+            <p className="text-[10px] tracking-[0.5em] text-cyan-300/70">GLACIER VAULT · SIMULATION HALTED</p>
+            <h2 className="mt-2 text-2xl font-bold tracking-[0.3em] text-cyan-50">PAUSED</h2>
+            <p className="mt-3 text-[11px] tracking-[0.25em] text-cyan-200/70">ESC TO RESUME</p>
+            <p className="mt-1 text-[10px] tracking-[0.2em] text-cyan-200/40">THE ICE GUARD IS STANDING STILL</p>
+          </div>
+        </div>
+      )}
       {/* cold vignette */}
       <div className="pointer-events-none absolute inset-0" style={{
         background: 'radial-gradient(ellipse at 50% 45%, rgba(210,244,255,0) 35%, rgba(60,120,150,0.35) 100%)',

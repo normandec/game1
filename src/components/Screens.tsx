@@ -875,12 +875,19 @@ export function GameOverScreen({
         <div className="hud-panel clip-corner grid w-full max-w-md grid-cols-3 gap-2 p-4 text-center">
           <Stat label="Final Score" value={hud.score.toLocaleString()} />
           <Stat label="Wave" value={String(hud.wave)} />
-          <Stat label="Best Combo" value={`x${hud.mult}`} />
+          <Stat label="Best Combo" value={`x${hud.bestMult.toFixed(1)}`} />
         </div>
 
         {isBest && (
           <div className="animate-pulse-ring font-tech rounded-sm border border-amber-300/50 bg-amber-400/10 px-4 py-1 text-sm tracking-[0.3em] text-amber-300">
             ★ NEW RECORD ★
+          </div>
+        )}
+        {/* A run from the developer console never reaches the table, so the screen says so
+            instead of leaving the operative wondering why the score vanished. */}
+        {hud.devRun && (
+          <div className="font-tech rounded-sm border border-amber-500/35 bg-amber-500/5 px-4 py-1 text-[11px] tracking-[0.3em] text-amber-200/80">
+            DEV RUN · NOT RANKED
           </div>
         )}
 
@@ -934,6 +941,13 @@ export function VictoryScreen({
         {isBest && (
           <div className="animate-pulse-ring font-tech rounded-sm border border-amber-300/50 bg-amber-400/10 px-4 py-1 text-sm tracking-[0.3em] text-amber-300">
             ★ NEW RECORD ★
+          </div>
+        )}
+        {/* A run from the developer console never reaches the table, so the screen says so
+            instead of leaving the operative wondering why the score vanished. */}
+        {hud.devRun && (
+          <div className="font-tech rounded-sm border border-amber-500/35 bg-amber-500/5 px-4 py-1 text-[11px] tracking-[0.3em] text-amber-200/80">
+            DEV RUN · NOT RANKED
           </div>
         )}
         {build.length > 0 && <BuildBar build={build} />}

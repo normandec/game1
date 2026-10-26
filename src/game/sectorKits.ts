@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------ *
- * IRON VEIL — sector dressing
+ * PROTOCOL SOLAR ECLIPSE — sector dressing
  *
  * Every sector used to differ only by a colour palette and a weather tint. This module
  * gives each one its own ground, its own roadside clutter, its own regiment and its own

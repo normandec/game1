@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------ *
- * IRON VEIL — Power grid & defended generator/server complexes
+ * PROTOCOL SOLAR ECLIPSE — Power grid & defended generator/server complexes
  *
  * One parametric builder used by every important base: HQ, the air
  * station, Goliath logistics and the HELIOS sector plant. A yard is a
