@@ -272,6 +272,8 @@ interface Plough {
 /** A vehicle working a base circuit: convoy truck, staff car, fuel bowser, ambulance. */
 interface RoadCar {
   x: number; y: number; ang: number; speed: number;
+  /** The speed this driver is trying to hold: what the throttle aims at. */
+  cruise: number;
   kind: 'car' | 'humvee' | 'bus' | 'tanker' | 'ambulance' | 'truck';
   route: { x: number; y: number }[]; node: number;
   /** Metres of road held before the next one moves: convoys keep their spacing. */
@@ -282,6 +284,9 @@ interface RoadCar {
   brake: number; lean: number;
   /** Seconds spent with an obstruction ahead, so a stuck car eventually backs off. */
   jammed: number;
+  /** Reversing out of a jam, in seconds, and which way the wheel is turned while doing it. */
+  reversing?: number;
+  steerBias?: number;
   /** Hull integrity: traffic is scenery that burns, not an indestructible decal. */
   hp: number; maxHp: number;
   /** Seconds of smoke pouring off this wreck. */
@@ -399,6 +404,8 @@ interface Van {
   colour?: string;
   /** Seconds of smoke off a burnt-out requisitioned vehicle. */
   burning?: number;
+  /** Seconds the driver has been holding the brake at a standstill, before reverse bites. */
+  revHold?: number;
 }
 /** Capturable Hydra beam battery. Two hits will erase you. */
 interface Laser {
@@ -609,6 +616,16 @@ export class Game {
   ploughs: Plough[] = [];
   /** Moving traffic on the base roads and the annex ring road. */
   roadCars: RoadCar[] = [];
+  /**
+   * Made ground. The prison's sea mask runs from `SEA.x` eastwards, but the army district in
+   * sector 6 carries on over that line on reclaimed ground: the railhead, the silos and the
+   * naval yard are drawn as ordinary earth, so the mask has to agree with the picture. Without
+   * this the operative hit an invisible wall at x 12 205 and could never reach the whole
+   * eastern arm of the base. Populated when a sector's world is loaded, empty elsewhere.
+   */
+  dryLand: { x: number; y: number; w: number; h: number }[] = [];
+  /** Temporary diagnostics hook: null in play, set by the handling harness. */
+  roadDebug: ((c: RoadCar, info: Record<string, number | boolean>) => void) | null = null;
   /** Garrison routines currently playing out, drawn as little scenes. */
   routines: ArmyRoutine[] = [];
   routineT = 6;
@@ -1124,6 +1141,14 @@ export class Game {
     this.sitePower.clear(); this.gridOutput = 1;
     this.story = PROLOGUE; this.storyTime = 0;
     this.zones = world.zones;
+    this.dryLand = [];
+    {
+      const reg = (world as { army?: { region?: { x: number; y: number; w: number; h: number } } }).army?.region;
+      if (reg && reg.x + reg.w > SEA.x - 40) {
+        const x0 = Math.max(reg.x, SEA.x - 40);
+        this.dryLand.push({ x: x0, y: reg.y - 60, w: reg.x + reg.w - x0, h: reg.h + 120 });
+      }
+    }
     /* ---------------- sector dressing ---------------- */
     this.dressing = world.dressing;
     this.ploughs = world.dressing.ploughs.map((r) => {
@@ -1179,7 +1204,7 @@ export class Game {
         this.roadCars.push({
           x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f,
           ang: Math.atan2(b.y - a.y, b.x - a.x),
-          speed: 58 + rand(0, 44),
+          speed: 58 + rand(0, 44), cruise: 58 + rand(0, 44),
           kind: carKinds[(r * 3 + i) % carKinds.length],
           route, node: (Math.floor(seg) + 1) % n,
           wait: rand(0, 2.2), dead: false,
@@ -1230,9 +1255,11 @@ export class Game {
           if (d < bestD) { bestD = d; bx = px2; by = py2; bnode = (k + 1) % route.length; bang = Math.atan2(dy, dx); }
         }
         if (bestD > 900) continue;   // too far from any open road — leave it parked
+        // ...and it must not materialise on the roof of a car already on that circuit
+        if (this.roadCars.some((o) => Math.hypot(o.x - bx, o.y - by) < 140)) continue
         const hp = prop.kind === 'bus' || prop.kind === 'tanker' ? 260 : 170;
         this.roadCars.push({
-          x: bx, y: by, ang: bang, speed: 62 + rand(0, 40), kind: prop.kind,
+          x: bx, y: by, ang: bang, speed: 62 + rand(0, 40), cruise: 62 + rand(0, 40), kind: prop.kind,
           route, node: bnode, wait: rand(0, 3), dead: false, colour: prop.colour,
           light: rand(0, TAU), brake: 0, lean: 0, jammed: 0, hp, maxHp: hp, burning: 0, panic: 0,
         });
@@ -2208,7 +2235,9 @@ export class Game {
       turretsHeld: this.armyTurrets.filter((t) => t.owner === 'player').length,
       turretsTotal: this.armyTurrets.length,
       turretPrompt: nearTurret
-        ? (nearTurret.hp > nearTurret.maxHp * 0.45 ? 'SUPPRESS THE EMPLACEMENT · KEEP FIRING' : 'F · SEIZE THE TWIN GUN')
+        ? (nearTurret.hp > nearTurret.maxHp * 0.75
+          ? `TWIN GUN · ${Math.round((nearTurret.hp / nearTurret.maxHp) * 100)}% CREW MORALE · KEEP FIRING`
+          : 'F · SEIZE THE TWIN GUN')
         : '',
       dashPct: 1 - clamp(this.dashCd / (1.1 * this.mods.dashCdMul), 0, 1),
       enemiesLeft: this.enemies.filter((e) => !e.garrison).length + this.spawnQueue.length + carried + air + reserved,
@@ -2723,8 +2752,28 @@ export class Game {
         const p = ahead(dist, 0);
         if (this.pointBlocked(p.x, p.y)) obstruction = Math.max(obstruction, dist);
       }
+      /* The car in front is an obstruction too, but a temporary one. Two drivers who stop
+       * for each other used to lock the district solid: every car matched the stationary
+       * leader's zero, and because the fleet is spread around a closed circuit *every* car
+       * has a leader, so the ring never unwound. A driver now waits a beat and then squeezes
+       * past down the freer side of the lane, which is what actually happens on a base road
+       * when someone stops in it. */
+      let leaderGap = Infinity, leaderSpeed = 0;
+      for (const o of this.roadCars) {
+        if (o === c || o.dead || o.route !== c.route) continue;
+        const gap = Math.cos(c.ang) * (o.x - c.x) + Math.sin(c.ang) * (o.y - c.y);
+        if (gap <= 0 || gap > 190) continue;
+        if (Math.abs(Math.sin(c.ang) * (o.x - c.x) - Math.cos(c.ang) * (o.y - c.y)) >= 44) continue;
+        if (gap < leaderGap) { leaderGap = gap; leaderSpeed = o.speed; }
+      }
+      /* Two bodies that already overlap (a car that pulled out into a queue, a wreck that
+       * slid into one) must not hold each other still for ever: inside 30 m the leader is
+       * treated as history, so both drive on and simply separate. */
+      if (leaderGap < 30) { leaderGap = Infinity; leaderSpeed = 0; }
+      const queue = leaderGap < 140 && leaderSpeed < 14;
+      if (queue && leaderGap < 70) obstruction = Math.max(obstruction, 64);
       if (obstruction) {
-        c.jammed += dt;
+        c.jammed += dt * (queue ? 1.6 : 1);
         const leftClear = !this.pointBlocked(ahead(96, -0.65).x, ahead(96, -0.65).y);
         const rightClear = !this.pointBlocked(ahead(96, 0.65).x, ahead(96, 0.65).y);
         if (leftClear && !rightClear) want = c.ang - 0.75;
@@ -2733,25 +2782,35 @@ export class Game {
       } else if (c.jammed > 0) c.jammed = Math.max(0, c.jammed - dt * 2);
       const turn = ((want - c.ang + Math.PI * 3) % TAU) - Math.PI;
       c.ang += clamp(turn, -1.6 * dt, 1.6 * dt);
-      // spacing: never drive into the vehicle in front on the same circuit
       let blocked = c.wait > 0;
-      if (!blocked) for (const o of this.roadCars) {
-        if (o === c || o.dead || o.route !== c.route) continue;
-        const ahead = Math.cos(c.ang) * (o.x - c.x) + Math.sin(c.ang) * (o.y - c.y);
-        if (ahead > 0 && ahead < 96 && Math.abs(Math.sin(c.ang) * (o.x - c.x) - Math.cos(c.ang) * (o.y - c.y)) < 44) {
-          blocked = true; break;
-        }
-      }
+      if (leaderGap < 42) blocked = true;
       // and never drive through the operative
       const toPlayer = Math.cos(c.ang) * (this.px - c.x) + Math.sin(c.ang) * (this.py - c.y);
       if (toPlayer > 0 && toPlayer < 72 && Math.abs(Math.sin(c.ang) * (this.px - c.x) - Math.cos(c.ang) * (this.py - c.y)) < 46) blocked = true;
-      // Gunfire on the street empties it: drivers stand on the brakes with hazards on
-      // rather than cruising through a firefight as if nothing were happening.
-      const target = blocked || obstruction || c.panic > 0 ? 0 : c.speed * (1 - Math.min(0.6, Math.abs(turn)));
+      /* Throttle and brakes, not a multiplier. Every corner used to multiply a car's speed by
+       * up to 0.4 and every blockage set it to zero for good, so two turns into a lap the
+       * district's traffic was crawling, and a car the operative once stepped in front of
+       * never moved again. A driver now aims at the speed they actually want to hold, sheds
+       * a little for a tight corner and winds it back on once the road is clear. */
+      let desired = c.cruise * (1 - Math.min(0.25, Math.abs(turn) * 0.5));
+      if (obstruction) {
+        // creep around a stricken vehicle only once the wheel is actually turned aside
+        desired = Math.min(desired, clamp((Math.abs(turn) - 0.12) * 240, 0, 46));
+      }
+      if (!queue && leaderGap < Infinity && leaderGap < 44 + c.speed * 0.85) {
+        const closing = clamp((leaderGap - 42) / Math.max(1, c.speed * 0.85), 0, 1);
+        desired = Math.min(desired, leaderSpeed * (0.5 + 0.5 * closing));
+      }
+      if (blocked || c.panic > 0) desired = 0;
+      if (desired < 0) desired = 0;
       if (c.wait > 0) c.wait -= dt;
-      c.brake = lerp(c.brake, target < c.speed * 0.5 ? 1 : 0, Math.min(1, dt * 6));
+      if (this.roadDebug) this.roadDebug(c, { desired, blocked, obstruction, leaderGap, leaderSpeed, turn, wait: c.wait, panic: c.panic });
+      const rate = desired < c.speed ? 420 : 150;
+      c.speed += clamp(desired - c.speed, -rate * dt, rate * dt);
+      if (c.speed < 0.6) c.speed = 0;
+      c.brake = lerp(c.brake, desired < c.speed - 4 || c.speed === 0 ? 1 : 0, Math.min(1, dt * 6));
       c.lean = lerp(c.lean, clamp(turn * 0.9, -0.4, 0.4), Math.min(1, dt * 5));
-      const speed = target;
+      const speed = c.speed;
       if (speed > 0) {
         c.x += Math.cos(c.ang) * speed * dt;
         c.y += Math.sin(c.ang) * speed * dt;
@@ -2762,12 +2821,20 @@ export class Game {
             0.6, rand(2, 5), 'rgba(136,132,116,0.45)', true);
         }
       }
-      // A car that has been jammed for a while backs up a little and takes the other lane.
+      /* A jammed car reverses out and takes the other lane. It used to be teleported
+       * 46 m backwards in one frame, which read as a glitch rather than as driving; now it
+       * rolls back over about a second, wheel by wheel. */
       if (c.jammed > 2.2) {
+        c.reversing = 0.9;
         c.jammed = 0;
-        c.x -= Math.cos(c.ang) * 46;
-        c.y -= Math.sin(c.ang) * 46;
-        c.ang += (Math.random() < 0.5 ? -1 : 1) * 0.7;
+        c.steerBias = (Math.random() < 0.5 ? -1 : 1) * 0.55;
+      }
+      if ((c.reversing ?? 0) > 0) {
+        c.reversing = Math.max(0, (c.reversing ?? 0) - dt);
+        c.x -= Math.cos(c.ang) * 34 * dt;
+        c.y -= Math.sin(c.ang) * 34 * dt;
+        c.ang += (c.steerBias ?? 0) * dt;
+        c.brake = 1;
       }
       if (d < 60) c.node = (c.node + 1) % c.route.length;
       // a hit base scatters the traffic
@@ -3065,8 +3132,11 @@ export class Game {
       t.gap = t.heavy ? 0.055 : 0.07;
       t.flash = 0.09;
       t.muzzle = 1;
-      // Rounds leave the barrel tips, not the middle of the pit where the sandbags are.
-      const mx = t.x + Math.cos(t.ang) * 44, my = t.y + Math.sin(t.ang) * 44;
+      /* Rounds leave the barrel tips. They used to be born 44 m from the mount, which was
+       * inside the 92 m bunker the emplacement was built out of — every burst detonated on
+       * the pit's own wall a centimetre out of the barrel and the crew "shot itself". The
+       * muzzle is now 64 m out and nothing solid stands in the arc in front of it. */
+      const mx = t.x + Math.cos(t.ang) * 64, my = t.y + Math.sin(t.ang) * 64;
       // Ground and air are the same problem for a twin mount: no target class lock.
       for (const side of [-1, 1]) {
         const a = t.ang + rand(-0.008, 0.008);
@@ -3698,7 +3768,10 @@ export class Game {
     const t = this.armyTurrets.find((q) =>
       q.owner === 'enemy' && Math.hypot(q.x - this.px, q.y - this.py) < 150);
     if (!t) return false;
-    if (t.hp > t.maxHp * 0.45) {
+    /* A twin mount is taken when its crew has had enough, not when the steel is scrap:
+     * three-quarters of its armour gone and they abandon the pit. Waiting for 45% made
+     * the guns feel uncapturable, because the mount usually dies before it gets there. */
+    if (t.hp > t.maxHp * 0.75) {
       this.addText(t.x, t.y - 60, 'CREW STILL FIRING — SUPPRESS THE EMPLACEMENT', '#ffb08a', 14);
       return true;
     }
@@ -5609,22 +5682,54 @@ export class Game {
     const fwd = this.isTouch ? -joystick.y : (k['w'] || k['arrowup'] ? 1 : 0) - (k['s'] || k['arrowdown'] ? 1 : 0);
     const steer = this.isTouch ? joystick.x : (k['d'] || k['arrowright'] ? 1 : 0) - (k['a'] || k['arrowleft'] ? 1 : 0);
     v.boost = k['shift'] ? Math.min(1, v.boost + dt * 2) : Math.max(0, v.boost - dt * 1.5);
-    // A requisitioned staff car is not an armoured personnel carrier. Each body has its own
-    // top speed and its own weight in a collision; the Hydra transport keeps its old figure.
-    const profile = v.art === 'car' ? { top: 640, rev: -210, accel: 0.34, grip: 320, ram: 0.8 }
-      : v.art === 'humvee' ? { top: 540, rev: -180, accel: 0.3, grip: 300, ram: 1 }
-      : v.art === 'ambulance' ? { top: 520, rev: -170, accel: 0.28, grip: 290, ram: 0.9 }
-      : v.art === 'truck' ? { top: 360, rev: -120, accel: 0.18, grip: 240, ram: 1.35 }
-      : v.art === 'bus' ? { top: 395, rev: -130, accel: 0.2, grip: 250, ram: 1.25 }
-      : v.art === 'tanker' ? { top: 345, rev: -110, accel: 0.17, grip: 230, ram: 1.5 }
-      : { top: 451.5, rev: -150, accel: 0.22, grip: 260, ram: 1 };
-    const top = profile.top + v.boost * profile.top * 0.45;
-    const target = fwd > 0 ? top : fwd < 0 ? profile.rev : 0;
-    v.speed = lerp(v.speed, target, 1 - Math.pow(fwd !== 0 ? profile.accel : 0.05, dt));
-    // steering authority scales with speed, like a real heavy vehicle
-    const grip = clamp(Math.abs(v.speed) / profile.grip, 0, 1);
-    v.ang += steer * 1.5 * grip * dt * Math.sign(v.speed || 1);
-    v.lean = lerp(v.lean, steer * grip * 0.4, 1 - Math.pow(0.01, dt));
+    /* A requisitioned staff car is not an armoured personnel carrier, and neither is it a
+     * go-kart. Each body has a top speed, a rate at which it can actually gain speed and a
+     * turning circle; a loaded tanker takes ten seconds to reach its cruise, a staff car
+     * four. The figures are in arena units per second squared, so they can be reasoned
+     * about: 260 u/s² is a brisk car, 95 is a laden lorry. */
+    const profile = v.art === 'car' ? { top: 545, rev: -200, accel: 240, brake: 620, turn: 1.25, ram: 0.8 }
+      : v.art === 'humvee' ? { top: 495, rev: -180, accel: 200, brake: 640, turn: 1.15, ram: 1 }
+      : v.art === 'ambulance' ? { top: 480, rev: -170, accel: 210, brake: 620, turn: 1.1, ram: 0.9 }
+      : v.art === 'truck' ? { top: 330, rev: -120, accel: 120, brake: 470, turn: 0.85, ram: 1.35 }
+      : v.art === 'bus' ? { top: 360, rev: -130, accel: 130, brake: 500, turn: 0.9, ram: 1.25 }
+      : v.art === 'tanker' ? { top: 315, rev: -110, accel: 105, brake: 440, turn: 0.8, ram: 1.5 }
+      : { top: 425, rev: -150, accel: 140, brake: 520, turn: 0.95, ram: 1 };
+    const top = profile.top + v.boost * profile.top * 0.4;
+    /* A vehicle changes direction through the gearbox, not through a sign flip. S while
+     * rolling forward is a brake; reverse only engages once the wheels have stopped. */
+    const movingFwd = v.speed > 8, movingBack = v.speed < -8;
+    let target = 0, rate = 0;
+    if (fwd > 0) {
+      v.revHold = 0;
+      if (movingBack) { target = 0; rate = profile.brake; }
+      else { target = top; rate = profile.accel; }
+    } else if (fwd < 0) {
+      /* S on a moving vehicle is the brake, and reverse has to be *selected*: a driver
+       * comes to a stop, the box slips into reverse, and only then does the car creep back.
+       * Without that beat a staff car went straight from 500 u/s forward to 200 u/s
+       * backwards through zero, which looked like a bug in the physics rather than a gear
+       * change. */
+      if (movingFwd) { target = 0; rate = profile.brake; }
+      else {
+        v.revHold = (v.revHold ?? 0) + dt;
+        if (v.revHold < 0.3 && v.speed > -6) { target = 0; rate = profile.brake; }
+        else { target = profile.rev; rate = profile.accel * 0.55; }
+      }
+    } else {
+      v.revHold = 0;
+      // engine braking and rolling resistance: a heavy vehicle carries its speed
+      target = 0;
+      rate = v.art === 'tanker' || v.art === 'bus' || v.art === 'truck' ? 70 : 110;
+    }
+    const dv = target - v.speed;
+    v.speed += clamp(dv, -rate * dt, rate * dt);
+    /* Steering: authority builds from walking pace to a mid-speed peak and then falls off,
+     * because a real vehicle's turning circle grows with speed. A parked one does not turn
+     * at all, which is exactly what the old linear scale got wrong. */
+    const spd = Math.abs(v.speed);
+    const authority = clamp(spd / 90, 0, 1) * clamp(1.25 - (spd / profile.top) * 0.5, 0.35, 1.15);
+    v.ang += steer * profile.turn * authority * dt * Math.sign(v.speed || 1);
+    v.lean = lerp(v.lean, steer * authority * 0.4, 1 - Math.pow(0.01, dt));
 
     const probe = { x: v.x + Math.cos(v.ang) * v.speed * dt, y: v.y + Math.sin(v.ang) * v.speed * dt };
     // A van is not a boat: the shoreline is a wall.
@@ -6550,6 +6655,9 @@ export class Game {
   /** Walkable ground: keeps beat nodes off the open sea and off the beach waterline. */
   private onDryGround(x: number, y: number, margin = 0) {
     if (x < SEA.x) return true;
+    for (const p of this.dryLand) {
+      if (x > p.x && x < p.x + p.w && y > p.y + margin && y < p.y + p.h - margin) return true;
+    }
     if (x > COAST.x && x < COAST.x + COAST.w && y > COAST.y && y < COAST.y + COAST.h) return true;
     if (x > BRIDGEHEAD.x && x < BRIDGEHEAD.x + BRIDGEHEAD.w && y > BRIDGEHEAD.y && y < BRIDGEHEAD.y + BRIDGEHEAD.h) return true;
     // keep a parapet's width clear so a beat never clips the railing
@@ -11851,11 +11959,12 @@ export class Game {
       ctx.fillRect(t.x - 28, t.y - 52, 56, 6);
       ctx.fillStyle = frac > 0.45 ? (mine ? '#7fe0ff' : '#e0c070') : '#ff8f6a';
       ctx.fillRect(t.x - 28, t.y - 52, 56 * frac, 6);
-      if (!mine && frac <= 0.45) {
-        ctx.fillStyle = 'rgba(180,240,255,0.9)';
+      if (!mine && frac <= 0.75) {
+        const canSeize = Math.hypot(t.x - this.px, t.y - this.py) < 150;
+        ctx.fillStyle = canSeize ? 'rgba(190,250,255,0.95)' : 'rgba(180,240,255,0.55)';
         ctx.font = 'bold 10px ui-monospace, monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('F · SEIZE', t.x, t.y - 60);
+        ctx.fillText(canSeize ? 'F · SEIZE' : 'CREW SHAKEN', t.x, t.y - 60);
         ctx.textAlign = 'left';
       }
     }
@@ -13390,20 +13499,16 @@ export class Game {
 
       // material detailing
       if (o.kind === 'tank') {
-        // tracks, hull, turret and a long main gun — readable from above
-        ctx.fillStyle = '#232a21';
-        ctx.fillRect(o.x + 4, o.y + 4, 22, o.h - 8);
-        ctx.fillRect(o.x + o.w - 26, o.y + 4, 22, o.h - 8);
-        ctx.fillStyle = '#3d4736';
-        ctx.fillRect(o.x + 30, o.y + 12, o.w - 60, o.h - 24);
-        const cxT = o.x + o.w / 2, cyT = o.y + o.h / 2;
-        ctx.fillStyle = '#525f45';
-        ctx.beginPath(); ctx.arc(cxT, cyT, Math.min(o.w, o.h) * 0.26, 0, TAU); ctx.fill();
-        ctx.fillStyle = '#20261d';
-        ctx.fillRect(cxT + o.w * 0.2, cyT - 4, o.w * 0.34, 8);
-        ctx.strokeStyle = 'rgba(200,220,160,0.35)';
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(o.x + 30, o.y + 12, o.w - 60, o.h - 24);
+        /* A parked hull, drawn as a hull rather than as a green box.
+         *
+         * Ninety of these stand in the armour park and the boneyard, so the shape has to
+         * carry: skirting over the tracks, road wheels and track links, a sloped glacis,
+         * stowage on the deck, a turret with a mantlet, a long gun with a muzzle brake,
+         * a commander's cupola and an antenna. The bar on top is its armour, and it only
+         * appears once the hull has been hit, because a pristine park with ninety health
+         * bars over it reads as a debug overlay.
+         */
+        this.drawHullRect(ctx, o);
       } else if (o.kind === 'barrel') {
         ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.arc(o.x + o.w / 2, o.y + o.h / 2, o.w * 0.34, 0, TAU); ctx.stroke();
@@ -13882,6 +13987,157 @@ export class Game {
     }
   }
 
+  /**
+   * A parked hull in plan view.
+   *
+   * The armour park, the boneyard and the ranges hold about a hundred of these, every one
+   * of them an axis-aligned rect, so the shape has to do all the work: skirting over the
+   * tracks, road wheels and links, a sloped glacis, deck stowage, a turret with a mantlet
+   * and a long gun with a muzzle brake, a cupola and a whip antenna. Camouflage and grime
+   * are keyed off the rect's own position, so two hulls side by side are never identical
+   * and nothing shimmers between frames.
+   */
+  private drawHullRect(ctx: CanvasRenderingContext2D, o: Rect) {
+    const alongX = o.w >= o.h;
+    const L = alongX ? o.w : o.h;            // length, nose to tail
+    const Wd = alongX ? o.h : o.w;           // width over the tracks
+    if (L < 40 || Wd < 24) return;
+    const seed = Math.abs(Math.sin(o.x * 0.013 + o.y * 0.007) * 10000) % 1;
+    const hull = o.tint || '#4a5340';
+    const wrecked = (o.hp ?? 1) <= 0 || !!o.dead;
+    const burnt = wrecked || (o.hp !== undefined && o.maxHp !== undefined && o.hp < (o.maxHp ?? 1) * 0.25);
+    ctx.save();
+    ctx.translate(o.x + o.w / 2, o.y + o.h / 2);
+    if (!alongX) ctx.rotate(Math.PI / 2);
+    const hl = L / 2, hw = Wd / 2;
+    const track = Wd * 0.21;
+    const bodyH = Wd * 0.56;
+    const turretR = Wd * 0.29;
+    // shadow on the concrete
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath(); ctx.ellipse(3, 6, hl * 0.96, hw * 0.95, 0, 0, TAU); ctx.fill();
+    // tracks: a dark run with links picked out, wheels showing at the top edge
+    for (const side of [-1, 1]) {
+      const ty = side * (hw - track / 2);
+      ctx.fillStyle = '#161a16';
+      ctx.beginPath(); ctx.roundRect(-hl + 4, ty - track / 2, L - 8, track, 4); ctx.fill();
+      ctx.fillStyle = '#39422f';
+      for (let i = 0; i < Math.floor((L - 16) / 12); i++) {
+        ctx.fillRect(-hl + 9 + i * 12, ty - track / 2 + 2, 7, track - 4);
+      }
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.roundRect(-hl + 4, ty - track / 2, L - 8, track, 4); ctx.stroke();
+    }
+    // hull: a slab between the tracks with a squared glacis at the nose
+    ctx.fillStyle = shade(hull, -6);
+    ctx.beginPath(); ctx.roundRect(-hl + 8, -bodyH / 2, L - 12, bodyH, 4); ctx.fill();
+    ctx.fillStyle = shade(hull, 8);
+    ctx.beginPath(); ctx.roundRect(-hl + 11, -bodyH / 2 + 2.5, L - 18, bodyH - 5, 3); ctx.fill();
+    // glacis: the sloped front plate, lighter, catching the sky
+    ctx.fillStyle = shade(hull, 20);
+    ctx.beginPath();
+    ctx.moveTo(hl - L * 0.16, -bodyH / 2 + 2);
+    ctx.lineTo(hl - 3, -bodyH * 0.3);
+    ctx.lineTo(hl - 3, bodyH * 0.3);
+    ctx.lineTo(hl - L * 0.16, bodyH / 2 - 2);
+    ctx.closePath(); ctx.fill();
+    // camouflage: small, low-contrast patches only
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(-hl + 11, -bodyH / 2 + 2.5, L - 18, bodyH - 5, 3); ctx.clip();
+    for (let i = 0; i < 6; i++) {
+      const a = Math.sin(seed * 91 + i * 37) * 0.5 + 0.5;
+      const b = Math.sin(seed * 53 + i * 17) * 0.5 + 0.5;
+      ctx.fillStyle = i % 2 ? 'rgba(24,30,22,0.22)' : 'rgba(132,140,110,0.16)';
+      ctx.beginPath();
+      ctx.ellipse(-hl + 22 + a * (L - 44), -bodyH * 0.28 + b * bodyH * 0.56,
+        7 + a * 9, 3 + b * 4, a * 1.6, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+    // fender stowage and engine grilles
+    ctx.fillStyle = 'rgba(16,22,16,0.45)';
+    for (let i = 0; i < 5; i++) ctx.fillRect(-hl + L * 0.1 + i * 6, bodyH * 0.04, 3.5, bodyH * 0.3);
+    ctx.fillStyle = 'rgba(150,158,132,0.16)';
+    ctx.fillRect(-hl + L * 0.08, -bodyH * 0.42, L * 0.2, bodyH * 0.13);
+    // tow hooks
+    ctx.fillStyle = 'rgba(12,16,12,0.75)';
+    ctx.fillRect(hl - 7, -bodyH * 0.3, 5, 4);
+    ctx.fillRect(hl - 7, bodyH * 0.3 - 4, 5, 4);
+    // turret: an octagonal cast shape with a bustle, ringed and shaded
+    const tx = L * 0.02;
+    const tr = turretR;
+    ctx.fillStyle = shade(hull, 18);
+    ctx.beginPath();
+    const pts: [number, number][] = [
+      [tx - tr * 1.15, -tr * 0.5], [tx - tr * 1.1, tr * 0.5], [tx - tr * 0.5, tr * 0.95],
+      [tx + tr * 0.55, tr * 0.95], [tx + tr * 1.0, tr * 0.42], [tx + tr * 1.0, -tr * 0.42],
+      [tx + tr * 0.55, -tr * 0.95], [tx - tr * 0.5, -tr * 0.95],
+    ];
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(12,16,12,0.55)';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    // turret ring and a lighter top plate
+    ctx.fillStyle = shade(hull, 4);
+    ctx.beginPath(); ctx.ellipse(tx - tr * 0.1, 0, tr * 0.72, tr * 0.62, 0, 0, TAU); ctx.fill();
+    // mantlet + gun, ending inside the hull's own cell
+    ctx.fillStyle = shade(hull, -24);
+    ctx.fillRect(tx + tr * 0.92, -tr * 0.28, tr * 0.5, tr * 0.56);
+    const gunLen = L * 0.34;
+    ctx.fillStyle = '#242b23';
+    ctx.fillRect(tx + tr * 1.2, -Wd * 0.027, gunLen, Wd * 0.054);
+    // bore evacuator
+    ctx.fillStyle = '#2e352c';
+    ctx.fillRect(tx + tr * 1.2 + gunLen * 0.42, -Wd * 0.042, Wd * 0.1, Wd * 0.084);
+    // muzzle brake
+    ctx.fillStyle = '#161b16';
+    ctx.fillRect(tx + tr * 1.2 + gunLen - 8, -Wd * 0.045, 10, Wd * 0.09);
+    ctx.fillStyle = 'rgba(206,216,188,0.14)';
+    ctx.fillRect(tx + tr * 1.2, -Wd * 0.025, gunLen - 8, 1.3);
+    // cupola, hatch, coax and whip antenna
+    ctx.fillStyle = shade(hull, 30);
+    ctx.beginPath(); ctx.arc(tx - tr * 0.5, -tr * 0.36, tr * 0.26, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(10,14,10,0.8)';
+    ctx.beginPath(); ctx.arc(tx - tr * 0.5, -tr * 0.36, tr * 0.12, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#1b201b';
+    ctx.beginPath(); ctx.arc(tx + tr * 0.25, -tr * 0.62, tr * 0.09, 0, TAU); ctx.fill();
+    ctx.strokeStyle = 'rgba(18,24,18,0.75)';
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(tx - tr * 1.25, -tr * 0.42);
+    ctx.quadraticCurveTo(tx - tr * 1.7, -tr * 0.85, tx - tr * 1.95, -tr * 1.3);
+    ctx.stroke();
+    // headlights and tail lamps
+    ctx.fillStyle = burnt ? '#3a3630' : '#ffe9a8';
+    ctx.fillRect(hl - 11, -bodyH * 0.34, 4, 4);
+    ctx.fillRect(hl - 11, bodyH * 0.22, 4, 4);
+    ctx.fillStyle = burnt ? '#4a2a24' : '#ff5d5d';
+    ctx.fillRect(-hl + 8, -bodyH * 0.34, 3, 3);
+    if (burnt) {
+      ctx.fillStyle = 'rgba(10,8,6,0.42)';
+      ctx.beginPath(); ctx.ellipse(tx - L * 0.06, 0, tr * 1.2, tr * 1.0, 0.4, 0, TAU); ctx.fill();
+      ctx.fillStyle = 'rgba(24,17,12,0.45)';
+      for (let i = 0; i < 5; i++) {
+        const a = Math.sin(seed * 71 + i * 13) * 0.5 + 0.5;
+        const b = Math.cos(seed * 37 + i * 29) * 0.5 + 0.5;
+        ctx.beginPath(); ctx.arc(-hl + 26 + a * (L - 64), -bodyH * 0.28 + b * bodyH * 0.56, 3.5 + a * 6, 0, TAU); ctx.fill();
+      }
+    }
+    ctx.restore();
+    // armour bar only once the hull has been hit
+    if (o.hp !== undefined && o.maxHp !== undefined && o.hp < o.maxHp) {
+      const frac = clamp(o.hp / o.maxHp, 0, 1);
+      const cx = o.x + o.w / 2, top = o.y - 12;
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      ctx.fillRect(cx - L * 0.3, top, L * 0.6, 5);
+      ctx.fillStyle = frac > 0.5 ? '#a8c48f' : frac > 0.22 ? '#ffd166' : '#ff6a5a';
+      ctx.fillRect(cx - L * 0.3, top, L * 0.6 * frac, 5);
+    }
+  }
+
   /** Convoy tanks: hull, tracks, turret and that very long main gun. */
   private drawTanks(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     for (const t of this.tanks) {
@@ -13944,17 +14200,25 @@ export class Game {
       ctx.beginPath(); ctx.arc(-98, 24, 4, 0, TAU); ctx.fill();
       ctx.restore();
 
-      // health bar — you can see how little you are actually hurting it
+      /* The bar and the label are information, not decoration: they appear when the hull
+       * is damaged or when the operative is close enough to act on it. Thirty-four hulls
+       * rolling out of the park used to stencil HYDRA TANK over the whole screen. */
       const frac = clamp(t.hp / t.maxHp, 0, 1);
-      ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(t.x - 62, t.y - 84, 124, 7);
-      ctx.fillStyle = frac > 0.5 ? '#a8c48f' : frac > 0.22 ? '#ffd166' : '#ff6a5a';
-      ctx.fillRect(t.x - 62, t.y - 84, 124 * frac, 7);
-      ctx.strokeStyle = 'rgba(230,255,220,0.35)'; ctx.lineWidth = 1;
-      ctx.strokeRect(t.x - 62, t.y - 84, 124, 7);
-      ctx.fillStyle = t.captured ? '#8be8ff' : '#e8b0b0';
-      ctx.font = '900 10px ui-monospace, monospace'; ctx.textAlign = 'center';
-      ctx.fillText(t.captured ? 'S.H.I.E.L.D. TANK' : 'HYDRA TANK / MAIN GUN', t.x, t.y - 94);
-      ctx.textAlign = 'left';
+      const nearHull = Math.hypot(t.x - this.px, t.y - this.py) < 300;
+      if (frac < 0.999) {
+        ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(t.x - 62, t.y - 84, 124, 7);
+        ctx.fillStyle = frac > 0.5 ? '#a8c48f' : frac > 0.22 ? '#ffd166' : '#ff6a5a';
+        ctx.fillRect(t.x - 62, t.y - 84, 124 * frac, 7);
+        ctx.strokeStyle = 'rgba(230,255,220,0.35)'; ctx.lineWidth = 1;
+        ctx.strokeRect(t.x - 62, t.y - 84, 124, 7);
+      }
+      if (nearHull) {
+        ctx.fillStyle = t.captured ? '#8be8ff' : '#e8b0b0';
+        ctx.font = '900 10px ui-monospace, monospace'; ctx.textAlign = 'center';
+        const armyHull = this.army && t.x > this.army.region.x && t.y > this.army.region.y;
+        ctx.fillText(t.captured ? 'S.H.I.E.L.D. TANK' : armyHull ? 'VOJSKA MBT / MAIN GUN' : 'HYDRA TANK / MAIN GUN', t.x, t.y - (frac < 0.999 ? 94 : 72));
+        ctx.textAlign = 'left';
+      }
     }
   }
 
@@ -13966,7 +14230,7 @@ export class Game {
    */
   private roadCarView(v: Van): RoadCar {
     return {
-      x: v.x, y: v.y, ang: v.ang, speed: v.speed,
+      x: v.x, y: v.y, ang: v.ang, speed: v.speed, cruise: v.speed,
       kind: v.art || 'car', route: [], node: 0, wait: 0,
       dead: false, colour: v.colour || '#7a7f6a', light: this.simulationTime * 2 + v.x * 0.01,
       brake: 0, lean: v.lean, jammed: 0, hp: v.hp, maxHp: v.maxHp, burning: 0, panic: 0,

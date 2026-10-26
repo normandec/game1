@@ -581,9 +581,32 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
   squad(core.x + core.w / 2, core.y + core.h / 2, 8, ['armyguard', 'armymajor', 'armyguard', 'armymedic'], 160);
 
   /* ---------------- TURRETS ---------------- */
+  /**
+   * A twin mount in a sandbagged pit.
+   *
+   * The emplacement used to be a 180 × 180 sandbag block with a 92 × 92 bunker inside it,
+   * and both were solid. That is a wall inside a wall: the crew stood in a box, the
+   * operative could not reach the mount to seize it, and — because the barrels only
+   * reached 44 m — every burst was born inside the bunker and died there. The pit is now
+   * a U of three low sandbag walls set well behind the muzzles, with the front open to
+   * the guns' arc. Nothing solid is ever drawn where a round is born.
+   */
   const turret = (x: number, y: number, ang: number, heavy: boolean) => {
-    add(x - 90, y - 90, 180, 180, 'sandbag', 22);
-    add(x - 46, y - 46, 92, 92, 'bunker', heavy ? 58 : 40, heavy ? '#4b5348' : '#464f45');
+    const dx = Math.cos(ang), dy = Math.sin(ang);
+    const alongX = Math.abs(dx) >= Math.abs(dy);
+    const sx = dx >= 0 ? 1 : -1;
+    const sy = dy >= 0 ? 1 : -1;
+    const wall = heavy ? 30 : 26;
+    if (alongX) {
+      // back wall behind the crew, two sidewalls, the muzzle side left open
+      add(x - sx * 150 - (sx > 0 ? 0 : wall), y - 110, wall, 220, 'sandbag', heavy ? 26 : 22);
+      add(x - 90, y - 128 + (sy > 0 ? 0 : 0), 200, wall, 'sandbag', heavy ? 26 : 22);
+      add(x - 90, y + 128 - wall, 200, wall, 'sandbag', heavy ? 26 : 22);
+    } else {
+      add(x - 110, y - sy * 150 - (sy > 0 ? 0 : wall), 220, wall, 'sandbag', heavy ? 26 : 22);
+      add(x - 128, y - 90, wall, 200, 'sandbag', heavy ? 26 : 22);
+      add(x + 128 - wall, y - 90, wall, 200, 'sandbag', heavy ? 26 : 22);
+    }
     turrets.push({ x, y, ang, heavy });
   };
   turret(CX - 520, inner.y - 120, Math.PI / 2, true);
