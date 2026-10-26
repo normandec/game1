@@ -88,6 +88,8 @@ export interface Rect {
 export interface Zone {
   x: number; y: number; w: number; h: number;
   kind: 'road' | 'concrete' | 'sand' | 'grass' | 'blood' | 'plaza' | 'helipad' | 'fuel' | 'runway' | 'parade'
+  /** Poured hardstanding: darker than the ground, with expansion joints. */
+  | 'apron'
   /** Flooded north-west lagoon that carries the prison island. Additive: drawn under everything. */
   | 'lagoon'
   /** Prison-island lawn: the same ground as grass, only greener so the island reads as land. */

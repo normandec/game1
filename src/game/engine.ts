@@ -10888,6 +10888,7 @@ export class Game {
     if (this.status !== 'over' && !this.piloting && !this.flyingPlane && !this.drivingVan
       && !this.playerTank && !this.playerJet && !launchHidden) this.drawPlayer(ctx);
     this.drawArmyWorks(ctx, camX, camY);
+    this.drawArmyLamps(ctx, camX, camY);
     if (this.playerHeli) this.drawPlayerHeli(ctx, camX, camY);
     this.drawTanks(ctx, camX, camY);
     this.drawVans(ctx, camX, camY);
@@ -11741,6 +11742,21 @@ export class Game {
           break;
         }
         case 'concrete': ctx.fillStyle = 'rgba(120,140,132,0.055)'; ctx.fillRect(z.x, z.y, z.w, z.h); break;
+        /* Poured hardstanding. Concrete used to be a 5 % wash, which left the whole army
+         * base the same olive as the fields around it: buildings floating on grass. A slab
+         * reads as a slab when it is darker than the dirt, jointed, and edged. */
+        case 'apron': {
+          ctx.fillStyle = 'rgba(30,34,32,0.42)';
+          ctx.fillRect(z.x, z.y, z.w, z.h);
+          ctx.strokeStyle = 'rgba(206,216,196,0.055)'; ctx.lineWidth = 1;
+          ctx.beginPath();
+          for (let jx = z.x + 220; jx < z.x + z.w; jx += 220) { ctx.moveTo(jx, z.y); ctx.lineTo(jx, z.y + z.h); }
+          for (let jy = z.y + 220; jy < z.y + z.h; jy += 220) { ctx.moveTo(z.x, jy); ctx.lineTo(z.x + z.w, jy); }
+          ctx.stroke();
+          ctx.strokeStyle = 'rgba(196,206,176,0.10)'; ctx.lineWidth = 2;
+          ctx.strokeRect(z.x + 1, z.y + 1, z.w - 2, z.h - 2);
+          break;
+        }
         case 'plaza':
           ctx.fillStyle = 'rgba(255,209,102,0.05)'; ctx.fillRect(z.x, z.y, z.w, z.h);
           ctx.strokeStyle = 'rgba(255,209,102,0.14)'; ctx.lineWidth = 2;
@@ -12645,6 +12661,35 @@ export class Game {
   }
 
   /** Emplacements, jets, the base banner: everything that belongs to the army. */
+  /**
+   * The base at night is a line of lights.
+   *
+   * Runway edge lamps, apron floodlights, the parade floodlights and the gate: each fixture
+   * in the district throws a pool on the concrete, so the compound reads as an installation
+   * under power instead of a scatter of shapes in the dark. Purely additive drawing — the
+   * fixtures exist in the world already, this only paints what they are for.
+   */
+  private drawArmyLamps(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    if (!this.army || this.sector < 6) return;
+    const pad = 200;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const o of this.obstacles) {
+      if (o.dead || o.kind !== 'lamp') continue;
+      if (o.x < camX - pad || o.x > camX + this.w + pad || o.y < camY - pad || o.y > camY + this.h + pad) continue;
+      const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+      const runway = o.w <= 16;
+      const r = runway ? 54 : 120;
+      const g = ctx.createRadialGradient(cx, cy, 2, cx, cy, r);
+      g.addColorStop(0, runway ? 'rgba(190,235,210,0.30)' : 'rgba(255,235,180,0.28)');
+      g.addColorStop(0.55, runway ? 'rgba(150,215,190,0.09)' : 'rgba(255,225,160,0.07)');
+      g.addColorStop(1, 'rgba(255,235,180,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.ellipse(cx, cy, r, r * 0.72, 0, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+  }
+
   private drawArmyWorks(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
     // Interceptors are not tied to a base: a jet taken out of the glacier flies wherever it
     // is parked, so the aircraft, its ordnance and its seeker are drawn in every sector.
