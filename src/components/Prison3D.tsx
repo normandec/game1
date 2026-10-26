@@ -14,6 +14,10 @@ const clampAbs = (v: number, m: number) => (v < -m ? -m : v > m ? m : v);
 interface Props {
   mode: PrisonMode;
   onExit: (stats: PrisonStats, escaped: boolean) => void;
+  /** The surface mute switch, so a silenced run stays silent inside the walls. */
+  muted?: boolean;
+  /** Fired when the player toggles sound in here, so the two switches stay in step. */
+  onMuteChange?: () => void;
 }
 
 interface Screen {
@@ -36,10 +40,18 @@ const EMPTY: Screen = {
   flashlight: false, weapon: 'M9 SIDEARM', cuffed: 0, hatchNear: false, hatchProgress: 0, muted: false,
 };
 
-export default function Prison3D({ mode, onExit }: Props) {
+export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const [screen, setScreen] = useState<Screen>(EMPTY);
   const [intro, setIntro] = useState(mode === 'arrest' ? 1 : 0.55);
+  /* A 3D level runs its own simulation on its own clock: the surface pause screen never
+   * reaches it, so the guards kept walking and shooting while the operative was in the
+   * menu. Escape now stops the level properly. */
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
+  pausedRef.current = paused;
+  const mutedRef = useRef(false);
+  mutedRef.current = !!muted;
   const [locked, setLocked] = useState(false);
   const [flashTap, setFlashTap] = useState(false);
   const simRef = useRef<PrisonSim | null>(null);
@@ -55,6 +67,10 @@ export default function Prison3D({ mode, onExit }: Props) {
     sim.wake();
     // Sound is synthesised, not loaded: no assets in a single-file build.
     const audio = new PrisonAudio();
+    // The surface mute switch governs the 3D levels too: it used to be forgotten the moment
+    // the operative was arrested, and every prison siren came back at full volume.
+    audio.setMuted(!!muted);
+    mutedRef.current = !!muted;
 
     const W = hostEl.clientWidth || 1280;
     const H = hostEl.clientHeight || 720;
@@ -780,16 +796,6 @@ export default function Prison3D({ mode, onExit }: Props) {
           return [
             { t: 'cyl', s: [0.9, 0.86, 0.9], o: [0, 0.45, 0], m: 'stone' },
             { t: 'cyl', s: [0.98, 0.08, 0.98], o: [0, 0.9, 0], m: 'stone' },
-          ];
-        case 'column':
-          // a poured pier: plinth, formwork seams, capital — reads as concrete, not a box
-          return [
-            { t: 'box', s: [1.26, 0.03, 1.26], o: [0, 0.015, 0], m: 'concrete' },
-            { t: 'box', s: [1.0, 0.46, 1.0], o: [0, 0.24, 0], m: 'concrete' },
-            { t: 'box', s: [1.09, 0.015, 1.09], o: [0, 0.468, 0], m: 'darkSteel' },
-            { t: 'box', s: [0.96, 0.45, 0.96], o: [0, 0.715, 0], m: 'concrete' },
-            { t: 'box', s: [1.05, 0.015, 1.05], o: [0, 0.945, 0], m: 'darkSteel' },
-            { t: 'box', s: [1.22, 0.04, 1.22], o: [0, 0.96, 0], m: 'concrete' },
           ];
         case 'lamp':
           return [
@@ -1683,8 +1689,20 @@ export default function Prison3D({ mode, onExit }: Props) {
     let firing = false;
     const onKeyDown = (e: KeyboardEvent) => {
       audio.ensure();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        const next = !pausedRef.current;
+        pausedRef.current = next;
+        setPaused(next);
+        if (next) {
+          for (const k of Object.keys(keys)) keys[k] = false;
+          if (document.pointerLockElement) document.exitPointerLock?.();
+        }
+        return;
+      }
+      if (pausedRef.current) return;
       keys[e.key.toLowerCase()] = true;
-      if (e.key === 'm' || e.key === 'M') audio.setMuted(!audio.muted);
+      if (e.key === 'm' || e.key === 'M') { audio.setMuted(!audio.muted); onMuteChange?.(); }
       if (e.key === 'e' || e.key === 'E') {
         const b = sim.useButton();
         if (!b) {
@@ -1743,6 +1761,9 @@ export default function Prison3D({ mode, onExit }: Props) {
 
     const tick = (now: number) => {
       raf = requestAnimationFrame(tick);
+      // Paused: the clock is reset and nothing in the level moves, so a guard cannot walk
+      // up to the operative while he is reading the pause card.
+      if (pausedRef.current) { last = now; renderer.render(scene, camera); return; }
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       if (intro > 0) setIntro((v) => Math.max(0, v - dt * 0.42));
@@ -2011,6 +2032,17 @@ export default function Prison3D({ mode, onExit }: Props) {
     <div className="absolute inset-0 z-30 bg-black">
       <div ref={host} className="absolute inset-0" />
       <div className="pointer-events-none absolute inset-0 select-none font-mono text-[#d6e6e6]">
+        {/* pause card: the level is genuinely stopped, not just unfocused */}
+        {paused && (
+          <div className="absolute inset-0 z-50 grid place-items-center bg-[#04080bee]">
+            <div className="border border-[#7fd4e855] bg-[#071820f2] px-10 py-7 text-center">
+              <p className="text-[10px] tracking-[0.5em] text-[#7fb6c4]">THE CAGE · SIMULATION HALTED</p>
+              <h2 className="mt-2 text-2xl font-bold tracking-[0.3em] text-[#d9f4ff]">PAUSED</h2>
+              <p className="mt-3 text-[11px] tracking-[0.25em] text-[#9fc4cc]">ESC TO RESUME</p>
+              <p className="mt-1 text-[10px] tracking-[0.2em] text-[#6d8f97]">THE GUARDS ARE NOT MOVING</p>
+            </div>
+          </div>
+        )}
         {/* vignette */}
         <div className="absolute inset-0" style={{ boxShadow: 'inset 0 0 200px 70px rgba(0,0,0,0.72)' }} />
         {/* wake-up cinematic */}

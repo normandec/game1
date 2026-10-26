@@ -17,20 +17,32 @@ export default function CombatHud(p: Props) {
   const [dismissedStory, setDismissedStory] = useState('');
   const [invOpen, setInvOpen] = useState(false);
   // I or TAB opens the kit; escape closes it before the pause menu ever sees it.
+  /* CAPTURE PHASE, SO THE KIT SWALLOWS THE KEY.
+   * The engine listens for Escape on the window to pause the game. Pressing Escape with the
+   * kit open closed the kit AND paused the run, because both handlers saw the same event.
+   * This listener runs in the capture phase and stops the event there, so one press does
+   * exactly one thing: close the kit. Press it again to pause. */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
-      if (k === 'i' || k === 'tab') { e.preventDefault(); setInvOpen(v => !v); }
-      else if (k === 'escape' && invOpen) setInvOpen(false);
+      if (k === 'i' || k === 'tab') { e.preventDefault(); e.stopPropagation(); setInvOpen(v => !v); }
+      else if (k === 'escape' && invOpen) { e.stopPropagation(); setInvOpen(false); }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [invOpen]);
   const [openedStory, setOpenedStory] = useState('');
   const storyExpanded = dismissedStory !== h.storyTitle && (h.storyTime > 0 || openedStory === h.storyTitle);
   const vehicle = h.flyingPlane || h.piloting || h.driving;
   const hp = vehicle ? h.vehicleHp : h.hp, max = vehicle ? h.vehicleMax : h.maxHp;
-  const vehicleName = h.flyingPlane ? 'NIGHTJAR' : h.piloting ? 'KESTREL' : h.tank ? 'HYDRA TANK' : h.driving ? 'HYDRA TRANSPORT' : 'OPERATIVE';
+  /* A captured hull is not a Hydra vehicle any more: the operative is driving it under
+   * S.H.I.E.L.D. colours, and the HUD used to keep calling it "HYDRA TANK" all the way to
+   * the island. */
+  const vehicleName = h.flyingPlane ? 'NIGHTJAR (S.H.I.E.L.D.)'
+    : h.jet ? (h.jetTier === 'PROTOTYPE' ? 'PROTOTYPE' : h.jetTier === 'FROSTWING' ? 'FROSTWING' : 'INTERCEPTOR')
+    : h.piloting ? 'KESTREL (CAPTURED)'
+    : h.tank ? 'CAPTURED TANK'
+    : h.driving ? 'REQUISITIONED TRANSPORT' : 'OPERATIVE';
   return <div className="combat-hud">
     <header className="combat-top"><div className="combat-score"><small>PROTOCOL SOLAR ECLIPSE</small><strong>{h.score.toLocaleString()}</strong><span>BEST {p.best.toLocaleString()}</span></div><div className="combat-sector"><small>SECTOR {h.sector} / 06</small><b>{h.sectorName}</b><span>WAVE {String(h.wave).padStart(2, '0')} <i>/</i> {h.enemiesLeft} HOSTILES</span>{h.devInfinite && <em className="combat-dev">DEV · INFINITE LIVES</em>}</div><div className="combat-settings"><button onClick={p.onMute} aria-label={p.muted ? 'Enable sound' : 'Mute sound'}>{p.muted ? 'SOUND OFF' : 'SOUND ON'}</button><button onClick={p.onFullscreen} aria-label={p.fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} title={p.fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>{p.fullscreen ? 'EXIT FULL' : 'FULLSCREEN'}</button><button onClick={p.onMouse} aria-label="Mouse sensitivity" title="Mouse sensitivity — also the mouse wheel in game">{`MOUSE ${h.mouseSens.toFixed(2)}x`}</button><button onClick={p.onPause} aria-label="Pause game">II <kbd>ESC</kbd></button></div></header>
     {/* The overlay is three stacks, not a dozen elements pinned to the same corners.
@@ -42,6 +54,9 @@ export default function CombatHud(p: Props) {
         searchlight panel at every size. */}
     <div className="combat-left">
       <div className="combat-position"><span>{h.coords}</span><button onClick={p.onGuide} title="Toggle guide to the concealed vault entrance">VAULT GUIDE <kbd>V</kbd></button></div>
+      {/* The multiplier is a streak; the best one this run is a record. Both belong on the
+          HUD — the end screen used to show the current (usually 1) as "Best Combo". */}
+      <div className="combat-streak"><small>KILL CHAIN</small><b>x{h.mult.toFixed(1)}</b><span>BEST x{h.bestMult.toFixed(1)} · {h.streak} STREAK</span></div>
       {h.facilityLabel && <div className={`combat-facility ${h.facilityStatus.startsWith('SECURED') ? 'secured' : ''}`}><small>LOCAL INSTALLATION</small><b>{h.facilityLabel}</b><span>{h.facilityStatus}</span></div>}
     </div>
     <div className="combat-center">
@@ -51,7 +66,32 @@ export default function CombatHud(p: Props) {
       {h.mult > 1 && <div className="combat-combo">x{h.mult}<span>{h.streak} KILL CHAIN</span></div>}
     </div>
     <div className="combat-right">
-      <div className="combat-objective"><small>PRIMARY OBJECTIVE</small><p>{h.objective}</p><span>MAINFRAMES {h.serversTotal - h.serversLeft}/{h.serversTotal} <i>/</i> {h.generalShield ? 'COMMAND SHIELDED' : 'GENERAL EXPOSED'}</span></div>
+      <div className="combat-objective"><small>PRIMARY OBJECTIVE</small><p>{h.objective}</p>
+        {/* On the island there is no command general left to expose: the chip is hidden
+            rather than telling the operative to finish a man who is already dead. */}
+        {(h.generalHp > 0 || h.generalShield) && <span>MAINFRAMES {h.serversTotal - h.serversLeft}/{h.serversTotal} <i>/</i> {h.generalShield ? 'COMMAND SHIELDED' : 'GENERAL EXPOSED'}</span>}
+        {h.devRun && <span className="combat-dev-note">DEV RUN · NOT RANKED</span>}
+      </div>
+      {/* THE BATTALION. This panel exists in the old HUD and was lost in the move: during a
+          sector-6 assault the operative had no idea how much of the army was awake. */}
+      {h.armyTotal > 0 && <div className={`combat-army ${h.armyAlarm > 0.5 ? 'alert' : ''}`}>
+        <small>IRON RESERVE · GENERAL QUARTERS</small>
+        <b>{h.armyAwake} / {h.armyTotal} FALLEN IN</b>
+        <div><span style={{ width: `${Math.min(100, (h.armyAwake / Math.max(1, h.armyTotal)) * 100)}%` }}/></div>
+        <span>{h.turretsHeld}/{h.turretsTotal} TWIN GUNS SEIZED</span>
+      </div>}
+      {h.piloting && <div className="combat-heli">
+        <small>KESTREL · FLIGHT DECK</small>
+        <b>FUEL {Math.ceil(h.heliFuel)}% {h.heliLock && <em>LOCK</em>}</b>
+        <ul>
+          {['CHAIN GUN', 'HELLFIRE', 'SIDEWINDER'].map((label, i) => (
+            <li key={label} className={h.heliStation === i ? 'on' : ''}>
+              <kbd>{i + 1}</kbd><span>{label}</span><b>{h.heliAmmo[i] < 0 ? 'FEED' : h.heliAmmo[i]}</b>
+            </li>
+          ))}
+        </ul>
+        <span>{h.heliHp} / {h.heliMaxHp} HULL</span>
+      </div>}
       {(h.alarmActive || h.alarmExposure > 0.05 || h.alarmJammed > 0) && <div className={`combat-security ${h.alarmActive ? 'tracking' : ''}`}>
         <small>{h.alarmJammed > 0 ? 'CARTER CIPHER / IFF MASK' : h.alarmActive ? 'HYDRA SEARCH NETWORK' : 'SEARCHLIGHT EXPOSURE'}</small>
         <b>{h.alarmJammed > 0 ? `${Math.ceil(h.alarmJammed)}s / IDENTITY HIDDEN` : h.alarmActive ? 'SPOTLIGHTS TRACKING YOU' : 'LEAVE THE BEAM'}</b>
@@ -114,7 +154,10 @@ export default function CombatHud(p: Props) {
         )}
       </div>
       <div className="combat-bottom-vitals"><div className="combat-vitals-title"><b>{vehicleName}</b><span>{Math.ceil(hp)} / {max}</span></div><div className="combat-health" role="meter" aria-label={vehicle ? 'Vehicle hull integrity' : 'Health'} aria-valuemin={0} aria-valuemax={max} aria-valuenow={hp}><div className={hp / max < 0.3 ? 'critical' : ''} style={{ width: `${Math.max(0, hp / max) * 100}%` }}/></div>
-      <div className="combat-armor"><span>{vehicle && !h.driving ? `FUEL ${Math.ceil(h.vehicleFuel)}%` : `ARMOR ${h.shieldHp}`}</span><span>{h.tank ? 'LMB / MAIN GUN' : vehicle ? 'LMB / MOUNTED CANNON' : `${h.weapon} / ${h.ammo < 0 ? 'UNLIMITED' : h.ammo}`}</span></div>
+      <div className="combat-armor">
+        <span>{h.piloting || h.flyingPlane ? `FUEL ${Math.ceil(h.vehicleFuel)}%` : h.tank ? 'HULL ARMOUR / MAIN GUN' : h.driving ? 'HULL' : `ARMOR ${h.shieldHp}`}</span>
+        <span>{h.tank ? 'LMB / MAIN GUN' : vehicle ? 'LMB / MOUNTED CANNON' : `${h.weapon} / ${h.ammo < 0 ? 'UNLIMITED' : h.ammo}`}</span>
+      </div>
       {!vehicle && h.shieldMax > 0 && <div className="combat-armor-bar"><div style={{ width: `${h.shieldHp / h.shieldMax * 100}%` }}/></div>}
       <div className="combat-intel"><small>INTERCEPTED COMMS</small><p>{h.aiTactic}</p><span>{h.trucksActive} TRANSPORTS <i>/</i> {h.helisActive + h.airTransports} AIRCRAFT</span></div>
     </div>

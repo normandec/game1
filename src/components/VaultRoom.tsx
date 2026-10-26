@@ -354,7 +354,15 @@ export default function VaultRoom({ backdrop = false, preview = false, onExit, o
     const keydown = (e: KeyboardEvent) => {
       if (backdrop || e.target instanceof HTMLInputElement) return;
       keys.add(e.key.toLowerCase());
-      if (e.key === 'Escape') { callbacks.current.onExit(); return; }
+      /* THE AIRLOCK IS A REAL DOOR.
+       * L seals it and F at the door refuses to open it — but Escape walked straight out
+       * regardless, which made the lock and its button pure decoration. Escape is now the
+       * same door as F: sealed means sealed. */
+      if (e.key === 'Escape') {
+        if (lockRef.current) setMessage('Airlock is sealed. Press L to release the hydraulic lock.');
+        else callbacks.current.onExit();
+        return;
+      }
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) e.preventDefault();
       const index = Number(e.key) - 1;
       if (index >= 0 && index < 4) navigate.current(stations[index].id);

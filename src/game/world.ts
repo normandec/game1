@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------ *
- * IRON VEIL — World generation & spatial index
+ * PROTOCOL SOLAR ECLIPSE — World generation & spatial index
  * 10x larger theatre with a colossal fortress HQ.
  * ------------------------------------------------------------------ */
 

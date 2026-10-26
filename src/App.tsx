@@ -16,7 +16,7 @@ import type { PrisonStats } from './game/prison';
 const emptyHud: Hud = {
   score: 0, wave: 0, hp: 100, maxHp: 100, weapon: 'RIFLE', ammo: -1, grenades: 4,
   shieldHp: 0, shieldMax: 0,
-  streak: 0, mult: 1, dashPct: 1, enemiesLeft: 0, grenadeCap: 6,
+  streak: 0, mult: 1, bestMult: 1, dashPct: 1, enemiesLeft: 0, grenadeCap: 6,
   aiTactic: 'PHALANX', aiNote: 'HQ ONLINE — PLANNING', aiLevel: 0.65,
   aiVolley: 0, aiSquads: 0, aiThreat: 0,
   serversLeft: 6, serversTotal: 6, codersLeft: 14, generalHp: 1, generalShield: true,
@@ -29,7 +29,7 @@ const emptyHud: Hud = {
   driving: false, tank: false, flyingPlane: false, jet: false, jetBoost: 0,
   jetSpeed: 0, jetAlt: 0, jetMode: 'cannon', jetFlares: 0, jetLock: '', jetAutopilot: false, frostwing: false, airThreat: 0, jetAce: false,
     jetMissiles: 0, jetRockets: 0, jetLance: 0, jetHeat: 0, jetJam: false, jetView: 'CHASE', jetRwr: false, jetTier: 'INTERCEPTOR',
-  devInfinite: false, devSector: 1,
+  devInfinite: false, devSector: 1, devRun: false,
   inventory: [],
   allies: 0, barricades: 0, siegeActive: false,
   lasersHeld: 0, poisCaptured: 0, poisTotal: 5, vaultFound: false, nearPrompt: '',
@@ -99,6 +99,18 @@ export default function App() {
   }, [setStatus]);
 
   const recordScore = useCallback((score: number, wave: number, won: boolean) => {
+    /* DEV RUNS ARE NOT RANKED.
+     * The console can deploy straight into sector six and switch off death; both used to be
+     * written to the same table as a real campaign. A dev run now ends exactly the same way
+     * but saves nothing, and the end screen says so. */
+    const devRun = !!gameRef.current?.devRun;
+    if (devRun) {
+      setIsBest(false);
+      setEntryDate(0);
+      if (gameRef.current) setBuild(gameRef.current.getBuild());
+      setStatus(won ? 'victory' : 'over');
+      return;
+    }
     const entry: ScoreEntry = {
       name: (nameRef.current || 'OPERATIVE').toUpperCase(), score, wave, date: Date.now(),
     };
@@ -281,7 +293,7 @@ export default function App() {
       />
 
       {status === 'menu' && !tour && <VaultRoom backdrop onExit={() => {}} onAction={() => ''} />}
-      {status === 'prison' && <Prison3D mode={prisonMode} onExit={handlePrisonExit} />}
+      {status === 'prison' && <Prison3D mode={prisonMode} onExit={handlePrisonExit} muted={muted} onMuteChange={toggleMute} />}
       {status === 'glacier' && <Glacier3D onExit={handleGlacierExit} />}
 
       {(status === 'interior' || tour) && <VaultRoom preview={tour}

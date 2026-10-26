@@ -69,7 +69,7 @@ export const PERKS: Perk[] = [
 
 export interface Hud {
   score: number; wave: number; hp: number; maxHp: number; weapon: string; ammo: number;
-  grenades: number; streak: number; mult: number; dashPct: number; enemiesLeft: number;
+  grenades: number; streak: number; mult: number; bestMult: number; dashPct: number; enemiesLeft: number;
   grenadeCap: number; aiTactic: string; aiNote: string; aiLevel: number; aiVolley: number;
   aiSquads: number; aiThreat: number;
   shieldHp: number; shieldMax: number;
@@ -95,7 +95,7 @@ export interface Hud {
   jetMissiles: number; jetRockets: number; jetLance: number;
   jetHeat: number; jetJam: boolean; jetView: string; jetRwr: boolean; jetTier: string;
   /** Developer console: the run was started from the dev panel and cannot be lost. */
-  devInfinite: boolean; devSector: number;
+  devInfinite: boolean; devSector: number; devRun: boolean;
   /** The kit: four groups of item chips, built every HUD tick. */
   inventory: { group: string; items: { label: string; detail: string; tone: string }[] }[];
   siegeActive: boolean; lasersHeld: number; poisCaptured: number; poisTotal: number;
@@ -732,6 +732,12 @@ export class Game {
    * itself on, so a normal run can never inherit it.
    */
   devInfiniteLives = false;
+  /**
+   * A run started from the developer console. It is written to no leaderboard: a sector-6
+   * deploy and a run that cannot lose were both being recorded as real scores, so the top
+   * of the table was whatever somebody had farmed with the console open.
+   */
+  devRun = false;
   /** Sector the operative was inserted into by the dev panel (1 when it was never used). */
   devSector = 1;
   /** Set on a prison escape: THE CAGE does not answer with landing waves. */
@@ -1176,7 +1182,14 @@ export class Game {
     this.clearInput();
     this.dynamicRects = [];
     this.dynBuckets.clear();
-    if (newCampaign) this.sector = 1;
+    if (newCampaign) {
+      this.sector = 1;
+      /* A card left open when the operative walked out to the menu used to survive into the
+       * next run: the new campaign opened on a tutorial for something it did not do yet.
+       * A fresh run starts with a clean field manual. */
+      this.tutorial = null;
+      this.tutorialsSeen.clear();
+    }
     this.makeGroundPattern();
     const world = generateWorld(this.sector);
     // PRISON ISLAND: brand-new ground east of the untouched legacy map — open water, a
@@ -1877,6 +1890,7 @@ export class Game {
     const wanted = clamp(Math.round(opts.sector ?? 1), 1, SECTORS.length);
     this.devInfiniteLives = !!opts.infiniteLives;
     this.devSector = wanted;
+    this.devRun = wanted > 1 || !!opts.infiniteLives;
     if (wanted === 1) {
       this.reset();
     } else {
@@ -1934,10 +1948,21 @@ export class Game {
     if (this.keys[k]) return;
     this.keys[k] = true;
     if (k === 'escape') this.lastEscapeAt = performance.now();
+    /* The transit and the arrest cinematic are 7.5 seconds each and run again on every
+     * replay. Space, enter or a click cuts them short; the result is identical. */
+    if (this.status === 'transit' || this.status === 'arrest') {
+      if (k === ' ' || k === 'enter' || k === 'escape' || k === 'x') { this.skipCinematic(); e.preventDefault(); }
+      return;
+    }
     if (k === 'escape' || k === 'p') this.onPauseToggle();
     if (this.status !== 'playing') return;
     if (k === ' ' || k === 'shift') { if (!this.piloting && !this.flyingPlane && !this.drivingVan && !this.playerTank && !this.playerJet) this.doDash(); }
-    if (k === 'g' || k === 'q' || k === 'e') {
+    /* G AND Q THROW THE FRAG. E DOES NOT.
+     * E used to be a second grenade key, bound next to the interact key, and nothing in the
+     * game said so: an operative walking up to a gate and pressing the usual "use" key blew
+     * himself up at 22 % a time. E stays in the aircraft cockpits (autopilot, and the
+     * prison's own use key) and does nothing on foot. */
+    if (k === 'g' || k === 'q') {
       if (this.flyingPlane) this.dropBombs();
       else if (this.piloting && this.playerHeli) this.fireHeliRocket(this.playerHeli);
       else if (!this.drivingVan && !this.playerTank && !this.playerJet) this.throwGrenade();
@@ -1984,6 +2009,8 @@ export class Game {
   }
   private onPointerDown = (e: PointerEvent) => {
     if (this.tutorial) { this.tutorial = null; return; }
+    // A click cuts a transit or arrest cinematic short — same as the space bar.
+    if (this.status === 'transit' || this.status === 'arrest') { this.skipCinematic(); return; }
     if (this.status !== 'playing') return;
     // Pull the trigger first: anything below that can throw must never leave the
     // weapon dead. (setPointerCapture used to abort the handler on some browsers.)
@@ -2170,6 +2197,49 @@ export class Game {
     }
   }
 
+  /**
+   * GROUND CREW SERVICE.
+   *
+   * The gunship and the bomber burn fuel, and until now there was no way to put any back:
+   * two minutes into a sortie both aircraft were permanently throttled and the only advice
+   * on screen was a small "FUEL LOW — LAND". Land either of them (F dismounts, the hull
+   * stays where you leave it) and walk up to it: a bowser and a fitter come out of the
+   * nearest hangar. Fuel refills at 12 %/s, structure at 2 %/s, and a landed airframe is
+   * marked on the HUD while it is being serviced.
+   */
+  private serviceAircraft(dt: number) {
+    const h = this.playerHeli;
+    if (h && !this.piloting && Math.hypot(h.x - this.px, h.y - this.py) < 210) {
+      const before = h.fuel;
+      h.fuel = Math.min(100, h.fuel + dt * 12);
+      h.hp = Math.min(h.maxHp, h.hp + dt * h.maxHp * 0.02);
+      if (h.fuel >= 99.5 && before < 99.5) {
+        this.setBanner('GUNSHIP SERVICED', 'FULL FUEL AND A PATCHED HULL — F TO FLY');
+        sfx.pickup();
+      } else if (before < 100 && Math.random() < dt * 0.8) {
+        this.addText(h.x, h.y - 92, `GROUND CREW · FUEL ${Math.ceil(h.fuel)}%`, '#8be8ff', 12);
+      }
+    }
+    const p = this.plane;
+    if (p && !this.flyingPlane && Math.hypot(p.x - this.px, p.y - this.py) < 230) {
+      const before = p.fuel;
+      p.fuel = Math.min(100, p.fuel + dt * 12);
+      p.hp = Math.min(p.maxHp, p.hp + dt * p.maxHp * 0.02);
+      if (p.fuel >= 99.5 && before < 99.5) {
+        this.setBanner('NIGHTJAR SERVICED', 'FULL TANKS AND A PATCHED HULL — F TO FLY');
+        sfx.pickup();
+      } else if (before < 100 && Math.random() < dt * 0.8) {
+        this.addText(p.x, p.y - 96, `GROUND CREW · FUEL ${Math.ceil(p.fuel)}%`, '#8be8ff', 12);
+      }
+    }
+  }
+
+  /** Cut a transit or arrest cinematic to its last frame. */
+  skipCinematic() {
+    if (this.status === 'transit' && this.transitT > 0.05) { this.transitT = 0.05; sfx.click(); }
+    else if (this.status === 'arrest' && this.arrestT > 0.05) { this.arrestT = 0.05; sfx.click(); }
+  }
+
   private updateTransit(dt: number) {
     if (this.status !== 'transit') return;
     this.transitT -= dt;
@@ -2330,7 +2400,7 @@ export class Game {
       hp: Math.max(0, Math.round(this.hp)), maxHp: this.maxHp,
       weapon: WEAPONS[this.weapon].short,
       ammo: this.ammo === Infinity ? -1 : Math.max(0, Math.floor(this.ammo)),
-      grenades: this.grenades, streak: this.streak, mult: this.mult,
+      grenades: this.grenades, streak: this.streak, mult: this.mult, bestMult: this.bestMult,
       shieldHp: Math.round(this.shieldHp), shieldMax: this.shieldMax,
       armyAlarm: this.armyAlarm,
       armyAwake: this.armyRanksData.length ? Math.max(0, this.armyRanksData.length - this.armyDormant) : 0,
@@ -2407,7 +2477,7 @@ export class Game {
       jetJam: (this.playerJet?.jam ?? 0) > 0,
       jetView: this.playerJet?.view === 1 ? 'TACTICAL' : this.playerJet?.view === 2 ? 'GUN CAM' : 'CHASE',
       jetRwr: (this.playerJet?.rwr ?? 0) > 0,
-      devInfinite: this.devInfiniteLives, devSector: this.sector,
+      devInfinite: this.devInfiniteLives, devSector: this.sector, devRun: this.devRun,
       jetTier: this.playerJet?.tier === 'prototype' ? 'PROTOTYPE'
         : this.playerJet?.tier === 'frostwing' ? 'FROSTWING' : 'INTERCEPTOR',
       jetAutopilot: !!this.playerJet?.autopilot,
@@ -2528,6 +2598,7 @@ export class Game {
     this.aegisTime = Math.max(0, this.aegisTime - dt);
     this.iFrames = Math.max(0, this.iFrames - dt);
     this.updateGates(dt);
+    this.serviceAircraft(dt);
     if (this.navigationDirty) this.rebuildNavigation();
     // The take-off chain owns the operative while it runs: nothing else moves them.
     if (this.launch) this.updateTakeoffChain(dt);
@@ -6005,6 +6076,24 @@ export class Game {
     if (action === 'heli') this.playerHeli = makeHeli(VAULT_ENTRY.x + 160, VAULT_ENTRY.y - 170, -Math.PI / 2);
     for (let i = 0; i < this.allies.length; i++) { this.allies[i].x = VAULT_ENTRY.x - 90 + i * 35; this.allies[i].y = VAULT_ENTRY.y - 230; }
     return `${action === 'plane' ? 'NIGHTJAR strategic bomber' : 'KESTREL gunship'} authorized. Six escorts are waiting outside. Exit through the airlock.`;
+  }
+
+  /**
+   * A clear patch of ground near the operative for an airframe that came across from the
+   * last sector: tested against the collision map, so the bomber is never set down inside a
+   * hangar wall on arrival.
+   */
+  private safeAircraftSpot(): { x: number; y: number } {
+    for (let i = 0; i < 40; i++) {
+      const ang = (i / 40) * TAU;
+      const r = 200 + (i % 6) * 60;
+      const x = clamp(this.px + Math.cos(ang) * r, 200, ARENA_W - 200);
+      const y = clamp(this.py + Math.sin(ang) * r, 200, ARENA_H - 200);
+      const probe = { x, y };
+      this.collide(probe, 90);
+      if (Math.hypot(probe.x - x, probe.y - y) < 1) return { x, y };
+    }
+    return { x: this.px + 220, y: this.py + 220 };
   }
 
   /** Claim the bomber (and a full escort) out of the black vault. */
@@ -10357,8 +10446,20 @@ export class Game {
   /** LEVEL 7: the operative is set down at the causeway and has to take THE CAGE. */
   private startPrisonLevel() {
     this.status = 'playing';
+    /* THE ISLAND IS A WALKING LEVEL.
+     * If the sixth general died to a captured tank, an interceptor, the bomber, a van or a
+     * boat, the operative arrived inside a vehicle that no longer existed: the camera sat
+     * on the causeway, the controls were bound to a hull with no position and the level was
+     * unplayable. Every mount is released here, on foot, with the hull parked behind him. */
     this.piloting = false;
     this.playerHeli = null;
+    this.playerJet = null;
+    this.playerTank = null;
+    this.drivingVan = null;
+    this.drivingBoat = null;
+    this.flyingPlane = false;
+    if (this.plane) this.plane.active = false;
+    this.firing = false;
     this.px = 14180; this.py = 4075;
     this.pvx = 0; this.pvy = 0;
     this.hp = this.maxHp; this.iFrames = 3;
@@ -10383,6 +10484,15 @@ export class Game {
       weapon: this.weapon, ammo: this.ammo,
       maxHp: this.maxHp, shieldMax: this.shieldMax,
       support: this.support,
+      /* WHAT SURVIVES A SECTOR.
+       * These three were silently thrown away by reset(): every AEGIS cell the operative
+       * had banked, every freed prisoner and the recovered bomber. A run that had just
+       * broken the stockade and taken the vault arrived at the next sector with nothing to
+       * show for it. They are carried now — the cells as cells, the men re-mustering on the
+       * insertion point, and the airframe parked where the operative lands. */
+      aegis: this.aegisCharges,
+      allies: this.allies.map((a) => ({ kind: a.kind, hp: a.hp / Math.max(1, a.maxHp) })),
+      plane: this.plane ? { ...this.plane } : null,
       mobility: this.mobility, camping: this.camping, avgRange: this.avgRange, coverUse: this.coverUse,
     };
     this.sector = Math.min(SECTORS.length, this.sector + 1);
@@ -10399,6 +10509,29 @@ export class Game {
     this.shieldMax = saved.shieldMax;
     this.shieldHp = this.shieldMax;
     this.support = saved.support;
+    this.aegisCharges = saved.aegis;
+    this.aegisTime = 0;
+    /* The freed men re-muster around the insertion point. They are the same men — same
+     * kind, same proportion of their wounds — so nothing about the run is invented. */
+    for (let i = 0; i < saved.allies.length && i < 40; i++) {
+      const a = saved.allies[i];
+      const ang = (i / Math.max(1, saved.allies.length)) * TAU;
+      const r = 70 + (i % 5) * 26;
+      this.allies.push({
+        x: this.px + Math.cos(ang) * r, y: this.py + Math.sin(ang) * r,
+        vx: 0, vy: 0, ang: 0, hp: Math.max(40, 220 * a.hp), maxHp: 220,
+        cool: rand(0.2, 1), slot: this.allies.length, flash: 0,
+        kind: a.kind,
+      });
+    }
+    if (saved.plane) {
+      /* The bomber flies on with the operative: it is set down clear of the insertion. */
+      const spot = this.safeAircraftSpot();
+      this.plane = { ...saved.plane, x: spot.x, y: spot.y, vx: 0, vy: 0, active: false, bank: 0 };
+    }
+    if (saved.allies.length) this.addText(this.px, this.py - 132, `${saved.allies.length} ALLIES RE-MUSTERED`, '#8be8ff', 15);
+    if (saved.plane) this.addText(this.px, this.py - 156, 'NIGHTJAR RECOVERED — MARKED ON YOUR MAP', '#a9ecff', 15);
+    if (saved.aegis > 0) this.addText(this.px, this.py - 108, `${saved.aegis} AEGIS CELL${saved.aegis > 1 ? 'S' : ''} CARRIED OVER`, '#9feaff', 15);
     // Hydra shares combat telemetry between bases; the next command staff already knows your habits.
     this.mobility = saved.mobility;
     this.camping = saved.camping;
@@ -11463,15 +11596,22 @@ export class Game {
 
     // navigation / mission transfer UI
     ctx.textAlign = 'center';
-    ctx.fillStyle = next.accent;
+    /* THE FINALE IS NOT SECTOR SEVEN.
+     * After the sixth general the operative flies to THE CAGE, which is its own island and
+     * its own level — the old screen announced "SECTOR 7/6 · IRON RESERVE", a destination
+     * that does not exist. The header, the name and the brief now follow the flag. */
+    const finale = this.prisonFinale;
+    ctx.fillStyle = finale ? '#d8b3ff' : next.accent;
     ctx.font = `900 ${clamp(this.w * 0.035, 24, 52)}px "Chakra Petch", sans-serif`;
-    ctx.fillText(`DEPLOYING TO SECTOR ${this.sector + 1}/6`, this.w / 2, this.h * 0.16);
+    ctx.fillText(finale ? 'FINAL APPROACH · THE CAGE' : `DEPLOYING TO SECTOR ${this.sector + 1}/6`, this.w / 2, this.h * 0.16);
     ctx.fillStyle = '#f5fbfa';
     ctx.font = `900 ${clamp(this.w * 0.025, 19, 36)}px "Chakra Petch", sans-serif`;
-    ctx.fillText(next.name, this.w / 2, this.h * 0.22);
+    ctx.fillText(finale ? 'PRISON ISLAND · LEVEL 7' : next.name, this.w / 2, this.h * 0.22);
     ctx.fillStyle = 'rgba(220,245,240,0.65)';
     ctx.font = '700 13px ui-monospace, monospace';
-    ctx.fillText(`${next.codename} // ${next.brief.toUpperCase()}`, this.w / 2, this.h * 0.27);
+    ctx.fillText(finale
+      ? 'THE LAST DIRECTIVE // FORCE THE SALLY PORT'
+      : `${next.codename} // ${next.brief.toUpperCase()}`, this.w / 2, this.h * 0.27);
     const bw = Math.min(560, this.w * 0.72), bx = (this.w - bw) / 2, by = this.h * 0.82;
     ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(bx, by, bw, 8);
     const pg = ctx.createLinearGradient(bx, 0, bx + bw, 0);
@@ -11480,6 +11620,10 @@ export class Game {
     ctx.strokeStyle = 'rgba(160,240,225,0.38)'; ctx.strokeRect(bx, by, bw, 8);
     ctx.fillStyle = 'rgba(220,245,240,0.62)'; ctx.font = '700 10px ui-monospace, monospace';
     ctx.fillText(p < 0.35 ? 'EXTRACTING OPERATIVE' : p < 0.72 ? 'HIGH ALTITUDE TRANSIT' : 'DESCENDING INTO HOSTILE AIRSPACE', this.w / 2, by + 30);
+    // The cutscene is 7.5 seconds long and runs again on every replay: let it be skipped.
+    ctx.fillStyle = 'rgba(200,235,230,0.45)';
+    ctx.font = '700 10px ui-monospace, monospace';
+    ctx.fillText('SPACE OR CLICK TO SKIP', this.w / 2, by + 52);
     ctx.textAlign = 'left';
   }
 
