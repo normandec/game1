@@ -104,7 +104,7 @@ export default function OperationsMenu(p: Props) {
         </button>)}</div>
         <label className="dev-lives">
           <input type="checkbox" checked={devLives} onChange={e => setDevLives(e.target.checked)} />
-          <span><b>INFINITE LIVES</b><small>The operative cannot be killed: every hit still lands, but the pool never reaches zero. Off unless you tick it.</small></span>
+          <span><b>INFINITE LIVES</b><small>The operative cannot be killed. It covers every vehicle too: interceptors, gunships, the recovered bomber, tanks, boats and vans all stop at one point of structure instead of dying under you. Every hit still lands. Off unless you tick it.</small></span>
         </label>
         <div className="dev-actions">
           <button type="button" className="deploy-button" onClick={() => p.onDevDeploy(devSector, devLives)}>

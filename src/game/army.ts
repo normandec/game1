@@ -40,6 +40,20 @@ export interface ArmyTurretSpot {
   ang: number;
   /** True for the tall command-ring emplacements, which cover the air as well. */
   heavy: boolean;
+  /**
+   * The footprint of the emplacement's own sandbag walls, plus the box they enclose.
+   * The crew needs it to know what it must never shoot: a twin mount that fires into its
+   * own pit is a gun that appears to be shooting itself.
+   */
+  pit?: { x: number; y: number; w: number; h: number }[];
+  pitBox?: { x: number; y: number; w: number; h: number };
+}
+
+/** A painted marking on the hardstanding: parking bays, lane lines, a marshalling box. */
+export interface ArmyMarking {
+  x: number; y: number; w: number; h: number;
+  kind: 'bay' | 'lane' | 'box' | 'arrow';
+  ang?: number;
 }
 
 /** One named position inside the district: drawn on the map, held by its own garrison. */
@@ -106,6 +120,8 @@ export interface ArmyPlan {
   softTargets: ArmySoftTarget[];
   /** Supply caches left in the open beside the soft targets. */
   loot: { x: number; y: number }[];
+  /** Painted hardstanding markings — bays, lane lines, marshalling boxes. */
+  markings: ArmyMarking[];
   /** Where the base alarm is tripped: crossing into the walled compound. */
   alarm: { x: number; y: number; w: number; h: number };
   spawn: { x: number; y: number };
@@ -191,15 +207,23 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
   const routes: { x: number; y: number }[][] = [];
   const softTargets: ArmySoftTarget[] = [];
   const loot: { x: number; y: number }[] = [];
+  const markings: ArmyMarking[] = [];
 
   const gate = (x: number, y: number, w: number, h: number, innerGate: boolean, hp: number): ArmyGate => {
     const rects: Rect[] = [];
     const leafW = w / 2;
+    const gateId = `g${gates.length}`;
     for (let i = 0; i < 2; i++) {
       const r = add(x + i * leafW, y, leafW, h, 'gate', innerGate ? 84 : 62, '#5c5644');
       r.hp = hp; r.maxHp = hp;
       // prepareStructures() copies rects, so the shutter carries its class with it.
       r.armyGate = innerGate ? 'inner' : 'outer';
+      /* The renderer needs the gate as a whole, not the two leaves and not the four
+       * 144 px sections prepareStructures() splits each leaf into. These three fields are
+       * what let it draw one gatehouse instead of four doors. */
+      r.armyGateId = gateId;
+      r.armyGateW = w;
+      r.armyGateH = h;
       rects.push(r);
     }
     const g: ArmyGate = { rects, x, y, w, h, inner: innerGate, open: false, hp, maxHp: hp };
@@ -241,8 +265,10 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
   add(CX - 330, y0 + 120, 200, 150, 'checkpoint', 44, '#5b6055');
   add(CX + 130, y0 + 120, 200, 150, 'checkpoint', 44, '#5b6055');
   // the line itself is open: the barriers sit on the flanks, never across the causeway
-  add(CX - 700, y0 + 300, 380, 26, 'sandbag', 20);
-  add(CX + 320, y0 + 300, 380, 26, 'sandbag', 20);
+  /* The causeway checkpoints stand on the shoulder of the perimeter road, not across it:
+   * a sandbag wall in the traffic lane is a wall, not a checkpoint. */
+  add(CX - 700, y0 + 470, 380, 26, 'sandbag', 20);
+  add(CX + 320, y0 + 470, 380, 26, 'sandbag', 20);
   add(CX - 380, y0 + 96, 200, 26, 'sandbag', 20);
   add(CX + 180, y0 + 96, 200, 26, 'sandbag', 20);
   add(CX - 470, y0 + 210, 150, 40, 'barrier', 22, '#8a8266');
@@ -279,7 +305,7 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
   for (let i = 0; i < 4; i++) {
     add(8420 + (i % 2) * 420, y0 + 90 + Math.floor(i / 2) * 170, 360, 140, 'tent', 40, '#7d8474');
   }
-  add(8300, y0 + 380, 1700, 22, 'sandbag', 16);
+  add(8300, y0 + 470, 1700, 22, 'sandbag', 16);
   for (const t of ['armymedic', 'armymedic', 'armyengineer', 'armyguard'])
     man(8600 + rnd(0, 1000), y0 + 240 + rnd(0, 100), t);
 
@@ -293,8 +319,8 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
 
   post('provost', 'PROVOST / MILITARY POLICE', 7100, y0 + 40, 1100, 380, 12);
   add(7220, y0 + 120, 420, 180, 'checkpoint', 52, '#59604f');
-  add(7160, y0 + 320, 800, 24, 'sandbag', 18);
-  for (let i = 0; i < 5; i++) add(7180 + i * 150, y0 + 350, 90, 60, 'target', 30, '#7a7460');
+  add(7160, y0 + 470, 800, 24, 'sandbag', 18);
+  for (let i = 0; i < 5; i++) add(7180 + i * 150, y0 + 500, 90, 60, 'target', 30, '#7a7460');
   squad(7650, y0 + 240, 4, ['armyguard', 'armymajor'], 60);
 
   /* ================================================================== *
@@ -747,17 +773,29 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
     const sx = dx >= 0 ? 1 : -1;
     const sy = dy >= 0 ? 1 : -1;
     const wall = heavy ? 30 : 26;
+    const pit: { x: number; y: number; w: number; h: number }[] = [];
+    /* The walls are kept as the live rects the world is built from, not as copies: the
+     * road clearance pass below can then step a whole emplacement off a carriageway. */
+    const wallAt = (wx: number, wy: number, ww: number, wh: number) => {
+      pit.push(add(wx, wy, ww, wh, 'sandbag', heavy ? 26 : 22));
+    };
     if (alongX) {
       // back wall behind the crew, two sidewalls, the muzzle side left open
-      add(x - sx * 150 - (sx > 0 ? 0 : wall), y - 110, wall, 220, 'sandbag', heavy ? 26 : 22);
-      add(x - 90, y - 128 + (sy > 0 ? 0 : 0), 200, wall, 'sandbag', heavy ? 26 : 22);
-      add(x - 90, y + 128 - wall, 200, wall, 'sandbag', heavy ? 26 : 22);
+      wallAt(x - sx * 150 - (sx > 0 ? 0 : wall), y - 110, wall, 220);
+      wallAt(x - 90, y - 128, 200, wall);
+      wallAt(x - 90, y + 128 - wall, 200, wall);
     } else {
-      add(x - 110, y - sy * 150 - (sy > 0 ? 0 : wall), 220, wall, 'sandbag', heavy ? 26 : 22);
-      add(x - 128, y - 90, wall, 200, 'sandbag', heavy ? 26 : 22);
-      add(x + 128 - wall, y - 90, wall, 200, 'sandbag', heavy ? 26 : 22);
+      wallAt(x - 110, y - sy * 150 - (sy > 0 ? 0 : wall), 220, wall);
+      wallAt(x - 128, y - 90, wall, 200);
+      wallAt(x + 128 - wall, y - 90, wall, 200);
     }
-    turrets.push({ x, y, ang, heavy });
+    const xs = pit.map((r) => r.x), ys = pit.map((r) => r.y);
+    const pitBox = {
+      x: Math.min(...xs), y: Math.min(...ys),
+      w: Math.max(...pit.map((r) => r.x + r.w)) - Math.min(...xs),
+      h: Math.max(...pit.map((r) => r.y + r.h)) - Math.min(...ys),
+    };
+    turrets.push({ x, y, ang, heavy, pit, pitBox });
   };
   turret(CX - 520, inner.y - 120, Math.PI / 2, true);
   turret(CX + 520, inner.y - 120, Math.PI / 2, true);
@@ -868,6 +906,209 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
     void t;
   }
 
+  /* ================================================================== *
+   * INTERNAL ROAD NETWORK — the bones of a real installation
+   *
+   * Up to now the compound was one poured slab with a causeway down the middle: from the
+   * air it read as a car park with buildings on it. A base this size is organised by its
+   * roads — a ring road inside the wire, a spur to every district and a perimeter track
+   * behind the wall — and the roads are what make the layout legible from any zoom. They
+   * are laid from the gates outward, so nothing crosses a wall.
+   * ================================================================== */
+  const roadW = 96;
+  const paved: { x: number; y: number; w: number; h: number }[] = [];
+  /**
+   * Paint a road only where the ground is genuinely free. Roads here are laid *after* the
+   * districts, so this is what keeps a carriageway out of a barrack block: the candidate
+   * run is tested against every structure already standing, and rejected if it touches
+   * one. A road that cannot be built is simply not drawn, rather than drawn through a wall.
+   */
+  const pave = (x: number, y: number, w: number, h: number): boolean => {
+    for (const r of placed) {
+      if (x + w + 6 <= r.x || x - 6 >= r.x + r.w) continue;
+      if (y + h + 6 <= r.y || y - 6 >= r.y + r.h) continue;
+      return false;
+    }
+    for (const z of pavements) {
+      if (z.kind !== 'road') continue;
+      if (x + w <= z.x || x >= z.x + z.w) continue;
+      if (y + h <= z.y || y >= z.y + z.h) continue;
+      return false;
+    }
+    /* Nor through a gun pit. The pit is three sandbag walls with the guns' side left open,
+     * so a candidate carriageway could thread the gap and leave a twin mount standing in
+     * the middle of a road — which is precisely the odd arrangement in the report. */
+    for (const t of turrets) {
+      const pb = t.pitBox;
+      if (!pb) continue;
+      if (x + w <= pb.x || x >= pb.x + pb.w) continue;
+      if (y + h <= pb.y || y >= pb.y + pb.h) continue;
+      return false;
+    }
+    zone(x, y, w, h, 'road');
+    paved.push({ x, y, w, h });
+    return true;
+  };
+  /**
+   * A long run is cut into 220 px sections and every section is tested on its own: the
+   * road that gets built threads between the buildings instead of being dropped whole the
+   * first time it meets a magazine. This is how a real base ends up with a road network
+   * that bends — the roads went where there was room, not where the drawing said.
+   */
+  const paveRun = (x: number, y: number, w: number, h: number): number => {
+    const horizontal = w >= h;
+    const len = horizontal ? w : h;
+    const step = 220;
+    let made = 0;
+    for (let d = 0; d < len; d += step) {
+      const seg = Math.min(step, len - d) + (d + step < len ? 2 : 0);
+      if (pave(horizontal ? x + d : x, horizontal ? y : y + d, horizontal ? seg : w, horizontal ? h : seg)) made++;
+    }
+    return made;
+  };
+  let roads = 0;
+  roads += paveRun(base.x + 190, base.y + 120, roadW, base.h - 240);                // west lane
+  roads += paveRun(base.x + base.w - 286, base.y + 120, roadW, base.h - 240);       // east lane
+  roads += paveRun(base.x + T + 10, y0 + 2150, base.w - T * 2 - 20, 76);            // east-west service road
+  roads += paveRun(base.x + T + 10, y0 + 3230, base.w - T * 2 - 20, 70);            // airfield north road
+  // spurs from the service road into the districts that front onto it
+  for (const spur of [
+    { x: base.x + 300, y: y0 + 2220, w: 70, h: 340 },        // motor pool
+    { x: base.x + 1450, y: y0 + 2220, w: 70, h: 300 },       // fuel farm gate
+    { x: base.x + base.w - 900, y: y0 + 2220, w: 70, h: 300 }, // magazine
+    { x: base.x + 3700, y: y0 + 2950, w: 70, h: 460 },       // down to the flight line
+    { x: base.x + 1500, y: y0 + 2950, w: 70, h: 700 },       // training ground link
+  ]) roads += paveRun(spur.x, spur.y, spur.w, spur.h);
+  void roads;
+
+  /* Painted markings. Purely visual, but this is most of what separates a car park from a
+   * depot: bays with their noses on a line, a lane down the middle of the pool, a
+   * marshalling box in front of each hall, and arrows where the traffic runs. */
+  for (let i = 0; i < 9; i++) {
+    markings.push({ x: base.x + 330, y: y0 + 2370 + i * 100, w: 150, h: 60, kind: 'bay' });
+    markings.push({ x: base.x + 700, y: y0 + 2370 + i * 100, w: 150, h: 60, kind: 'bay' });
+  }
+  for (let i = 0; i < 6; i++) {
+    markings.push({ x: base.x + 4500 + i * 330, y: y0 + 3660, w: 300, h: 150, kind: 'box' });   // flight line bays
+    markings.push({ x: base.x + 2500 + i * 300, y: fieldY + 380, w: 260, h: 120, kind: 'box' }); // apron hardstands
+  }
+  markings.push({ x: base.x + 330, y: y0 + 2350, w: 520, h: 20, kind: 'lane' });
+  markings.push({ x: CX - 40, y: base.y + 200, w: 80, h: 900, kind: 'arrow' });
+  markings.push({ x: base.x + 2550, y: fieldY + 220, w: 6400, h: 12, kind: 'lane' });
+  markings.push({ x: base.x + 2550, y: fieldY + 236, w: 6400, h: 12, kind: 'lane' });
+
+  /* District fences: wire around everything that is worth stealing, exactly as the
+   * reference photograph of a real base shows. Offset lines, gates left open toward the
+   * road, and every run placed rather than stamped — a wire that lands in a building is
+   * worse than no wire at all. */
+  const fenceRun = (x: number, y: number, w: number, h: number) => place(x, y, w, h, 'fence', 30, '#7d8670');
+  let wire = 0;
+  for (const line of [
+    { x: base.x + T + 16, y: y0 + 1420, w: 1120, h: 14 },      // fuel farm north
+    { x: base.x + T + 16, y: y0 + 2120, w: 1120, h: 14 },      // fuel farm south
+    { x: base.x + T + 16, y: y0 + 1420, w: 14, h: 714 },       // fuel farm west
+    { x: base.x + base.w - 1180, y: y0 + 2240, w: 1140, h: 14 },  // magazine north
+    { x: base.x + base.w - 1180, y: y0 + 2986, w: 1140, h: 14 },  // magazine south
+    { x: base.x + 240, y: y0 + 3300, w: 1900, h: 14 },         // training ground north
+    { x: base.x + 240, y: y0 + 4512, w: 1900, h: 14 },         // training ground south
+    { x: base.x + 3000, y: fieldY + 316, w: 7000, h: 14 },     // airfield north edge
+    { x: base.x + 150, y: y0 + 620, w: 1740, h: 14 },          // rotary park north
+  ]) if (fenceRun(line.x, line.y, line.w, line.h)) wire++;
+
+  /* ROAD CLEARANCE SWEEP.
+   *
+   * The carriageways are laid after the yards, so a crate stack or a truck that was standing
+   * on ground which later became a road ended up parked in the middle of the lane. Anything
+   * that is loose kit and now sits on tarmac is stepped off the kerb: the first nudge left,
+   * right, up or down that is clear of both the road and everything else wins. Structures
+   * are never moved — only the clutter that a real unit would have shifted anyway. */
+  const overlapArea = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) =>
+    Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) *
+    Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const roadZones = pavements.filter((z) => z.kind === 'road');
+  const onRoad = (r: { x: number; y: number; w: number; h: number }) =>
+    roadZones.some((z) => overlapArea(r, z) > r.w * r.h * 0.28);
+  const clearOf = (me: Rect, x: number, y: number, w: number, h: number) => {
+    for (const r of placed) {
+      if (r === me || r.dead) continue;
+      if (x + w + 8 <= r.x || x - 8 >= r.x + r.w) continue;
+      if (y + h + 8 <= r.y || y - 8 >= r.y + r.h) continue;
+      return false;
+    }
+    for (const z of roadZones) {
+      if (x + w + 4 <= z.x || x - 4 >= z.x + z.w) continue;
+      if (y + h + 4 <= z.y || y - 4 >= z.y + z.h) continue;
+      return false;
+    }
+    return true;
+  };
+  /* GUN PITS STAND BESIDE THE ROAD, NOT IN IT.
+   *
+   * Two of the approach batteries were sited on the perimeter carriageway: their sandbag
+   * walls straddled the tarmac and the mount sat in the traffic lane, which is exactly what
+   * "the elements are arranged oddly" meant. Every emplacement whose footprint touches a
+   * road is now stepped out to the nearest clear shoulder — walls and mount together, so it
+   * stays one object — and whatever cannot be moved stays where it was rather than being
+   * dropped into a building. */
+  const pitBoxOf = (t: ArmyTurretSpot) => {
+    const walls = t.pit || [];
+    if (!walls.length) return t.pitBox;
+    const xs = walls.map((r) => r.x), ys = walls.map((r) => r.y);
+    return {
+      x: Math.min(...xs), y: Math.min(...ys),
+      w: Math.max(...walls.map((r) => r.x + r.w)) - Math.min(...xs),
+      h: Math.max(...walls.map((r) => r.y + r.h)) - Math.min(...ys),
+    };
+  };
+  let repositioned = 0;
+  for (const t of turrets) {
+    const box = pitBoxOf(t);
+    if (!box) continue;
+    const onCarriageway = roadZones.some((z) => overlapArea(box, z) > 0);
+    if (!onCarriageway) continue;
+    const walls = t.pit || [];
+    const mine = new Set<unknown>(walls);
+    const fits = (dx: number, dy: number) => {
+      const b = { x: box.x + dx, y: box.y + dy, w: box.w, h: box.h };
+      // The approach outside the wire is fair ground for a battery: 800 px of it.
+      if (b.x < base.x || b.y < base.y - 800 || b.x + b.w > base.x + base.w || b.y + b.h > base.y + base.h) return false;
+      for (const z of roadZones) if (overlapArea(b, z) > 0) return false;
+      for (const r of placed) {
+        if (mine.has(r) || r.dead || r.kind === 'sandbag') continue;
+        if (overlapArea(b, r) > 0) return false;
+      }
+      return true;
+    };
+    for (const [dx, dy] of [[0, -260], [0, 260], [-260, 0], [260, 0], [0, -420], [0, 420]]) {
+      if (!fits(dx, dy)) continue;
+      for (const r of walls) { r.x += dx; r.y += dy; }
+      t.x += dx; t.y += dy;
+      t.pitBox = pitBoxOf(t);
+      repositioned++;
+      break;
+    }
+  }
+
+  let kerbed = 0;
+  for (const r of placed) {
+    if (!['crate', 'barrel', 'truck', 'tent', 'sandbag'].includes(r.kind)) continue;
+    if (!onRoad(r)) continue;
+    const step = Math.max(r.w, r.h) + 26;
+    let done = false;
+    const moves: [number, number][] = [];
+    for (let k = 1; k <= 4; k++) {
+      moves.push([0, -step * k], [0, step * k], [-step * k, 0], [step * k, 0]);
+      if (k <= 2) moves.push([-step * k, -step], [step * k, -step], [-step * k, step], [step * k, step]);
+    }
+    for (const [dx, dy] of moves) {
+      const nx = r.x + dx, ny = r.y + dy;
+      if (nx < base.x + 40 || ny < base.y + 40 || nx + r.w > base.x + base.w - 40 || ny + r.h > base.y + base.h - 40) continue;
+      if (!clearOf(r, nx, ny, r.w, r.h)) continue;
+      r.x = nx; r.y = ny; done = true; break;
+    }
+    if (done) kerbed++;
+  }
+
   /* ---------------- TRAFFIC CIRCUITS ----------------
    * Four loops: the perimeter road inside the wall, the causeway approach, the air-park
    * access and the east service road. Convoys, staff cars and fuel bowsers work them.
@@ -962,7 +1203,7 @@ export function buildArmyDistrict(ctx: ArmyContext): ArmyPlan {
 
   return {
     region, base, core, parade, tanks, tankPatrols, helis, jets, turrets, generators, gates,
-    strongpoints, guards, routes, stockade: stock, softTargets, loot,
+    strongpoints, guards, routes, stockade: stock, softTargets, loot, markings,
     alarm: { x: inner.x - 200, y: base.y, w: inner.w + 400, h: base.h },
     spawn: { x: CX, y: y0 + 260 },
     hq: { x: CX, y: core.y + core.h / 2 },

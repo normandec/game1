@@ -64,10 +64,60 @@ export default function CombatHud(p: Props) {
         {storyExpanded && <><strong>{h.storyTitle}</strong><p>{h.storyText}</p></>}
       </aside>}
     </div>
-    <div className="combat-bottom-vitals"><div className="combat-vitals-title"><b>{vehicleName}</b><span>{Math.ceil(hp)} / {max}</span></div><div className="combat-health" role="meter" aria-label={vehicle ? 'Vehicle hull integrity' : 'Health'} aria-valuemin={0} aria-valuemax={max} aria-valuenow={hp}><div className={hp / max < 0.3 ? 'critical' : ''} style={{ width: `${Math.max(0, hp / max) * 100}%` }}/></div>
+    {/* ONE COLUMN, NOT TWO ABSOLUTE BOXES: the kit used to be pinned at bottom: 164px
+        while the vitals grew upward from bottom: 25px, so on any viewport where the vitals
+        block is taller than 139 px the KIT chip landed on the health bar. */}
+    <div className="combat-bottom-left">
+        {/* THE KIT: a real inventory, grouped the way it is packed, not a row of numbers */}
+      <div className={`combat-inventory ${invOpen ? 'open' : ''}`}>
+        <button className="inv-toggle" onClick={() => setInvOpen(v => !v)} title="Kit / I">
+          <kbd>I</kbd><span>KIT</span>
+        </button>
+        {invOpen && (
+          <div className="inv-panel">
+            <header>
+              <b>OPERATIVE LOADOUT</b>
+              <span>SECTOR {h.sector} · {h.sectorName}</span>
+            </header>
+            <div className="inv-groups">
+              {(h.inventory || []).map(group => (
+                <section key={group.group}>
+                  <h4>{group.group}</h4>
+                  <ul>
+                    {group.items.map((it, i) => {
+                      const selectable = group.group === 'PRIMARY';
+                      const isCurrent = selectable && it.tone === 'active';
+                      return (
+                        <li key={`${group.group}-${i}`}
+                          className={`tone-${it.tone} ${isCurrent ? 'is-current' : ''} ${selectable ? 'is-pick' : ''}`}
+                          onClick={selectable ? () => (isCurrent ? p.onReload() : p.onWeapon(it.label)) : undefined}
+                          title={selectable
+                            ? (isCurrent ? `Reload ${it.label} from reserve — R also works` : `Shoulder ${it.label} — number keys also work`)
+                            : undefined}>
+                          <span>{it.label}</span>
+                          <b>{it.detail}</b>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
+              ))}
+            </div>
+            <footer>
+              <span>HEALTH {h.hp}/{h.maxHp}</span>
+              <span>ARMOR {h.shieldHp}</span>
+              <span>FRAGS {h.grenades}</span>
+              <span>{h.frostwing ? 'FROSTWING CLEARANCE' : 'NO SPECIAL CLEARANCE'}</span>
+              <span className="inv-hint">1-7 SHOULDER · R RELOAD · I CLOSE</span>
+            </footer>
+          </div>
+        )}
+      </div>
+      <div className="combat-bottom-vitals"><div className="combat-vitals-title"><b>{vehicleName}</b><span>{Math.ceil(hp)} / {max}</span></div><div className="combat-health" role="meter" aria-label={vehicle ? 'Vehicle hull integrity' : 'Health'} aria-valuemin={0} aria-valuemax={max} aria-valuenow={hp}><div className={hp / max < 0.3 ? 'critical' : ''} style={{ width: `${Math.max(0, hp / max) * 100}%` }}/></div>
       <div className="combat-armor"><span>{vehicle && !h.driving ? `FUEL ${Math.ceil(h.vehicleFuel)}%` : `ARMOR ${h.shieldHp}`}</span><span>{h.tank ? 'LMB / MAIN GUN' : vehicle ? 'LMB / MOUNTED CANNON' : `${h.weapon} / ${h.ammo < 0 ? 'UNLIMITED' : h.ammo}`}</span></div>
       {!vehicle && h.shieldMax > 0 && <div className="combat-armor-bar"><div style={{ width: `${h.shieldHp / h.shieldMax * 100}%` }}/></div>}
       <div className="combat-intel"><small>INTERCEPTED COMMS</small><p>{h.aiTactic}</p><span>{h.trucksActive} TRANSPORTS <i>/</i> {h.helisActive + h.airTransports} AIRCRAFT</span></div>
+    </div>
     </div>
     <div className="combat-action-area">
       {h.nearPrompt && <div className="combat-interact-hint">{h.nearPrompt}</div>}
@@ -80,51 +130,5 @@ export default function CombatHud(p: Props) {
         {h.gatePrompt && <button onClick={p.onGate} className="context-action"><kbd>L</kbd><span>LOCK</span></button>}
       </div>
     </div>
-    {/* THE KIT: a real inventory, grouped the way it is packed, not a row of numbers */}
-    <div className={`combat-inventory ${invOpen ? 'open' : ''}`}>
-      <button className="inv-toggle" onClick={() => setInvOpen(v => !v)} title="Kit / I">
-        <kbd>I</kbd><span>KIT</span>
-      </button>
-      {invOpen && (
-        <div className="inv-panel">
-          <header>
-            <b>OPERATIVE LOADOUT</b>
-            <span>SECTOR {h.sector} · {h.sectorName}</span>
-          </header>
-          <div className="inv-groups">
-            {(h.inventory || []).map(group => (
-              <section key={group.group}>
-                <h4>{group.group}</h4>
-                <ul>
-                  {group.items.map((it, i) => {
-                    const selectable = group.group === 'PRIMARY';
-                    const isCurrent = selectable && it.tone === 'active';
-                    return (
-                      <li key={`${group.group}-${i}`}
-                        className={`tone-${it.tone} ${isCurrent ? 'is-current' : ''} ${selectable ? 'is-pick' : ''}`}
-                        onClick={selectable ? () => (isCurrent ? p.onReload() : p.onWeapon(it.label)) : undefined}
-                        title={selectable
-                          ? (isCurrent ? `Reload ${it.label} from reserve — R also works` : `Shoulder ${it.label} — number keys also work`)
-                          : undefined}>
-                        <span>{it.label}</span>
-                        <b>{it.detail}</b>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </section>
-            ))}
-          </div>
-          <footer>
-            <span>HEALTH {h.hp}/{h.maxHp}</span>
-            <span>ARMOR {h.shieldHp}</span>
-            <span>FRAGS {h.grenades}</span>
-            <span>{h.frostwing ? 'FROSTWING CLEARANCE' : 'NO SPECIAL CLEARANCE'}</span>
-            <span className="inv-hint">1-7 SHOULDER · R RELOAD · I CLOSE</span>
-          </footer>
-        </div>
-      )}
-    </div>
-
   </div>;
 }

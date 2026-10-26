@@ -207,7 +207,9 @@ interface Bullet { x: number; y: number; px: number; py: number; vx: number; vy:
   /** Which class of target this round is allowed to touch. Unset means anything. */
   arm?: 'ground' | 'air';
   /** Air-to-air missiles steer towards the nearest airborne contact. */
-  homing?: boolean; }
+  homing?: boolean;
+  /** The sandbag walls of the emplacement that fired this round: never a target. */
+  ownPit?: { x: number; y: number; w: number; h: number }[]; }
 interface Enemy {
   type: string; def: EnemyDef; x: number; y: number; vx: number; vy: number; hp: number; maxHp: number;
   flash: number; cool: number; ang: number; wobble: number; stun: number; spawnT: number;
@@ -317,6 +319,8 @@ interface ArmyTurret {
   burst: number; flash: number; muzzle: number;
   /** Rounds left in the current burst and the gap between them. */
   rounds: number; gap: number;
+  /** The emplacement's own sandbag walls: a round fired from here never touches them. */
+  pit?: { x: number; y: number; w: number; h: number }[];
 }
 /** Military fast jet: parked until the base is breached, then it hunts. */
 interface ArmyJet {
@@ -762,6 +766,9 @@ export class Game {
   private armyGuardsData: { x: number; y: number; type: string }[] = [];
   /** Both army shutters, kept apart so the inner one can be powered down. */
   private armyShutters: Rect[] = [];
+  /** Army gatehouses, one entry per gate, built from the leaves the world handed over. */
+  private armyGateFrames = new Map<string, { x: number; y: number; w: number; h: number; leaves: Rect[] }>();
+  private gateFrameDrawn = new Set<string>();
   private armyInnerOpen = false;
   private campaignSites: CampaignSites | null = null;
   private blackout = { active: false, t: 0, searchT: 0, lastX: 0, lastY: 0 };
@@ -852,6 +859,8 @@ export class Game {
   siege = { active: false, t: 0, poi: '', waves: 0 };
   megaCrates: MegaCrate[] = [];
   baseOverride = { active: false, poiId: '', progress: 0, timer: 0 };
+  /** Seconds the operative has stood on a held uplink without a defender able to see him. */
+  private uplinkHold = 0;
   prompt = '';
   gates: HydraulicGate[] = [];
   details: RoomDetail[] = [];
@@ -1189,6 +1198,21 @@ export class Game {
       const inner = o.armyGate === 'inner';
       o.hp = o.maxHp = inner ? 5200 : 3000;
     }
+    /* ONE GATEHOUSE PER GATE. prepareStructures() cuts every 210 px leaf into two 105 px
+     * sections, so an outer gate arrives here as four separate rects. Drawing a frame
+     * around each of them produced four little doors side by side — which is exactly the
+     * "doors lying on the wall" the report is about. The leaves are grouped back into
+     * their gates and the renderer is given the gate, not the pieces. */
+    this.armyGateFrames.clear();
+    for (const o of this.armyShutters) {
+      const id = o.armyGateId;
+      if (!id) continue;
+      const w = o.armyGateW ?? o.w;
+      const h = o.armyGateH ?? o.h;
+      const f = this.armyGateFrames.get(id);
+      if (f) { f.leaves.push(o); f.x = Math.min(f.x, o.x); f.y = Math.min(f.y, o.y); }
+      else this.armyGateFrames.set(id, { x: o.x, y: o.y, w, h, leaves: [o] });
+    }
     // The army builds to a different standard. Its ramparts shrug off anything short of
     // sustained rocket fire, which is exactly what makes the base feel like a fortress.
     for (const o of this.obstacles) {
@@ -1336,12 +1360,22 @@ export class Game {
       }
     }
     this.routines = []; this.routineT = 6; this.routineSeq = 0;
+    /* The emplacements carry the footprint of their own pit into the fight; see the
+     * ownPit field on the round and the sweep in updateBullets(). */
     this.armyTurrets = (world.army?.turrets || []).map((t) => ({
       x: t.x, y: t.y, ang: t.ang, hp: t.heavy ? 900 : 620, maxHp: t.heavy ? 900 : 620,
       owner: 'enemy' as const, cool: rand(0, 2), heavy: t.heavy, burst: 0, flash: 0, muzzle: 0,
-      rounds: 0, gap: 0, aimX: t.x, aimY: t.y,
+      rounds: 0, gap: 0, aimX: t.x, aimY: t.y, pit: t.pit,
     }));
     this.armyInnerOpen = false;
+    /* FIRST DEPLOY: the game stops before the operative can be shot at and says how to
+     * play. This is the "ko prides v igro" card — one card, once per run. */
+    this.milestone('deploy', 'OPERATIVE DEPLOYED · READ THIS ONCE', [
+      'WASD to move · mouse to aim · LMB to fire · SPACE dash · C Aegis shield',
+      'F interacts: gates, vehicles, uplinks, the vault guide. I opens the kit.',
+      'Your objective is on the right. The CAGE, the vault and IRON RESERVE are all reachable.',
+      'Everything you can fly or drive is out there, parked and real. Take it.',
+    ]);
     // A prototype is a different aircraft, not a repaint: twice the structure, a hotter
     // powerplant and a seeker that reaches further. The line ships keep their old numbers.
     this.armyJets = (world.army?.jets || []).map((j) => {
@@ -2444,6 +2478,9 @@ export class Game {
   private devHoldTheLine() {
     if (!this.devInfiniteLives) return;
     if (this.hp < 1) this.hp = 1;
+    // Every airframe in the sky is the operative's while he is in it: a hunter that gets a
+    // good pass must not end a dev run by killing the aircraft out from under him.
+    for (const j of this.armyJets) if (j.manned && j.hp < 1) j.hp = 1;
     if (this.playerJet && this.playerJet.hp < 1) this.playerJet.hp = 1;
     if (this.plane && this.flyingPlane && this.plane.hp < 1) this.plane.hp = 1;
     if (this.piloting && this.playerHeli && this.playerHeli.hp < 1) this.playerHeli.hp = 1;
@@ -2462,6 +2499,16 @@ export class Game {
     this.tutorial = { title, lines, hint };
     this.clearInput();
     sfx.click();
+  }
+
+  /**
+   * A milestone card is a tutorial that also tells the operative what just changed: the
+   * game stops, the world is frozen, and the card says what to do with the new thing.
+   * Every first in a run gets one — the first deploy, the first base taken, the first
+   * stockade broken, the first interceptor, the first tank, the first boat.
+   */
+  private milestone(id: string, title: string, lines: string[]) {
+    this.showTutorial(id, title, lines, 'PRESS ANY KEY TO RESUME');
   }
 
   private update(dt: number) {
@@ -3313,7 +3360,14 @@ export class Game {
        * the pit's own wall a centimetre out of the barrel and the crew "shot itself". The
        * muzzle is now 64 m out and nothing solid stands in the arc in front of it. */
       const mx = t.x + Math.cos(t.ang) * 64, my = t.y + Math.sin(t.ang) * 64;
-      // Ground and air are the same problem for a twin mount: no target class lock.
+      /* THE PIT IS NOT A TARGET.
+       *
+       * A round that leaves the barrel 64 px from the mount, aimed at a man standing just
+       * past the sandbags, will hit the sandbags — and on screen that reads as the gun
+       * shooting its own emplacement, which is the report. Every round carries the identity
+       * of the pit that fired it, and the bullet sweep is told to ignore those walls. The
+       * crew still cannot fire inside 150 px (the dead zone), so the only rounds that can
+       * come back to the pit are the ones that would have grazed its own parapet. */
       for (const side of [-1, 1]) {
         const a = t.ang + rand(-0.008, 0.008);
         const ox = Math.cos(t.ang + Math.PI / 2) * side * 11;
@@ -3324,7 +3378,7 @@ export class Game {
           dmg: hostile ? (t.heavy ? 11 : 8) : 20,
           life: 1.5, friendly: !hostile,
           color: hostile ? '#ffd08a' : '#c6f0ff', r: 3,
-          hits: [],
+          hits: [], ownPit: t.pit,
         });
       }
       this.addLight(mx, my, 170, '255,210,150', 0.08);
@@ -4286,6 +4340,11 @@ export class Game {
     t.hp = Math.max(t.hp, t.maxHp * 0.55);
     t.cool = 0.4; t.rounds = 0; t.gap = 0;
     // The crew that held it is gone; the mount is ours and it tracks on its own.
+    this.milestone('turret', 'The emplacement is yours', [
+      'A seized twin gun fires on its own: ground targets and aircraft, for as long as it lives.',
+      'Shell it down to three-quarters damage and the crew walks away — then press F at the pit.',
+      'Leave it behind and it keeps shooting. It is the best thing you can leave on a road.',
+    ]);
     this.setBanner('TWIN GUN SEIZED', 'IT COVERS GROUND AND AIR — LEAVE IT AND IT KEEPS FIRING');
     this.score += 900;
     this.addText(t.x, t.y - 66, 'TWIN GUN SEIZED · IT COVERS GROUND AND AIR', '#a9ecff', 16);
@@ -4647,6 +4706,9 @@ export class Game {
   /** Tanks only feel explosives, and even then they shrug most of it off. */
   private hurtTank(t: Tank, dmg: number) {
     if (t.dead) return;
+    // A driven hull is the operative's own vehicle: splash from its own gun must not
+    // chew through it while it sits there firing.
+    if (t.captured && this.playerTank === t) return;
     t.hp -= dmg * 0.5;
     this.sparks(t.x, t.y, '#ffd166', 6);
     if (t.hp <= 0) this.killTank(t);
@@ -5069,16 +5131,47 @@ export class Game {
     }
     const poiCore = this.pois.find((p) => !p.secret && !p.captured && Math.hypot(this.px - p.x, this.py - p.y) < 170);
     if (poiCore && !this.baseOverride.active) {
-      /* WHO IS ACTUALLY DEFENDING? Sleeping parade ranks, men still materialising into the
-       * world, civilians and anyone already in a transport are not holding the ground. The
-       * old count included all of them, so a cleared objective kept claiming defenders it
-       * did not have and the operative could never take it. */
+      /* WHO IS ACTUALLY DEFENDING?
+       *
+       * The reported bug: every defender is dead and the uplink still says "N DEFENDERS
+       * REMAIN", so the point can never be taken. The count was taken over 0.8 x the
+       * poi radius — 1 200 px on the IRON RESERVE, 1 440 px on the airfield — so a single
+       * trooper dozing three blocks away, or a man in a truck on the far side of the
+       * compound, held the objective down from off screen.
+       *
+       * The count is now the ground the operative is actually standing on: his own
+       * capture circle, capped so it can never reach across a compound. Men who are
+       * asleep, still materialising, in a transport, civilian, or simply not in the fight
+       * are not defenders. If the count is zero the uplink opens — on the same key press. */
+      const capR = Math.min(560, Math.max(300, poiCore.r * 0.32));
       const defenders = this.enemies.filter((e) =>
         !e.def.civilian && e.hp > 0 && e.spawnT <= 0 && !e.dormant
         && e.boardingTruck === undefined
-        && Math.hypot(e.x - poiCore.x, e.y - poiCore.y) < Math.max(420, poiCore.r * 0.8)).length;
-      if (defenders > 0) this.addText(this.px, this.py - 48, `UPLINK LOCKED / ${defenders} DEFENDERS REMAIN`, '#ff9d9d', 13);
-      else this.startBaseOverride(poiCore);
+        && Math.hypot(e.x - poiCore.x, e.y - poiCore.y) < capR);
+      /* A GARRISON THAT CANNOT REACH YOU IS NOT HOLDING THE POINT.
+       *
+       * The last version of this bug: the count said "defenders remain" forever because one
+       * of them was asleep in a room, wedged behind a wall, or simply never given a path.
+       * Standing on the point for six seconds with no defender able to draw a line to you
+       * opens the uplink — the ground is yours because nobody is contesting it. */
+      const seen = defenders.some((e) => this.hasLine(e.x, e.y, this.px, this.py));
+      this.uplinkHold = seen ? 0 : this.uplinkHold + 1;
+      if (defenders.length > 0 && this.uplinkHold < 6) {
+        // Say where the hold-outs are: "3 remain" with no direction is what makes a
+        // cleared objective feel broken.
+        let nearest = defenders[0], nd = Infinity;
+        for (const e of defenders) {
+          const d = Math.hypot(e.x - this.px, e.y - this.py);
+          if (d < nd) { nd = d; nearest = e; }
+        }
+        void nearest;
+        this.addText(this.px, this.py - 48, `UPLINK LOCKED / ${defenders.length} DEFENDERS WITHIN ${Math.round(capR)} m`, '#ff9d9d', 13);
+        this.addText(this.px, this.py - 28, `NEAREST HOLD-OUT ${Math.round(nd)} m ${this.compassTo(nearest.x, nearest.y)}`, '#ffc9a0', 11);
+        // and F is not swallowed: the operative learns to walk over and finish it
+      } else {
+        if (defenders.length > 0) this.addText(this.px, this.py - 48, 'GARRISON UNREACHABLE — UPLINK OPEN', '#a9ecff', 14);
+        this.startBaseOverride(poiCore);
+      }
       return;
     }
     if (Math.hypot(PRISON_DOOR.x - this.px, PRISON_DOOR.y - this.py) < 230) { this.enterPrison('visit'); return; }
@@ -5656,6 +5749,11 @@ export class Game {
    * the men who locked them up: break the brig and they take up rifles for you.
    */
   private breakStockade(st: { x: number; y: number; w: number; h: number }) {
+    this.milestone('stockade', 'THE STOCKADE IS OPEN', [
+      'The inmates are the army\'s own, and they fight for whoever let them out.',
+      'They will follow you for the rest of the run and shoot at what shoots at you.',
+      'The brig is worth breaking on every visit: more guns on your side, no cost.',
+    ]);
     if (this.stockadeOpen) return;
     const inside = this.mpNear(st);
     if (inside > 0) {
@@ -5869,6 +5967,11 @@ export class Game {
 
   private enterVault() {
     if (this.status !== 'playing') return;
+    this.milestone('vault', 'You found the vault', [
+      'This is level 3 access: relics, a recovered airframe and a way out through the tunnels.',
+      'Walk to a case and press F. Everything in here is worth taking and nothing shoots back.',
+      'In the tunnel: your light matters. The maze is dark and the floor is not all floor.',
+    ]);
     if (!this.vaultOpen) { this.score += 12000; this.vaultChoice = 'offer'; }
     this.vaultOpen = true;
     const poi = this.pois.find(p => p.id === 'vault');
@@ -6117,10 +6220,11 @@ export class Game {
     t.speed = 0;
     this.px = t.x; this.py = t.y;
     this.pang = t.ang;
-    if (!reboard) this.showTutorial('tank', 'YOU HAVE A TANK', [
-      'W / S throttle · A / D steer the hull · the mouse lays the turret',
-      'LMB main gun · F dismount (the hull stays where you leave it)',
-      'Your hull is captured armour: friendly tanks will not shoot it, enemy ones will.',
+    if (!reboard) this.showTutorial('tank', 'You have a tank', [
+      'W/S throttle, A/D steer the hull. The mouse lays the turret; LMB fires the main gun.',
+      'F dismounts — the hull stays exactly where you leave it. Step back in with F.',
+      'No tank gun can break another tank hull, yours included. To kill armour, use rockets,',
+      'frags, the air wing, or take the hull. Turret emplacements can be turned with F as well.',
     ]);
     if (reboard) {
       this.setBanner('S.H.I.E.L.D. TANK', 'WASD DRIVE · LMB MAIN GUN · F DISMOUNT');
@@ -6741,7 +6845,12 @@ export class Game {
   }
 
   private updateBaseOverride(dt: number) {
-    if (!this.baseOverride.active) return;
+    if (!this.baseOverride.active) {
+      // Decay the standoff timer when the operative leaves the point.
+      const nearPoi = this.pois.some((p) => !p.secret && !p.captured && Math.hypot(this.px - p.x, this.py - p.y) < 170);
+      if (!nearPoi) this.uplinkHold = 0;
+      return;
+    }
     const poi = this.pois.find(p => p.id === this.baseOverride.poiId);
     if (!poi) { this.baseOverride.active = false; return; }
     const d = Math.hypot(this.px - poi.x, this.py - poi.y);
@@ -6756,6 +6865,13 @@ export class Game {
         poi.captured = true;
         this.score += 35000;
         sfx.wave();
+        // The first base taken stops the game and explains what a secured base does.
+        if (!this.tutorialsSeen.has('capture')) this.milestone('capture', `${poi.name} SECURED`, [
+          'A secured base stops feeding the alarm: its garrison stands down and its gates open to you.',
+          'Its loot, vehicles and aircraft are now yours to take — press F on anything that looks drivable.',
+          'The score banked 35 000. Securing every marked base is how a sector is finished.',
+          'Walk out and take the next one. Nothing here respawns.',
+        ]);
         this.setBanner('BASE SECURED / OVERRIDE COMPLETE', `${poi.name} S.H.I.E.L.D. OUTPOST ACTIVE`);
         this.objective = `SECTOR ${this.sector}/6 · ASSAULT THE MAIN FORTRESS`;
         for (let i = 0; i < 4; i++) {
@@ -8736,6 +8852,13 @@ export class Game {
 
   private setBanner(a: string, b: string) { this.banner = a; this.bannerSub = b; this.bannerT = 2.4; }
 
+  /** `NE`, `WSW`: which way a point lies, so a HUD hint can be followed. */
+  private compassTo(x: number, y: number): string {
+    const a = Math.atan2(y - this.py, x - this.px);
+    const dirs = ['E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW', 'N', 'NNE', 'NE', 'ENE'];
+    return dirs[((Math.round(a / (Math.PI / 8)) % 16) + 16) % 16];
+  }
+
   private makeEnemy(type: string, x: number, y: number, squadId: number, slot: number): Enemy {
     // Defensive fallback: an unknown roster name must never take the whole simulation down.
     const known = ENEMIES[type] ? type : 'grunt';
@@ -9538,6 +9661,9 @@ export class Game {
         for (const index of candidates) {
           const r = this.obstacles[index];
           if (r.dead) continue;
+          /* A gun never shoots its own parapet: rounds fired from an emplacement pass
+           * through that emplacement's sandbags and nothing else. */
+          if (b.ownPit && b.ownPit.some((q) => q.x === r.x && q.y === r.y && q.w === r.w)) continue;
           if (b.friendly) {
             const special = this.pierceRects.get(r);
             if (special && (special.cells.some(c => !c.dead) || special.crates.some(c => !c.dead))) continue;
@@ -10385,13 +10511,16 @@ export class Game {
         if (l.hp <= 0) { this.lasers.splice(this.lasers.indexOf(l), 1); this.score += 4500; this.sparks(l.x, l.y, '#fb9c88', 22); }
       }
       for (const s of [...this.satcoms]) if (!s.dead && Math.hypot(s.x - x, s.y - y) < radius + 30) { s.hp -= dmg * 1.5; if (s.hp <= 0) this.destroySatcom(s); }
-      // Convoy armour: explosives only, and even then at half effect.
+      /* NO TANK FIRES AT A TANK.
+       *
+       * A main-gun round is not a saturation bomb, and armour is the one thing on this
+       * battlefield that a tank's own gun cannot settle. Shells therefore do nothing to
+       * any hull — not the battalion's, not a captured one, and not the hull that fired.
+       * The only damage a tank takes is the operative's own weapons, rockets, bombs and
+       * the air wing: everything that is not another main gun. */
       for (const tk of this.tanks) {
         if (tk.dead) continue;
-        /* A MAIN-GUN SHELL IS NOT A SATURATION BOMB. The battalion's own hulls used to be
-         * caught by a neighbouring tank's shell and blew each other up — tanks shooting
-         * tanks. Only the operative's captured hull can be hit by one of these. */
-        if (opts?.shell && !tk.captured) continue;
+        if (opts?.shell) continue;
         if (Math.hypot(tk.x - x, tk.y - y) < radius + 62) this.hurtTank(tk, dmg);
       }
       for (const v of this.vans) if (!v.dead && !v.reserved && !v.driving && Math.hypot(v.x - x, v.y - y) < radius + 45) {
@@ -12702,14 +12831,28 @@ export class Game {
       const mine = t.owner === 'player';
       ctx.save();
       ctx.translate(t.x, t.y);
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.beginPath(); ctx.ellipse(0, 6, 46, 22, 0, 0, TAU); ctx.fill();
-      // pit
-      ctx.fillStyle = mine ? '#2c4a52' : '#3b4136';
-      ctx.beginPath(); ctx.arc(0, 0, 40, 0, TAU); ctx.fill();
-      ctx.strokeStyle = mine ? 'rgba(150,235,255,0.75)' : 'rgba(200,180,120,0.45)';
-      ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(0, 0, 40, 0, TAU); ctx.stroke();
+      /* THE PIT IS DRAWN AS A PIT: a dug emplacement with a sandbag parapet around it and
+       * a concrete floor, and the barrels come out over the low side. Drawn this way the
+       * mount has a clear firing arc and the eye can see where its own parapet is, which
+       * is the whole reason the crew refuses to shoot inside 150 px. */
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.beginPath(); ctx.ellipse(2, 7, 52, 26, 0, 0, TAU); ctx.fill();
+      // dug floor, ringed by the parapet
+      ctx.fillStyle = mine ? '#2c4a52' : '#413f30';
+      ctx.beginPath(); ctx.arc(0, 0, 46, 0, TAU); ctx.fill();
+      ctx.fillStyle = mine ? '#37616b' : '#4d4a37';
+      ctx.beginPath(); ctx.arc(0, 0, 38, 0, TAU); ctx.fill();
+      // sandbag parapet: an arc of bags, open toward the guns
+      for (let i = 0; i < 15; i++) {
+        const a = t.ang + Math.PI + (i / 14 - 0.5) * Math.PI * 1.35;
+        const bx = Math.cos(a) * 46, by = Math.sin(a) * 46;
+        ctx.fillStyle = i % 2 ? '#7d7050' : '#8a7c58';
+        ctx.beginPath(); ctx.ellipse(bx, by, 11, 7, a, 0, TAU); ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+      }
+      ctx.strokeStyle = mine ? 'rgba(150,235,255,0.7)' : 'rgba(200,180,120,0.4)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, 46, 0, TAU); ctx.stroke();
       // turret body
       ctx.fillStyle = mine ? '#3f6d78' : '#4a5142';
       ctx.beginPath(); ctx.arc(0, 0, 24, 0, TAU); ctx.fill();
@@ -13114,6 +13257,98 @@ export class Game {
    * reads as a hull, a silo as a silo, a howitzer points somewhere. Returns false for
    * anything it does not know, so the generic extruder still handles the rest.
    */
+  /**
+   * A GATE IS A DOOR IN A FRAME, NOT A DOOR PAINTED ON A WALL.
+   *
+   * The army's shutters used to fall through to the generic structure renderer: a flat
+   * brown box with hazard chevrons, sitting exactly where the rampart was, so the outer
+   * gate, the blast gate and the command gate all looked like a door lying on top of the
+   * wall. This draws the whole gatehouse instead — a cut threshold, jambs standing proud of
+   * the wall on both sides, a lintel across the top and the two steel leaves *inside* the
+   * opening, inset far enough that the frame is always visible around them.
+   */
+  private drawArmyGate(ctx: CanvasRenderingContext2D, frame: { x: number; y: number; w: number; h: number; leaves: Rect[] }) {
+    const o = frame;
+    const horizontal = frame.w >= frame.h;
+    const span = frame.w;
+    const thick = frame.h;
+    const cx = frame.x + frame.w / 2, cy = frame.y + frame.h / 2;
+    const dead = frame.leaves.every((l) => l.dead);
+    ctx.save();
+    ctx.translate(cx, cy);
+    if (!horizontal) ctx.rotate(Math.PI / 2);
+    const half = span / 2;
+    const t = thick / 2;
+    // the opening: a recessed threshold the road runs through
+    ctx.fillStyle = '#14100c';
+    ctx.fillRect(-half, -t, span, thick);
+    const reveal = ctx.createLinearGradient(0, -t, 0, t);
+    reveal.addColorStop(0, 'rgba(0,0,0,0.75)');
+    reveal.addColorStop(0.5, 'rgba(0,0,0,0.35)');
+    reveal.addColorStop(1, 'rgba(0,0,0,0.7)');
+    ctx.fillStyle = reveal; ctx.fillRect(-half, -t, span, thick);
+    // road markings continue through the gatehouse
+    ctx.fillStyle = 'rgba(226,232,220,0.20)';
+    for (let d = -half + 26; d < half - 20; d += 54) ctx.fillRect(d, -1.5, 26, 3);
+    // jambs, standing proud of the wall on both sides
+    for (const side of [-1, 1]) {
+      const x = side < 0 ? -half : half - 26;
+      ctx.fillStyle = '#3b3a30'; ctx.fillRect(x, -t - 12, 26, thick + 24);
+      ctx.fillStyle = '#55523f'; ctx.fillRect(x, -t - 12, 26, 5);
+      ctx.fillStyle = '#1b1a14'; ctx.fillRect(x + (side < 0 ? 22 : 0), -t - 8, 4, thick + 16);
+      // the pocket the leaf slides into
+      ctx.fillStyle = 'rgba(8,10,9,0.85)'; ctx.fillRect(x + (side < 0 ? 26 : -8), -t + 4, 8, thick - 8);
+    }
+    // lintel and its shadow across the opening
+    ctx.fillStyle = '#46443a'; ctx.fillRect(-half - 12, -t - 22, span + 24, 12);
+    ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(-half, -t - 10, span, 10);
+    ctx.fillStyle = 'rgba(198,190,150,0.28)'; ctx.fillRect(-half - 12, -t - 22, span + 24, 3);
+    // the leaves themselves, inside the opening
+    const leafW = half - 30;
+    for (const side of [-1, 1]) {
+      const x = side < 0 ? -leafW : 30;
+      ctx.fillStyle = dead ? '#241d16' : '#2f3d46';
+      ctx.fillRect(x, -t + 5, leafW, thick - 10);
+      ctx.fillStyle = dead ? '#2c231a' : '#465a63';
+      ctx.fillRect(x, -t + 5, leafW, 5);
+      ctx.strokeStyle = dead ? 'rgba(120,90,60,0.4)' : 'rgba(150,180,190,0.45)';
+      ctx.lineWidth = 1.5; ctx.strokeRect(x + 1, -t + 6, leafW - 2, thick - 12);
+      // panel seams, so the leaf reads as steel plate and not as a wall
+      ctx.fillStyle = dead ? 'rgba(0,0,0,0.5)' : 'rgba(10,20,26,0.55)';
+      for (let d = x + 12; d < x + leafW - 8; d += 26) ctx.fillRect(d, -t + 10, 3, thick - 20);
+      // hazard band along the foot of the leaf
+      if (!dead) {
+        ctx.fillStyle = 'rgba(255,190,90,0.55)';
+        for (let d = x + 6; d < x + leafW - 10; d += 18) {
+          ctx.beginPath();
+          ctx.moveTo(d, t - 8); ctx.lineTo(d + 8, t - 8); ctx.lineTo(d + 14, t - 16); ctx.lineTo(d + 6, t - 16);
+          ctx.closePath(); ctx.fill();
+        }
+      }
+      // hydraulic ram above the leaf
+      ctx.fillStyle = '#1b2a30'; ctx.fillRect(x + 6, -t - 16, leafW - 12, 7);
+      ctx.fillStyle = dead ? '#6b5a45' : '#a7bac0';
+      ctx.fillRect(x + 10, -t - 14.5, Math.max(0, leafW - 26), 4);
+    }
+    // status lamp in the middle of the lintel: red when held, dark when blown
+    ctx.fillStyle = dead ? '#3a2a22' : (Math.sin(performance.now() / 320) > 0 ? '#ff6f6a' : '#7a2b28');
+    ctx.beginPath(); ctx.arc(0, -t - 16, 4, 0, TAU); ctx.fill();
+    ctx.restore();
+    if (!dead) {
+      ctx.strokeStyle = 'rgba(255,190,120,0.18)'; ctx.lineWidth = 1;
+      ctx.strokeRect(o.x - 4, o.y - 6, o.w + 8, o.h + 12);
+    }
+    // health bar: a gate under fire tells you so
+    const hpFrac = frame.leaves.reduce((a, l) => a + Math.max(0, l.hp ?? 0), 0) /
+      Math.max(1, frame.leaves.reduce((a, l) => a + Math.max(1, l.maxHp ?? 1), 0));
+    if (!dead && hpFrac < 0.999) {
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(cx - 46, cy - thick / 2 - 40, 92, 5);
+      ctx.fillStyle = hpFrac > 0.4 ? '#e0c070' : '#ff8f6a';
+      ctx.fillRect(cx - 46, cy - thick / 2 - 40, 92 * hpFrac, 5);
+    }
+  }
+
   private drawArmyProp(ctx: CanvasRenderingContext2D, o: Rect): boolean {
     const H = o.h3d;
     const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
@@ -14095,6 +14330,7 @@ export class Game {
   }
 
   private drawStructures(ctx: CanvasRenderingContext2D, camX: number, camY: number) {
+    this.gateFrameDrawn.clear();
     this.grid.query(camX - 120, camY - 160, this.w + 240, this.h + 320, this.qset);
     const idxs = Array.from(this.qset);
     // sort by y so extrusions layer correctly
@@ -14112,6 +14348,14 @@ export class Game {
       if (o.kind === 'cellblock') { this.drawCellBlock(ctx, o, o.h3d); continue; }
       if (o.kind === 'lighthouse') { this.drawLighthouse(ctx, o); continue; }
       if (o.kind === 'barrier') { this.drawBarrier(ctx, o); continue; }
+      if (o.armyGate) {
+        const id = o.armyGateId;
+        const frame = id ? this.armyGateFrames.get(id) : undefined;
+        if (frame && id) {
+          if (!this.gateFrameDrawn.has(id)) { this.gateFrameDrawn.add(id); this.drawArmyGate(ctx, frame); }
+        } else this.drawArmyGate(ctx, { x: o.x, y: o.y, w: o.w, h: o.h, leaves: [o] });
+        continue;
+      }
       if (this.drawArmyProp(ctx, o)) continue;
       if (this.drawStreetProp(ctx, o)) continue;
       const H = o.h3d;
