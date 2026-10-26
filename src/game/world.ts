@@ -81,6 +81,11 @@ export interface Rect {
   maxHp?: number; structuralGroup?: number;
   /** Army shutter: the outer causeway gate or the powered inner blast gate. */
   armyGate?: 'outer' | 'inner';
+  /** Which gatehouse this leaf belongs to, and the size of the whole gate. The renderer
+   *  needs all three to draw one frame around two leaves split into four sections. */
+  armyGateId?: string;
+  armyGateW?: number;
+  armyGateH?: number;
   /** Army rampart: reinforced concrete, far tougher than a Hydra curtain wall. */
   armyWall?: boolean;
 }

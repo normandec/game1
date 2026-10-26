@@ -20,10 +20,10 @@ export interface GameVersion {
 
 export const GAME_VERSION: GameVersion = {
   major: 1,
-  minor: 44,
+  minor: 45,
   patch: 0,
-  round: 44,
-  codename: 'POURED CONCRETE',
+  round: 45,
+  codename: 'REAL BASE',
   date: '2026-10-26',
 };
 

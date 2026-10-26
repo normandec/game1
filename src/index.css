@@ -336,7 +336,10 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 .combat-banner { width: 100%; text-align: center; animation: float-up .3s ease-out both; text-shadow: 0 3px 22px #000; }
 .combat-banner strong { display: block; font: 600 clamp(20px, 3vw, 41px) 'Chakra Petch', sans-serif; letter-spacing: 3px; color: #e8c890; }
 .combat-banner > span { display: block; color: #a0c4c1; margin-top: 10px; font-size: 10px; letter-spacing: 2px; }
-.combat-bottom-vitals { position: absolute; left: 24px; bottom: 25px; width: 244px; background: linear-gradient(90deg, #081522de, transparent); padding: 12px 14px 0 0; }
+/* The bottom-left corner is a single column: kit, vitals, comms. Nothing in it is
+   absolutely positioned, so the KIT chip can never land on the health bar again. */
+.combat-bottom-left { position: absolute; left: 24px; bottom: 25px; width: 252px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.combat-bottom-vitals { width: 244px; background: linear-gradient(90deg, #081522de, transparent); padding: 12px 14px 0 0; }
 .combat-vitals-title { display: flex; align-items: center; justify-content: space-between; font-size: 10px; letter-spacing: 1px; margin-bottom: 8px; }
 .combat-vitals-title b { font-weight: 400; color: #82c7c0; }
 .combat-vitals-title > span { color: #9cbcc4; font-size: 9px; }
@@ -348,6 +351,9 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 .combat-intel { margin-top: 17px; padding-top: 9px; border-top: 1px solid #6d99a326; }
 .combat-intel small { color: #7c8e8b; font-size: 7px; letter-spacing: 1.8px; }.combat-intel p { color: #c9af8b; font-size: 10px; margin: 5px 0; }.combat-intel > span { color: #687b85; font-size: 8px; }
 .combat-action-area { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); text-align: center; }
+/* Corridor rule: the action bar lives in the gap between the bottom-left column (24+252)
+   and the right stack (24+290). Below the width where that gap exists the bar moves up. */
+@media (max-width: 1040px) { .combat-action-area { bottom: 84px; } }
 .combat-action-buttons { display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 10px; pointer-events: auto; }
 .combat-action-buttons button { position: relative; min-width: 61px; min-height: 52px; padding: 7px 9px; overflow: hidden; background: #0c202ce8; border: 1px solid #7094a045; color: #a4c8d0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; }
 .combat-action-buttons kbd { font-size: 8px; opacity: .6; }.combat-action-buttons button > span { font-size: 8px; letter-spacing: 1px; }.combat-action-buttons button > div { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: #85ded4; transform-origin: left; }
@@ -410,7 +416,7 @@ kbd { font-family: 'Share Tech Mono', monospace; }
   .combat-settings { gap: 5px; }.combat-settings button { font-size: 7px; padding: 9px 6px; }.combat-settings kbd { display: none; }.combat-objective { max-width: 145px; }.combat-objective p { font-size: 9px; }.combat-objective small { font-size: 7px; letter-spacing: .8px; }.combat-objective > span { font-size: 6px; }
   .combat-left { left: 10px; top: 84px; width: 46vw; gap: 8px; }.combat-position > span { font-size: 8px; }.combat-position button { padding: 8px; font-size: 7px; }
   .combat-facility { max-width: 153px; }.combat-facility b { font-size: 9px; letter-spacing: .3px; }.combat-facility > span { font-size: 7px; }.combat-facility small { font-size: 6px; }
-  .combat-bottom-vitals { bottom: 94px; left: 12px; width: 172px; padding-top: 0; }.combat-vitals-title { font-size: 8px; }.combat-vitals-title > span { font-size: 8px; }.combat-armor { font-size: 6px; }.combat-intel { display: none; }
+  .combat-bottom-left { left: 12px; bottom: 94px; width: 180px; gap: 7px; }.combat-bottom-vitals { width: 172px; padding-top: 0; }.combat-vitals-title { font-size: 8px; }.combat-vitals-title > span { font-size: 8px; }.combat-armor { font-size: 6px; }.combat-intel { display: none; }
   .combat-action-area { bottom: 14px; }.combat-action-buttons button { min-width: 54px; min-height: 48px; padding: 6px; }.combat-action-buttons button > span { font-size: 7px; }.combat-interact-hint { font-size: 8px; padding: 6px; max-width: 90vw; white-space: normal; }.combat-gate-hint { font-size: 7px; }
   .combat-center { top: 47vh; width: 94vw; gap: 9px; }.combat-banner strong { font-size: 22px; letter-spacing: 1px; }.combat-banner > span { font-size: 8px; letter-spacing: 1px; }.combat-combo { font-size: 17px; }.combat-combo > span { font-size: 6px; }
   .combat-right { right: 10px; top: 84px; bottom: auto; width: 46vw; gap: 8px; }.combat-security { width: 164px; padding: 8px; }.combat-security small { font-size: 6px; letter-spacing: .6px; }.combat-security b { font-size: 8px; }
@@ -423,7 +429,7 @@ kbd { font-family: 'Share Tech Mono', monospace; }
  * A loadout board, not a stat readout: groups that read like pouches, one chip per item,
  * tone-coloured by what the thing is (ice = clearance, gold = ordnance, danger = lost).
  */
-.combat-inventory { position: absolute; left: 24px; bottom: 164px; pointer-events: auto; }
+.combat-inventory { position: relative; pointer-events: auto; }
 .combat-inventory .inv-toggle { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid #81bdb355; background: #0b1c26c9; color: #a9d6cc; font: 9px 'Share Tech Mono', monospace; letter-spacing: .18em; cursor: pointer; }
 .combat-inventory .inv-toggle kbd { padding: 1px 4px; border: 1px solid #81bdb366; border-radius: 2px; font-size: 8px; }
 .combat-inventory.open .inv-toggle { border-color: #9fe8ff88; color: #d8f6ff; }
@@ -445,7 +451,7 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 .inv-groups li.tone-steel { border-left-color: #6f8a86; }
 .inv-groups li.tone-danger { border-left-color: #ff7a6a; color: #ffb9ad; }
 .inv-panel footer { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 12px; border-top: 1px solid #7fd4e833; color: #7fb0a9; font: 8px 'Share Tech Mono', monospace; letter-spacing: .18em; }
-@media (max-width: 720px) { .inv-panel { width: min(92vw, 430px); } .combat-inventory { left: 12px; bottom: 210px; } }
+@media (max-width: 720px) { .inv-panel { width: min(92vw, 430px); } }
 
 @keyframes inv-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .inv-groups li.is-pick { cursor: pointer; }
