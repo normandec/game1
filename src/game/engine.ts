@@ -860,6 +860,16 @@ export class Game {
   blackoutHud = false;
   planeSpot = { x: 0, y: 0 };
   plane: Plane | null = null;
+  /* THE ESCORT LANDS; IT DOES NOT BLINK INTO EXISTENCE.
+   * Carrying the bomber between sectors used to drop it on the insertion point between two
+   * frames, so the next level opened with an aircraft standing in the grass that had not
+   * been there a moment before. It now flies an approach: it arrives high and fast from the
+   * nearest map edge, descends on a straight line and touches down on the same clear spot.
+   * `planeArrive` counts the seconds left; at zero the aircraft is simply a parked plane. */
+  planeArrive = 0;
+  planeArriveTotal = 0;
+  planeArriveFrom = { x: 0, y: 0 };
+  planeArriveTo = { x: 0, y: 0 };
   drivingVan: Van | null = null;
   flyingPlane = false;
   vaultOpen = false;
@@ -1582,6 +1592,7 @@ export class Game {
     this.planeSpot = world.planeSpot;
     this.allies = []; this.barricades = [];
     this.plane = null; this.drivingVan = null; this.flyingPlane = false;
+    this.planeArrive = 0; this.planeArriveTotal = 0;
     this.prisonHinted = false;
     this.vaultOpen = false; this.vaultChoice = 'none';
     this.siege = { active: false, t: 0, poi: '', waves: 0 };
@@ -2657,6 +2668,7 @@ export class Game {
     this.updateHangars(dt);
     this.updateFacilities(dt);
     this.updateLasers(dt);
+    this.updatePlaneArrival(dt);
     this.updateAllies(dt);
     this.updateSiege(dt);
     this.updateBaseOverride(dt);
@@ -5290,6 +5302,10 @@ export class Game {
     }
     // 2) recovered bomber / gunship parked in the vault
     if (this.plane && !this.flyingPlane && Math.hypot(this.plane.x - this.px, this.plane.y - this.py) < 170) {
+      if (this.planeArrive > 0) {
+        this.addText(this.plane.x, this.plane.y - 120, 'STILL ON APPROACH — LET IT TOUCH DOWN', '#ffcf7a', 13);
+        return;
+      }
       this.enterPlane(); return;
     }
     // 2b) a bomber parked inside a Hydra hangar — seize it
@@ -6638,6 +6654,76 @@ export class Game {
         const oy = Math.sin(p.ang + Math.PI / 2) * side * 62 - Math.sin(p.ang) * 60;
         this.addParticle(p.x + ox, p.y + oy, rand(-16, 16), rand(12, 40), 0.35, rand(2, 4), '#9db6c0', true);
       }
+    }
+  }
+
+  /**
+   * Put the carried bomber on an approach instead of on the ground.
+   *
+   * The aircraft is placed at the nearest clear map edge (in line with its landing spot),
+   * heading for that spot, and `planeArrive` runs down over five and a half seconds. Nothing
+   * is drawn until the first frame of the approach, and by the time the operative has landed
+   * from the transit the aircraft is visibly coming down out of the sky.
+   */
+  private stagePlaneArrival(spot: { x: number; y: number }) {
+    const p = this.plane;
+    if (!p) return;
+    const midX = ARENA_W / 2, midY = ARENA_H / 2;
+    // Longest axis wins: the escort comes in over the emptiest edge of the new ground.
+    const dx = spot.x - midX, dy = spot.y - midY;
+    const ax = Math.abs(dx) / Math.max(1, ARENA_W / 2), ay = Math.abs(dy) / Math.max(1, ARENA_H / 2);
+    const from = { x: spot.x, y: spot.y };
+    if (ax >= ay) from.x = dx >= 0 ? ARENA_W - 260 : 260;
+    else from.y = dy >= 0 ? ARENA_H - 260 : 260;
+    if (from.x === spot.x) from.x = clamp(spot.x + (spot.x > midX ? 900 : -900), 260, ARENA_W - 260);
+    if (from.y === spot.y) from.y = clamp(spot.y + (spot.y > midY ? 900 : -900), 260, ARENA_H - 260);
+    // A straight run from a corner-ish edge: never shorter than 1.6 km, so the approach reads.
+    const d = Math.hypot(spot.x - from.x, spot.y - from.y) || 1;
+    if (d < 1600) {
+      from.x = clamp(spot.x + ((spot.x - from.x) / d || 1) * 1600, 260, ARENA_W - 260);
+      from.y = clamp(spot.y + ((spot.y - from.y) / d || 1) * 1600, 260, ARENA_H - 260);
+    }
+    p.x = from.x; p.y = from.y; p.vx = 0; p.vy = 0; p.active = false; p.bank = 0;
+    p.ang = Math.atan2(spot.y - from.y, spot.x - from.x);
+    this.planeArriveFrom = { x: from.x, y: from.y };
+    this.planeArriveTo = { x: spot.x, y: spot.y };
+    this.planeArriveTotal = 5.5;
+    this.planeArrive = 5.5;
+    this.addText(spot.x, spot.y - 120, 'NIGHTJAR ON APPROACH — ESCORT COMING DOWN', '#a9ecff', 16);
+    this.setBanner('ESCORT INBOUND', 'THE BOMBER FLEW ON WITH YOU — GIVE IT A MOMENT TO LAND');
+  }
+
+  /** Fly the approach down, frame by frame, then hand the aircraft to the normal ground code. */
+  private updatePlaneArrival(dt: number) {
+    if (this.planeArrive <= 0) return;
+    const p = this.plane;
+    this.planeArrive = Math.max(0, this.planeArrive - dt);
+    if (!p) { this.planeArrive = 0; return; }
+    const t = this.planeArriveTotal > 0 ? 1 - this.planeArrive / this.planeArriveTotal : 1;
+    const e = t * t * (3 - 2 * t);
+    p.x = lerp(this.planeArriveFrom.x, this.planeArriveTo.x, e);
+    p.y = lerp(this.planeArriveFrom.y, this.planeArriveTo.y, e);
+    p.ang = Math.atan2(this.planeArriveTo.y - this.planeArriveFrom.y, this.planeArriveTo.x - this.planeArriveFrom.x);
+    p.bank = Math.sin(t * Math.PI) * 0.12;
+    // vapour off the wingtips on the way down, dust once the wheels are close
+    if (Math.random() < 0.6) {
+      const side = Math.random() < 0.5 ? -1 : 1;
+      this.addParticle(
+        p.x + Math.cos(p.ang + Math.PI / 2) * side * 54, p.y + Math.sin(p.ang + Math.PI / 2) * side * 54,
+        rand(-12, 12), rand(-12, 12), 0.4, rand(2, 4), e > 0.8 ? '#b8a888' : '#cdf6ff', true,
+      );
+    }
+    if (this.planeArrive <= 0) {
+      p.x = this.planeArriveTo.x; p.y = this.planeArriveTo.y;
+      p.vx = 0; p.vy = 0; p.bank = 0; p.active = false;
+      this.addText(p.x, p.y - 120, 'NIGHTJAR DOWN · [F] TO FLY', '#8be8ff', 16);
+      // a puff of dust off the apron — particles only, nothing that can hurt anything
+      for (let i = 0; i < 26; i++) {
+        const a = rand(0, TAU), v = rand(20, 120);
+        this.addParticle(p.x + Math.cos(a) * 40, p.y + 30 + Math.sin(a) * 18,
+          Math.cos(a) * v, Math.sin(a) * v * 0.5, rand(0.5, 1.1), rand(2, 6), '#b8a888', true);
+      }
+      sfx.rotor();
     }
   }
 
@@ -10547,26 +10633,39 @@ export class Game {
     this.support = saved.support;
     this.aegisCharges = saved.aegis;
     this.aegisTime = 0;
-    /* The freed men re-muster around the insertion point. They are the same men — same
-     * kind, same proportion of their wounds — so nothing about the run is invented. */
+    /* The freed men come off the transport that brought the operative.
+     * They used to be dropped in a neat ring around the insertion point the instant the
+     * sector loaded — the same "men out of nowhere" problem the bomber had. They now
+     * disembark from behind the operative in a column and walk forward into formation, so
+     * by the time the opening banner has faded they are simply there, where they walked. */
+    const dropAng = Math.atan2(this.py - ARENA_H / 2, this.px - ARENA_W / 2);
     for (let i = 0; i < saved.allies.length && i < 40; i++) {
       const a = saved.allies[i];
-      const ang = (i / Math.max(1, saved.allies.length)) * TAU;
-      const r = 70 + (i % 5) * 26;
+      const rank = Math.floor(i / 5), file = i % 5;
+      const back = 110 + rank * 42;
+      const side = (file - 2) * 34;
+      const spot = {
+        x: this.px + Math.cos(dropAng) * back - Math.sin(dropAng) * side,
+        y: this.py + Math.sin(dropAng) * back + Math.cos(dropAng) * side,
+      };
+      this.collide(spot, 14);
       this.allies.push({
-        x: this.px + Math.cos(ang) * r, y: this.py + Math.sin(ang) * r,
-        vx: 0, vy: 0, ang: 0, hp: Math.max(40, 220 * a.hp), maxHp: 220,
+        x: spot.x, y: spot.y,
+        vx: Math.cos(dropAng) * 40, vy: Math.sin(dropAng) * 40, ang: dropAng,
+        hp: Math.max(40, 220 * a.hp), maxHp: 220,
         cool: rand(0.2, 1), slot: this.allies.length, flash: 0,
         kind: a.kind,
       });
     }
     if (saved.plane) {
-      /* The bomber flies on with the operative: it is set down clear of the insertion. */
+      /* The bomber flies on with the operative — but it flies, it does not appear. It is
+       * rebuilt at the nearest edge and lands on a clear spot while the level opens. */
       const spot = this.safeAircraftSpot();
       this.plane = { ...saved.plane, x: spot.x, y: spot.y, vx: 0, vy: 0, active: false, bank: 0 };
+      this.stagePlaneArrival(spot);
     }
-    if (saved.allies.length) this.addText(this.px, this.py - 132, `${saved.allies.length} ALLIES RE-MUSTERED`, '#8be8ff', 15);
-    if (saved.plane) this.addText(this.px, this.py - 156, 'NIGHTJAR RECOVERED — MARKED ON YOUR MAP', '#a9ecff', 15);
+    if (saved.allies.length) this.addText(this.px, this.py - 132, `${saved.allies.length} MEN OFF THE TRANSPORT`, '#8be8ff', 15);
+    if (saved.plane) this.addText(this.px, this.py - 156, 'NIGHTJAR INBOUND — WATCH THE APPROACH', '#a9ecff', 15);
     if (saved.aegis > 0) this.addText(this.px, this.py - 108, `${saved.aegis} AEGIS CELL${saved.aegis > 1 ? 'S' : ''} CARRIED OVER`, '#9feaff', 15);
     // Hydra shares combat telemetry between bases; the next command staff already knows your habits.
     this.mobility = saved.mobility;
@@ -15548,9 +15647,20 @@ export class Game {
     if (!p) return;
     if (p.x < this.camX - 500 || p.x > this.camX + this.w + 500 || p.y < this.camY - 500 || p.y > this.camY + this.h + 500) return;
     const fly = this.flyingPlane;
-    drawFixedWing(ctx, { ...p, altitude: fly ? 70 : 0, friendly: true, bomber: true, bombOpen: p.bombCd > 0.9, active: fly }, this.simulationTime);
+    /* coming down out of the sky at the start of a sector: high on the first frame, wheels
+     * on the apron at the last, so the escort is seen to arrive rather than to exist. */
+    const descent = this.planeArrive > 0 && !fly
+      ? 150 * (this.planeArriveTotal > 0 ? this.planeArrive / this.planeArriveTotal : 0)
+      : 0;
+    const alt = fly ? 70 : descent;
+    drawFixedWing(ctx, { ...p, altitude: alt, friendly: true, bomber: true, bombOpen: p.bombCd > 0.9, active: fly || alt > 1 }, this.simulationTime);
     ctx.fillStyle = '#8be8ff'; ctx.font = '900 12px ui-monospace, monospace'; ctx.textAlign = 'center';
-    ctx.fillText(fly ? `S.H.I.E.L.D. NIGHTJAR / FUEL ${Math.ceil(p.fuel)}%` : 'S.H.I.E.L.D. NIGHTJAR / [F] BOARD', p.x, p.y - 205);
+    ctx.fillText(
+      fly ? `S.H.I.E.L.D. NIGHTJAR / FUEL ${Math.ceil(p.fuel)}%`
+        : alt > 1 ? 'S.H.I.E.L.D. NIGHTJAR / ON APPROACH'
+          : 'S.H.I.E.L.D. NIGHTJAR / [F] BOARD',
+      p.x, p.y - 205 - alt,
+    );
     ctx.textAlign = 'left';
   }
 
