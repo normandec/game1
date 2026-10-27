@@ -10,6 +10,8 @@ interface Props {
   scores: ScoreEntry[]; name: string; setName: (v: string) => void;
   cls: string; setCls: (v: string) => void; support: string; setSupport: (v: string) => void;
   fullscreen: boolean; onFullscreen: () => void;
+  /** Read the once-per-machine campaign directive again — the win condition and the field guide. */
+  onDirective: () => void;
   /** DEVELOPER CONSOLE: start a run on chosen ground, optionally without the risk of dying. */
   onDevDeploy: (sector: number, infiniteLives: boolean) => void;
 }
@@ -45,6 +47,9 @@ export default function OperationsMenu(p: Props) {
       <p>Six command strongholds. One S.H.I.E.L.D. operative.<br className="desktop-break"/> Reclaim the technology. Break the chain of command.</p>
       <div className="operation-cta"><button className="deploy-button" onClick={p.onStart}>DEPLOY OPERATIVE <span>&#8599;</span></button><button className="tour-button" onClick={p.onTour}>EXPLORE THE VAULT <span>3D TOUR</span></button></div>
       <div className="operation-keyhint"><kbd>ENTER</kbd> TO DEPLOY <span>/</span> {p.cls.toUpperCase()} + {p.support.toUpperCase()}</div>
+      <button type="button" className="operation-directive" onClick={p.onDirective}>
+        CAMPAIGN DIRECTIVE — WHAT WINNING MEANS &amp; WHAT YOU WILL FIND
+      </button>
     </main> : <section className="operation-panel">
       <div className="operation-panel-heading"><small>PERSONNEL TERMINAL / 07</small><h2>{tab === 'loadout' ? 'Prepare for insertion.' : tab === 'intel' ? 'Know the battlefield.' : tab === 'story' ? 'The occupied network.' : 'Your service record.'}</h2></div>
       {tab === 'loadout' && <>

@@ -213,6 +213,9 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 .operation-keyhint { margin-top: 17px; color: #4e717d; font: 8px 'Share Tech Mono', monospace; letter-spacing: 1.3px; }
 .operation-keyhint kbd { color: #7ca2aa; border: 1px solid #52798755; padding: 2px 5px; margin-right: 6px; }
 .operation-keyhint > span { margin: 0 10px; }
+.operation-directive { margin-top: 14px; display: inline-block; border: 1px solid #5f8f9a44; background: #0a1b2055; padding: 7px 11px; color: #7fb6c0; font: 8px 'Share Tech Mono', monospace; letter-spacing: 1.5px; cursor: pointer; transition: background .15s ease, color .15s ease; }
+.operation-directive:hover { background: #12313888; color: #cdeff7; }
+.operation-directive::before { content: '\25B8'; margin-right: 7px; color: #66e5c4; }
 .operations-footer { position: fixed; z-index: 2; bottom: 0; left: 5.2%; right: 5.2%; min-height: 61px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-top: 1px solid #9abba52b; font: 8px 'Share Tech Mono', monospace; letter-spacing: 1.3px; color: #668491; background: linear-gradient(0deg, #06121de8, #06121d22); }
 .operations-footer div { color: #8aafa6; }
 .operations-footer .secure-dot { margin-right: 7px; }
