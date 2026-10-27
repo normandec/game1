@@ -24,6 +24,8 @@ interface Screen {
   hp: number; armor: number; mag: number; magSize: number; reserve: number;
   reloading: boolean; alarm: number; prompt: string; message: string; messageT: number;
   cells: number; free: number; guards: number; sally: boolean; lights: boolean;
+  /** The last level's target: the CAGE command core, its health and how far away it is. */
+  coreHp: number; coreMax: number; coreDead: boolean; coreDist: number;
   compass: { label: string; angle: number; dist: number }[];
   stats: PrisonStats; flashlight: boolean;
   weapon: string;
@@ -36,6 +38,7 @@ interface Screen {
 const EMPTY: Screen = {
   hp: 100, armor: 0, mag: 12, magSize: 12, reserve: 48, reloading: false, alarm: 0,
   prompt: '', message: '', messageT: 0, cells: 0, free: 0, guards: 0, sally: false,
+  coreHp: 600, coreMax: 600, coreDead: false, coreDist: 0,
   lights: false, compass: [], stats: { freed: 0, guardsDown: 0, inmatesDown: 0, shots: 0, hits: 0, looted: 0 },
   flashlight: false, weapon: 'M9 SIDEARM', cuffed: 0, hatchNear: false, hatchProgress: 0, muted: false,
 };
@@ -827,6 +830,20 @@ export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
           ];
         case 'pipe':
           return [{ t: 'cyl', s: [1, 1, 1], o: [0, 0.5, 0], m: 'darkSteel' }];
+        case 'core':
+          /* THE CAGE COMMAND CORE: a bank of cabinets with the prison's nervous system
+           * inside it — steel frame, two live screens and a lit column of status cells.
+           * It is the biggest single object in CONTROL A, which is how the operative knows
+           * what he is looking at without reading the HUD. */
+          return [
+            { t: 'box', s: [1.0, 0.06, 1.0], o: [0, 0.03, 0], m: 'darkSteel' },
+            { t: 'box', s: [1.0, 0.88, 0.92], o: [0, 0.47, 0], m: 'steel' },
+            { t: 'box', s: [0.92, 0.62, 0.06], o: [0, 0.52, 0.47], m: 'screen' },
+            { t: 'box', s: [0.92, 0.16, 0.06], o: [0, 0.84, 0.47], m: 'siren' },
+            { t: 'box', s: [0.34, 0.4, 0.06], o: [-0.3, 0.3, -0.47], m: 'screen' },
+            { t: 'box', s: [1.04, 0.04, 0.96], o: [0, 0.93, 0], m: 'darkSteel' },
+            { t: 'cyl', s: [0.12, 0.3, 0.12], o: [0.28, 1.04, 0], m: 'siren' },
+          ];
         case 'column':
           // a poured concrete pier: plinth, shaft, formwork seams, capital
           return [
@@ -1973,6 +1990,8 @@ export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
         hudT = 0.18;
         const sum = sim.summary;
         const compass = [
+          // the core first: in the last level it is the only thing that matters
+          ...(!sum.coreDead ? [{ label: 'CORE', ang: Math.atan2(sim.core.z - sim.pz, sim.core.x - sim.px) }] : []),
           ...(sum.opened === 0 ? [{ label: 'BARS', ang: Math.atan2(sim.cells[sim.homeCell].z - sim.pz, sim.cells[sim.homeCell].x - sim.px) }] : []),
           ...sim.levers.filter((l) => !l.pulled).map((l) => ({ label: l.id === 'master' ? 'MASTER' : l.id.toUpperCase(), ang: Math.atan2(l.z - sim.pz, l.x - sim.px) })),
           { label: 'SALLY', ang: Math.atan2(108 - sim.pz, 0 - sim.px) },
@@ -1984,6 +2003,9 @@ export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
           prompt: (() => {
             const l = sim.leverNear;
             if (l) return l.pulled ? '' : `HOLD LEFT MOUSE · ${l.label}${l.progress > 0.01 ? `  ${Math.round(l.progress * 100)}%` : ''}`;
+            if (!sum.coreDead && Math.hypot(sim.core.x - sim.px, sim.core.z - sim.pz) < 7) {
+              return 'PRIMARY TARGET · SHOOT THE COMMAND CORE';
+            }
             if (sim.inControlRoom) return 'CONTROL ROOM · FIND THE MASTER HANDLE';
             if (!sim.hatch.open && Math.hypot(sim.hatch.x - sim.px, sim.hatch.z - sim.pz) < 2.6) {
               return `HOLD LEFT MOUSE · PRY THE SERVICE GRATE${sim.hatch.progress > 0.01 ? `  ${Math.round(sim.hatch.progress * 100)}%` : ''}`;
@@ -1992,6 +2014,7 @@ export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
           })(),
           message: sim.message, messageT: sim.messageT,
           cells: sum.opened, free: sum.free, guards: sum.guards, sally: sum.sallyOpen,
+          coreHp: sum.coreHp, coreMax: sum.coreMax, coreDead: sum.coreDead, coreDist: sum.coreDist,
           lights: sim.lightsOut, compass, stats: { ...sim.stats }, flashlight: sim.flashlight,
           weapon: sim.spec.name, cuffed: sim.cuffed, muted: audio.muted,
           hatchNear: !sim.hatch.open && Math.hypot(sim.hatch.x - sim.px, sim.hatch.z - sim.pz) < 2.6,
@@ -2084,7 +2107,23 @@ export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
           </p>
         </div>
 
-        {/* alarm */}
+        {/* THE LAST TARGET. Six sectors end with a general; this level ends with a machine,
+            and the operative should be able to see how much of it is left from anywhere in
+            the compound. */}
+        {!screen.coreDead && (
+          <div className="absolute right-4 top-14 w-64 border border-[#ffb27a55] bg-[#1a0f0bee] p-3 text-[10px] leading-relaxed text-[#f0d9c4]">
+            <p className="tracking-[0.3em] text-[#ffb27a]">PRIMARY TARGET</p>
+            <p className="mt-1 text-[13px] font-bold tracking-[0.16em] text-[#ffeede]">CAGE COMMAND CORE</p>
+            <div className="mt-2 h-1.5 overflow-hidden rounded bg-black/60">
+              <div className="h-full bg-gradient-to-r from-[#ff8f5c] to-[#ffd166]" style={{ width: `${Math.max(0, (screen.coreHp / Math.max(1, screen.coreMax)) * 100)}%` }} />
+            </div>
+            <div className="mt-1 flex justify-between text-[#c9a98a]">
+              <span>{Math.ceil(screen.coreHp)} / {screen.coreMax}</span>
+              <span>{Math.round(screen.coreDist)} m</span>
+            </div>
+            <p className="mt-2 text-[9px] tracking-[0.2em] text-[#a98f7a]">CONTROL A · DESTROY IT TO END THE WAR</p>
+          </div>
+        )}
         {screen.alarm > 0.2 && (
           <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded border border-[#ff6b6b55] bg-[#2a0b0bbb] px-4 py-1 text-[11px] tracking-[0.3em] text-[#ff9a9a]">
             SIRENS · ALARM {Math.round(screen.alarm * 100)}%

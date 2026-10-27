@@ -15,6 +15,25 @@ const NAME_KEY = 'solar-eclipse.callsign';
 const LEGACY_KEY = 'ironveil.highscores.v1';
 const LEGACY_NAME_KEY = 'ironveil.callsign';
 
+const BRIEFED_KEY = 'solar-eclipse.briefed.v1';
+
+/** Has this machine already been told what wins the campaign? */
+export function loadBriefed(): boolean {
+  try {
+    return localStorage.getItem(BRIEFED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function saveBriefed() {
+  try {
+    localStorage.setItem(BRIEFED_KEY, '1');
+  } catch {
+    /* ignore */
+  }
+}
+
 export function loadScores(): ScoreEntry[] {
   try {
     const raw = localStorage.getItem(KEY) ?? localStorage.getItem(LEGACY_KEY);

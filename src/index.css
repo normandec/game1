@@ -393,6 +393,14 @@ kbd { font-family: 'Share Tech Mono', monospace; }
 .combat-heli > span { color: #7fa8b2; font-size: 8px; letter-spacing: .8px; }
 .combat-dev-note { display: block; margin-top: 5px; color: #ffd166 !important; letter-spacing: 1.4px !important; }
 @media (max-width: 720px) { .combat-streak, .combat-army, .combat-heli { display: none; } }
+/* the level's win condition, named and metered */
+.combat-target { margin-top: 6px; padding: 6px 8px; border-left: 2px solid #ffb27a; background: #1a100bcc; }
+.combat-target small { display: block; color: #d79a6a; font-size: 7px; letter-spacing: 1.6px; }
+.combat-target b { display: block; color: #ffeede; font: 500 10px 'Chakra Petch', sans-serif; letter-spacing: .8px; margin: 3px 0; }
+.combat-target div { height: 4px; background: #00000066; }
+.combat-target div span { display: block; height: 100%; background: linear-gradient(90deg, #ff8f5c, #ffd166); transition: width .2s linear; }
+.combat-target em { display: block; margin-top: 3px; color: #b08a6c; font-style: normal; font-size: 7px; letter-spacing: .8px; }
+@media (max-width: 720px) { .combat-target em { display: none; } }
 .combat-security { width: 232px; padding: 10px 12px; border-right: 2px solid #77cbb6; background: linear-gradient(270deg, #102731ed, #10273186); text-align: right; }
 .combat-security small { display: block; color: #84aab1; font-size: 7px; letter-spacing: 1.4px; }
 .combat-security b { display: block; color: #b1e8d6; font-size: 10px; letter-spacing: .6px; margin-top: 5px; font-weight: 400; }

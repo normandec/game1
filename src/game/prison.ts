@@ -80,8 +80,18 @@ export interface PrisonProp {
     | 'monitor' | 'chair' | 'tray' | 'pot' | 'rack' | 'shelf' | 'cabinet' | 'workbench' | 'laundry' | 'stretcher'
     | 'siren' | 'vent' | 'fridge' | 'tank' | 'weaponrack'
     | 'mattress' | 'celllamp' | 'stove' | 'cooker' | 'bin' | 'board' | 'extinguisher'
-    | 'column';
+    | 'column' | 'core';
   solid: boolean;
+}
+
+/** The machine the last level is about. */
+export interface PrisonCore {
+  x: number; z: number; y: number;
+  hp: number; maxHp: number;
+  dead: boolean;
+  /** Simulation time the core went down, so the ending can be staged. */
+  downAt: number;
+  flash: number;
 }
 
 /**
@@ -212,6 +222,16 @@ export class PrisonSim {
   mag = 12; magSize = 12; reserve = 144; reloading = 0; cool = 0;
   /** seconds left of the cuffing cinematic: hands behind the back, no input */
   cuffed = 0;
+  /**
+   * THE CAGE COMMAND CORE — the target of the last level.
+   *
+   * Six sectors end with a general's head. The seventh has no general left to kill: the
+   * thing that runs this prison is a machine in CONTROL A — locks, sally port, sirens,
+   * tower network, all of it — and it is the only object in the campaign that a rifle can
+   * destroy to end the war. It sits against the back wall of the room, it is hardened, and
+   * when it goes down every lock in the compound goes with it.
+   */
+  core: PrisonCore = { x: -56, z: 91.2, y: 1.15, hp: 750, maxHp: 750, dead: false, downAt: 0, flash: 0 };
   /** the floor grate in the workshop */
   hatch: PrisonHatch = { x: 99, z: -19, y: 0, hp: 100, max: 100, open: false, progress: 0 };
   flash = 0; flashlight = false;
@@ -575,6 +595,10 @@ export class PrisonSim {
     for (const l of this.levers) {
       this.props.push({ x: l.baseX, z: l.baseZ, y: 0, w: 2.6, d: 1.2, h: 1.05, kind: 'console', solid: true });
     }
+    /* THE CORE. A bank of cabinets against the back wall of CONTROL A, with the prison's
+     * whole nervous system running through it. Solid, so the operative has to walk round
+     * it, and tall enough to shoot from the doorway. */
+    this.props.push({ x: this.core.x, z: this.core.z, y: 0, w: 4.4, d: 1.7, h: 2.25, kind: 'core', solid: true });
   }
 
   /**
@@ -1034,7 +1058,7 @@ export class PrisonSim {
   }
 
   /** Hitscan pistol round. Returns what it hit, for the renderer's tracers. */
-  fire(): { hit: 'wall' | 'guard' | 'inmate' | 'lock' | 'nothing'; x: number; z: number; y: number } {
+  fire(): { hit: 'wall' | 'guard' | 'inmate' | 'lock' | 'core' | 'nothing'; x: number; z: number; y: number } {
     if (this.phase === 'escaped' || this.cuffed > 0 || this.reloading > 0 || this.cool > 0) return { hit: 'nothing', x: 0, z: 0, y: 0 };
     if (this.mag <= 0) { this.reload(); return { hit: 'nothing', x: 0, z: 0, y: 0 }; }
     const spec = this.spec;
@@ -1042,14 +1066,14 @@ export class PrisonSim {
     this.alarm = Math.min(1, this.alarm + 0.45);
     this.events.push({ kind: 'shot', x: this.px, z: this.pz, y: this.py });
     // a shotgun throws a cone of pellets; everything else is a single round
-    let last = { hit: 'nothing' as 'wall' | 'guard' | 'inmate' | 'lock' | 'nothing', x: 0, z: 0, y: 0 };
+    let last = { hit: 'nothing' as 'wall' | 'guard' | 'inmate' | 'lock' | 'core' | 'nothing', x: 0, z: 0, y: 0 };
     for (let pellet = 0; pellet < spec.pellets; pellet++) {
       last = this.fireOne(spec);
     }
     return last;
   }
 
-  private fireOne(spec: WeaponSpec): { hit: 'wall' | 'guard' | 'inmate' | 'lock' | 'nothing'; x: number; z: number; y: number } {
+  private fireOne(spec: WeaponSpec): { hit: 'wall' | 'guard' | 'inmate' | 'lock' | 'core' | 'nothing'; x: number; z: number; y: number } {
     const spread = spec.spread;
     const ang = this.yaw + rnd(-spread, spread);
     const pitch = this.pitch + rnd(-spread, spread);
@@ -1062,11 +1086,18 @@ export class PrisonSim {
     const step = 0.35;
     for (let t = 0.4; t < reach; t += step) {
       const x = this.px + dx * t, z = this.pz + dz * t;
-      if (this.staticBlocked(x, z, 0.02)) { wallT = t; break; }
+      if (this.staticBlocked(x, z, 0.02)) {
+        // THE CORE IS A TARGET, NOT A WALL.
+        // It is a solid body, so it stopped the wall march on its own front face and
+        // every round aimed at the middle of the machine "hit a wall" a metre short.
+        // The march steps through the core box and lets the candidate test decide.
+        if (!this.core.dead && Math.abs(x - this.core.x) < 2.5 && Math.abs(z - this.core.z) < 1.4) continue;
+        wallT = t; break;
+      }
     }
 
-    type HitKind = 'wall' | 'guard' | 'inmate' | 'lock' | 'nothing';
-    type Candidate = { t: number; kind: 'guard' | 'inmate' | 'lock'; ref: number };
+    type HitKind = 'wall' | 'guard' | 'inmate' | 'lock' | 'core' | 'nothing';
+    type Candidate = { t: number; kind: 'guard' | 'inmate' | 'lock' | 'core'; ref: number };
     const cands: Candidate[] = [];
     const consider = (tx: number, tz: number, ty: number, radius: number, kind: Candidate['kind'], ref: number) => {
       const vx = tx - this.px, vz = tz - this.pz;
@@ -1089,6 +1120,8 @@ export class PrisonSim {
       if (c.lock !== 'intact') continue;
       consider(c.x, c.z + c.face * (CELL_D / 2), 1.15, 0.32, 'lock', c.id);
     }
+    // the last target in the campaign is a machine, and it takes every round you have
+    if (!this.core.dead) consider(this.core.x, this.core.z, this.core.y, 1.7, 'core', 0);
     cands.sort((a, b) => a.t - b.t);
 
     let bestT = wallT;
@@ -1122,10 +1155,42 @@ export class PrisonSim {
     } else if (target?.kind === 'lock') {
       const c = this.cells[target.ref];
       if (c) this.damageLock(c, 34);
+    } else if (target?.kind === 'core') {
+      // Armoured steel: a pistol round takes a chip out of it, a rifle or a shotgun more.
+      this.damageCore(spec.damage * 1.4);
     }
     // the round kicks dust and junk off whatever it hits
     this.throwDebris(out.x, out.z, 2.6, 3.4);
     return out;
+  }
+
+  /**
+   * Shoot the command core. This is the only way to win the last level: when its health
+   * bar reaches nothing, the machine that runs the CAGE dies with it.
+   */
+  damageCore(dmg: number) {
+    if (this.core.dead) return;
+    this.core.hp = Math.max(0, this.core.hp - dmg);
+    this.core.flash = 0.12;
+    this.stats.hits++;
+    this.events.push({ kind: 'hit', x: this.core.x, z: this.core.z, y: this.core.y });
+    if (this.core.hp <= 0) this.destroyCore();
+  }
+
+  /** The core is down: the prison's nervous system dies with it, and so does the campaign. */
+  private destroyCore() {
+    if (this.core.dead) return;
+    this.core.dead = true;
+    this.core.downAt = this.time;
+    this.core.flash = 0.4;
+    this.openAll();                 // every cell lock answers to this machine
+    this.sallyOpen = true;          // and so does the south gate
+    this.alarm = 1;
+    this.message = 'COMMAND CORE DESTROYED — EVERY LOCK IN THE CAGE JUST OPENED';
+    this.messageT = 9;
+    for (let i = 0; i < 4; i++) this.throwDebris(this.core.x + rnd(-1.6, 1.6), this.core.z, 5, 8);
+    this.events.push({ kind: 'break', x: this.core.x, z: this.core.z + 1.2, y: 1.6 });
+    this.events.push({ kind: 'open-all', x: this.core.x, z: this.core.z, y: 2 });
   }
 
   /** Every lock in the prison can be shot off; three hits with the pistol. */
@@ -1360,6 +1425,15 @@ export class PrisonSim {
       }
     }
 
+    /* The core going down IS the end of the last level: the campaign is won the moment the
+     * machine dies, with a beat for the fireball and the sirens before the ending card. */
+    if (this.core.dead && this.phase === 'active' && this.time > this.core.downAt + 1.6) {
+      this.phase = 'escaped';
+      this.message = 'THE CAGE IS FALLING — THE CAMPAIGN IS OVER';
+      this.events.push({ kind: 'exit', x: this.px, z: this.pz, y: 1 });
+      return;
+    }
+
     // ---- escape: the sally port, or the duct under the workshop ----
     if (this.sallyOpen && this.pz > 104 && Math.abs(this.px) < 9) {
       this.phase = 'escaped';
@@ -1565,6 +1639,10 @@ export class PrisonSim {
   get summary() {
     const opened = this.cells.filter((c) => c.opened).length;
     const free = this.inmates.filter((n) => n.state !== 'cell').length;
-    return { opened, free, guards: this.guards.filter((g) => g.state !== 'down').length, sallyOpen: this.sallyOpen };
+    return {
+      opened, free, guards: this.guards.filter((g) => g.state !== 'down').length, sallyOpen: this.sallyOpen,
+      coreHp: this.core.hp, coreMax: this.core.maxHp, coreDead: this.core.dead,
+      coreDist: Math.hypot(this.core.x - this.px, this.core.z - this.pz),
+    };
   }
 }

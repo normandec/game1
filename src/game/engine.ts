@@ -68,6 +68,8 @@ export const PERKS: Perk[] = [
 ];
 
 export interface Hud {
+  /** The one object that ends the level: the general's name, or the last level's machine. */
+  targetName: string; targetHp: number;
   score: number; wave: number; hp: number; maxHp: number; weapon: string; ammo: number;
   grenades: number; streak: number; mult: number; bestMult: number; dashPct: number; enemiesLeft: number;
   grenadeCap: number; aiTactic: string; aiNote: string; aiLevel: number; aiVolley: number;
@@ -1384,10 +1386,10 @@ export class Game {
     /* FIRST DEPLOY: the game stops before the operative can be shot at and says how to
      * play. This is the "ko prides v igro" card — one card, once per run. */
     this.milestone('deploy', 'OPERATIVE DEPLOYED · READ THIS ONCE', [
-      'WASD to move · mouse to aim · LMB to fire · SPACE dash · C Aegis shield',
-      'F interacts: gates, vehicles, uplinks, the vault guide. I opens the kit.',
-      'Your objective is on the right. The CAGE, the vault and IRON RESERVE are all reachable.',
-      'Everything you can fly or drive is out there, parked and real. Take it.',
+      'THE MISSION: in every sector, destroy the commanding general. Kill him and the sector falls.',
+      'The last level is different — there is no general left, so you destroy the CAGE COMMAND CORE.',
+      'His health is the bar under PRIMARY OBJECTIVE on the right. Everything else is in the way.',
+      'WASD move · mouse aim · LMB fire · SPACE dash · C Aegis · F use · I kit. Take what you can fly.',
     ]);
     // A prototype is a different aircraft, not a repaint: twice the structure, a hotter
     // powerplant and a seeker that reaches further. The line ships keep their old numbers.
@@ -2421,6 +2423,13 @@ export class Game {
       blackoutHud: this.blackout.active,
       serversLeft, serversTotal: this.servers.length, codersLeft,
       generalHp: this.general ? Math.max(0, this.general.hp / this.general.maxHp) : 0,
+      /* THE WIN CONDITION, SAID OUT LOUD.
+       * Every sector is one man; the last level is one machine. The HUD carries that target
+       * by name and by health so a player never has to guess what ends the level. */
+      targetName: this.general
+        ? `SUPREME GENERAL ${Math.min(this.sector, 6)}/6`
+        : this.prisonFinale ? 'CAGE COMMAND CORE' : '',
+      targetHp: this.general ? Math.max(0, this.general.hp / this.general.maxHp) : 0,
       generalShield: serversLeft > 0,
       objective: this.objective,
       hqDist: Math.hypot(HQ.cx - this.px, HQ.cy - this.py),
@@ -5945,11 +5954,24 @@ export class Game {
   /** Step through the sally port on the island, or wake up here after an arrest. */
   enterPrison(mode: 'arrest' | 'visit') {
     if (this.status === 'prison') return;
-    this.showTutorial('prison', 'THE CAGE', [
-      'You are inside the military prison on the island. Move with WASD, aim with the mouse.',
-      'The sally port is the way out: a visit can be walked away from, an arrest cannot.',
-      'Guards will be posted at the doors. Fighting your way out is allowed.',
-    ]);
+    /* THE LAST LEVEL TELLS YOU ITS TARGET.
+     * Every other level ends with a general. This one ends with a machine, and the card on
+     * the way in says so: the CAGE command core, in CONTROL A, and shooting it down ends
+     * the campaign. A raid on any other visit still gets the ordinary way out. */
+    if (this.prisonFinale) {
+      this.showTutorial('prison-finale', 'LEVEL 7 · THE CAGE', [
+        'THE TARGET: the CAGE command core, a bank of machines against the back wall of CONTROL A.',
+        'Shoot it down. Every lock, siren and gate on this island runs through it — the campaign ends with it.',
+        'Follow the CORE marker on the compass. The route in: the yard, the north door, then west.',
+        'Nothing else has to be destroyed. The general is already dead; this machine is what is left.',
+      ]);
+    } else {
+      this.showTutorial('prison', 'THE CAGE', [
+        'You are inside the military prison on the island. Move with WASD, aim with the mouse.',
+        'The sally port is the way out: a visit can be walked away from, an arrest cannot.',
+        'Guards will be posted at the doors. Fighting your way out is allowed.',
+      ]);
+    }
     this.prisonVisits++;
     this.status = 'prison';
     this.clearInput();
@@ -6005,7 +6027,10 @@ export class Game {
       this.status = 'victory';
       this.timeScale = 0.25;
       this.prisonFinale = false;
-      this.setBanner('CAMPAIGN COMPLETE', `THE CAGE BROKEN · ${stats.freed} INMATES RELEASED`);
+      this.setBanner(
+        'CAMPAIGN COMPLETE',
+        `COMMAND CORE DESTROYED · ${stats.freed} INMATES RELEASED`,
+      );
       sfx.wave();
       this.pushHud();
       this.onVictory(Math.floor(this.score), this.wave);
@@ -10407,8 +10432,13 @@ export class Game {
     this.iFrames = 10;
     this.flash = 1; this.flashColor = '255,220,140';
     this.score += 18000 + this.sector * 7000;
-    this.objective = `HYDRA BASE ${this.sector}/6 DESTROYED`;
-    this.setBanner('DECAPITATION STRIKE', `HYDRA COMMAND ${Math.min(this.sector, 6)}/6 ELIMINATED`);
+    this.objective = `HYDRA BASE ${this.sector}/6 DESTROYED · GENERAL KILLED`;
+    this.setBanner(
+      this.sector >= SECTORS.length ? 'FINAL GENERAL DESTROYED' : 'SECTOR SECURED · GENERAL DESTROYED',
+      this.sector >= SECTORS.length
+        ? 'HYDRA COMMAND IS GONE — THE CAGE IS ALL THAT IS LEFT'
+        : `HYDRA COMMAND ${this.sector}/6 ELIMINATED · THE NEXT SECTOR IS OPEN`,
+    );
     sfx.explode();
     for (let i = 0; i < 160; i++) {
       const a = rand(0, TAU), v = rand(60, 780);
@@ -10466,12 +10496,12 @@ export class Game {
     this.prisonReentry = 0;
     this.destination = '';
     this.intermission = 1.1;
-    this.objective = 'LEVEL 7 · THE CAGE — FORCE THE SALLY PORT';
+    this.objective = 'LEVEL 7 · THE CAGE — DESTROY THE COMMAND CORE';
     this.setBanner('LEVEL 7 · THE CAGE', 'THE LAST LEVEL IS BEHIND THESE WALLS');
     this.tellStory({
       id: 'finale-cage', channel: 'S.H.I.E.L.D. / FINAL DIRECTIVE',
       title: 'The last door in the campaign is a prison door.',
-      text: 'Six command bunkers are ash. The officer who signed your arrest is behind the walls of THE CAGE, and every boat, gunship and custody officer on that island has been told you are coming. Take the sally port, find the master release and walk out of the last level alive.',
+      text: 'Six command bunkers are ash. The officer who signed your arrest is behind the walls of THE CAGE, and every boat, gunship and custody officer on that island has been told you are coming. There is no general left to kill: the target is the machine that runs the prison — the command core in CONTROL A. Shoot it down and every lock on this island dies with it.',
     }, 16);
     sfx.siren();
     this.startIslandLanding();

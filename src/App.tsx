@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Game, WEAPONS, type GameStatus, type Hud, type Perk } from './game/engine';
 import { sfx } from './game/audio';
-import { bestScore, loadName, loadScores, renameEntry, saveName, saveScore, type ScoreEntry } from './game/scores';
+import { bestScore, loadBriefed, loadName, loadScores, renameEntry, saveBriefed, saveName, saveScore, type ScoreEntry } from './game/scores';
 import {
   GameOverScreen, PauseScreen, UpgradeScreen, VictoryScreen,
 } from './components/Screens';
@@ -9,11 +9,13 @@ import VaultRoom from './components/VaultRoom';
 import OperationsMenu from './components/OperationsMenu';
 import CombatHud from './components/CombatHud';
 import OperationBriefing from './components/OperationBriefing';
+import CampaignDirective from './components/CampaignDirective';
 import Prison3D, { type PrisonMode } from './components/Prison3D';
 import Glacier3D, { type GlacierStats } from './components/Glacier3D';
 import type { PrisonStats } from './game/prison';
 
 const emptyHud: Hud = {
+  targetName: '', targetHp: 0,
   score: 0, wave: 0, hp: 100, maxHp: 100, weapon: 'RIFLE', ammo: -1, grenades: 4,
   shieldHp: 0, shieldMax: 0,
   streak: 0, mult: 1, bestMult: 1, dashPct: 1, enemiesLeft: 0, grenadeCap: 6,
@@ -62,6 +64,8 @@ export default function App() {
   const [fullscreen, setFullscreen] = useState(false);
   const [tour, setTour] = useState(false);
   const [briefing, setBriefing] = useState(false);
+  /* The first thing this game ever says: what winning means. Once per machine. */
+  const [directive, setDirective] = useState(false);
   const [prisonMode, setPrisonMode] = useState<PrisonMode>('visit');
   const [choices, setChoices] = useState<Perk[]>([]);
   const [build, setBuild] = useState<{ perk: Perk; count: number }[]>([]);
@@ -80,6 +84,7 @@ export default function App() {
   }, [entryDate]);
 
   useEffect(() => {
+    setDirective(!loadBriefed());
     setScores(loadScores());
     setBest(bestScore());
     const n = loadName();
@@ -326,6 +331,7 @@ export default function App() {
         />
       )}
       {status === 'menu' && briefing && <OperationBriefing onBegin={startRun} onBack={() => setBriefing(false)} />}
+      {status === 'menu' && directive && <CampaignDirective onDismiss={() => { saveBriefed(); setDirective(false); sfx.click(); }} />}
       {status === 'upgrade' && (
         <UpgradeScreen wave={hud.wave} choices={choices} onChoose={chooseUpgrade} build={build} />
       )}
