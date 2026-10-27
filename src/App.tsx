@@ -328,6 +328,7 @@ export default function App() {
           cls={cls} setCls={chooseCls} support={support} setSupport={chooseSupport}
           onTour={() => setTour(true)}
           fullscreen={fullscreen} onFullscreen={toggleFullscreen} onDevDeploy={startDev}
+          onDirective={() => { setDirective(true); sfx.click(); }}
         />
       )}
       {status === 'menu' && briefing && <OperationBriefing onBegin={startRun} onBack={() => setBriefing(false)} />}
