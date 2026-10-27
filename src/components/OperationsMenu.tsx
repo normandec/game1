@@ -20,9 +20,26 @@ export function ShieldMark({ className = '' }: { className?: string }) {
   return <svg className={className} viewBox="0 0 64 64" fill="none" aria-hidden="true"><circle cx="32" cy="32" r="29" stroke="currentColor" strokeWidth="1.2"/><path d="M17 16h30v19c0 9-15 16-15 16s-15-7-15-16V16Z" fill="currentColor" fillOpacity=".1" stroke="currentColor"/><path d="m32 21 4 8 10-4-5 8-7 2v9l-2 3-2-3v-9l-7-2-5-8 10 4 4-8Z" fill="currentColor"/></svg>;
 }
 
+/**
+ * IS THE DEVELOPER CONSOLE AVAILABLE?
+ *
+ * It is off. The button sat in the header of the only screen every player sees, next to
+ * FULLSCREEN, and offered a sector jump and immortality to anyone who pressed it — which
+ * is exactly what it must not do. It is now reachable only by opening the game with `#dev`
+ * in the address, which nobody does by accident.
+ *
+ * The console itself is untouched: same deployment options, same rules, and a console run
+ * still never reaches the leaderboard.
+ */
+function devConsoleUnlocked() {
+  if (typeof window === 'undefined') return false;
+  return /(?:^|[#?&/=])dev\b/i.test(`${window.location.hash}${window.location.search}`);
+}
+
 export default function OperationsMenu(p: Props) {
   const [tab, setTab] = useState('operation');
   const [dev, setDev] = useState(false);
+  const devUnlocked = devConsoleUnlocked();
   const [devSector, setDevSector] = useState(1);
   const [devLives, setDevLives] = useState(false);
   return <div className="operations-menu">
@@ -34,10 +51,10 @@ export default function OperationsMenu(p: Props) {
           title={p.fullscreen ? 'Leave fullscreen' : 'Play fullscreen'}>
           <span aria-hidden="true">{p.fullscreen ? '\u2715' : '\u26F6'}</span>{p.fullscreen ? 'EXIT FULLSCREEN' : 'FULLSCREEN'}
         </button>
-        <button type="button" className={`screen-tool dev-tool${dev ? ' active' : ''}`} onClick={() => setDev(v => !v)}
+        {devUnlocked && <button type="button" className={`screen-tool dev-tool${dev ? ' active' : ''}`} onClick={() => setDev(v => !v)}
           aria-expanded={dev} aria-label="Developer console" title="Developer console — insertion sector and infinite lives">
           <span aria-hidden="true">{'\u26A1'}</span>DEV
-        </button>
+        </button>}
       </span></span></header>
     <nav className="operations-tabs" aria-label="Main menu">{[['operation', 'OPERATION'], ['loadout', 'LOADOUT'], ['intel', 'FIELD INTEL'], ['story', 'DOSSIER'], ['records', 'SERVICE RECORD']].map(([key, text]) => <button className={tab === key ? 'selected' : ''} onClick={() => setTab(key)} key={key}>{text}</button>)}</nav>
     {tab === 'operation' ? <main className="operation-hero">
@@ -99,7 +116,7 @@ export default function OperationsMenu(p: Props) {
       {tab === 'story' && <div className="field-intel dossier-entries">{[PROLOGUE, ...Object.values(PHASE_STORY)].map(s => <article key={s.id}><small>{s.channel}</small><h3>{s.title}</h3><p>{s.text}</p></article>)}</div>}
       {tab === 'records' && <div className="service-records"><div className="record-head"><span>RANK / CALLSIGN</span><span>WAVE</span><span>SCORE</span></div>{p.scores.length ? p.scores.map((s, i) => <div className="record-line" key={`${s.date}-${i}`}><span><small>{String(i + 1).padStart(2, '0')}</small>{s.name}</span><span>{s.wave}</span><strong>{s.score.toLocaleString()}</strong></div>) : <p>No records yet. Complete an operation to register your callsign.</p>}<small className="records-note">Stored on this device. Campaign scores are saved at defeat or final victory.</small></div>}
     </section>}
-    {dev && <div className="dev-console" role="dialog" aria-modal="true" aria-label="Developer console" onClick={e => { if (e.target === e.currentTarget) setDev(false); }}>
+    {dev && devUnlocked && <div className="dev-console" role="dialog" aria-modal="true" aria-label="Developer console" onClick={e => { if (e.target === e.currentTarget) setDev(false); }}>
       <div className="dev-console-card">
         <header><span><i aria-hidden="true">&#9889;</i><small>DEVELOPER CONSOLE</small></span><button type="button" onClick={() => setDev(false)} aria-label="Close developer console">CLOSE &#10005;</button></header>
         <h2>Drop straight into a sector.</h2>

@@ -5964,12 +5964,18 @@ export class Game {
         'Shoot it down. Every lock, siren and gate on this island runs through it — the campaign ends with it.',
         'Follow the CORE marker on the compass. The route in: the yard, the north door, then west.',
         'Nothing else has to be destroyed. The general is already dead; this machine is what is left.',
+        'The ways out are unchanged: the sally port in the south wall, or the workshop service grate on the east side. Killing the core opens both.',
       ]);
     } else {
-      this.showTutorial('prison', 'THE CAGE', [
-        'You are inside the military prison on the island. Move with WASD, aim with the mouse.',
-        'The sally port is the way out: a visit can be walked away from, an arrest cannot.',
-        'Guards will be posted at the doors. Fighting your way out is allowed.',
+      /* WHERE THE DOORS ARE.
+       * The card used to say "the sally port is the way out" and nothing else, which is no
+       * help to a man standing in a cell in the middle of a 216-metre building. Both exits
+       * are now named, placed and explained — one needs a lever, one needs four seconds. */
+      this.showTutorial('prison', 'THE CAGE · TWO WAYS OUT', [
+        'Your cell: shoot the gold lock on the bars, three hits, then step out into the cell house.',
+        'WAY OUT 1 · SALLY PORT — the SOUTH WALL, dead ahead. It opens with the SALLY PORT lever in CONTROL B, the south-east control room. Hold left mouse on the handle.',
+        'WAY OUT 2 · SERVICE GRATE — the WORKSHOP on the EAST side, north of the armoury. No lever, no key: stand on the floor grate and hold left mouse for about four seconds.',
+        'Optional mayhem: CONTROL A, south-west, holds the master handle that opens all 360 cells at once.',
       ]);
     }
     this.prisonVisits++;
