@@ -67,6 +67,19 @@ export default function CombatHud(p: Props) {
     </div>
     <div className="combat-right">
       <div className="combat-objective"><small>PRIMARY OBJECTIVE</small><p>{h.objective}</p>
+        {/* THE THING THAT ENDS THE LEVEL. Every sector: the general. The last level: the
+            CAGE command core. Named here, with its health, so nobody has to guess. */}
+        {h.targetName && <div className="combat-target">
+          <small>TARGET</small>
+          <b>{h.targetName}</b>
+          {/* The command core is only ever in front of the operative inside THE CAGE, where
+              the prison HUD owns its health bar. Here on the surface the name alone says
+              what the level wants, so an empty bar is not drawn. */}
+          {h.targetHp > 0 && <div><span style={{ width: `${Math.max(0, Math.min(100, h.targetHp * 100))}%` }}/></div>}
+          <em>{h.targetHp > 0
+            ? `${Math.round(h.targetHp * 100)}% · DESTROY IT TO WIN THE LEVEL`
+            : 'ONE TARGET · DESTROY IT TO WIN'}</em>
+        </div>}
         {/* On the island there is no command general left to expose: the chip is hidden
             rather than telling the operative to finish a man who is already dead. */}
         {(h.generalHp > 0 || h.generalShield) && <span>MAINFRAMES {h.serversTotal - h.serversLeft}/{h.serversTotal} <i>/</i> {h.generalShield ? 'COMMAND SHIELDED' : 'GENERAL EXPOSED'}</span>}
