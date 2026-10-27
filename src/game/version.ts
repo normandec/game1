@@ -20,15 +20,15 @@ export interface GameVersion {
 
 export const GAME_VERSION: GameVersion = {
   major: 1,
-  minor: 49,
+  minor: 50,
   patch: 0,
-  round: 49,
-  codename: 'TWO DOORS',
+  round: 50,
+  codename: 'ON APPROACH',
   date: '2026-10-27',
 };
 
-/** `v1.49.0` — the short label that goes on the start screen. */
+/** `v1.50.0` — the short label that goes on the start screen. */
 export const VERSION_LABEL = `v${GAME_VERSION.major}.${GAME_VERSION.minor}.${GAME_VERSION.patch}`;
 
-/** `v1.49.0 · ROUND 49 · 2026-10-27` — the full stamp for the footer. */
+/** `v1.50.0 · ROUND 50 · 2026-10-27` — the full stamp for the footer. */
 export const BUILD_STAMP = `${VERSION_LABEL} · ROUND ${GAME_VERSION.round} · ${GAME_VERSION.date}`;
