@@ -32,15 +32,19 @@ interface Screen {
   cuffed: number;
   hatchNear: boolean;
   hatchProgress: number;
+  /** THE TWO WAYS OUT, live: the sally port in the south wall and the service grate in
+   *  the workshop. Both carry a distance so the operative knows which one is closer. */
+  hatchOpen: boolean; sallyDist: number; hatchDist: number;
   muted: boolean;
 }
 
 const EMPTY: Screen = {
   hp: 100, armor: 0, mag: 12, magSize: 12, reserve: 48, reloading: false, alarm: 0,
   prompt: '', message: '', messageT: 0, cells: 0, free: 0, guards: 0, sally: false,
-  coreHp: 600, coreMax: 600, coreDead: false, coreDist: 0,
+  coreHp: 750, coreMax: 750, coreDead: false, coreDist: 0,
   lights: false, compass: [], stats: { freed: 0, guardsDown: 0, inmatesDown: 0, shots: 0, hits: 0, looted: 0 },
-  flashlight: false, weapon: 'M9 SIDEARM', cuffed: 0, hatchNear: false, hatchProgress: 0, muted: false,
+  flashlight: false, weapon: 'M9 SIDEARM', cuffed: 0, hatchNear: false, hatchProgress: 0,
+  hatchOpen: false, sallyDist: 0, hatchDist: 0, muted: false,
 };
 
 export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
@@ -1989,12 +1993,16 @@ export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
       if (hudT <= 0) {
         hudT = 0.18;
         const sum = sim.summary;
+        /* THE COMPASS LEADS WITH THE WAY OUT.
+         * It used to list the core, then the bars, then every lever — five of them — so the
+         * two exits fell off the end of the four-slot strip exactly when a player needed
+         * them. The core still comes first in the last level; after that, the doors. */
         const compass = [
-          // the core first: in the last level it is the only thing that matters
           ...(!sum.coreDead ? [{ label: 'CORE', ang: Math.atan2(sim.core.z - sim.pz, sim.core.x - sim.px) }] : []),
+          { label: 'SALLY S', ang: Math.atan2(108 - sim.pz, 0 - sim.px) },
+          ...(!sim.hatch.open ? [{ label: 'GRATE E', ang: Math.atan2(sim.hatch.z - sim.pz, sim.hatch.x - sim.px) }] : []),
           ...(sum.opened === 0 ? [{ label: 'BARS', ang: Math.atan2(sim.cells[sim.homeCell].z - sim.pz, sim.cells[sim.homeCell].x - sim.px) }] : []),
           ...sim.levers.filter((l) => !l.pulled).map((l) => ({ label: l.id === 'master' ? 'MASTER' : l.id.toUpperCase(), ang: Math.atan2(l.z - sim.pz, l.x - sim.px) })),
-          { label: 'SALLY', ang: Math.atan2(108 - sim.pz, 0 - sim.px) },
         ].map((m) => ({ label: m.label, angle: m.ang - sim.yaw, dist: 0 }));
         setScreen({
           hp: Math.max(0, Math.round(sim.hp)), armor: Math.round(sim.armor),
@@ -2019,6 +2027,9 @@ export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
           weapon: sim.spec.name, cuffed: sim.cuffed, muted: audio.muted,
           hatchNear: !sim.hatch.open && Math.hypot(sim.hatch.x - sim.px, sim.hatch.z - sim.pz) < 2.6,
           hatchProgress: sim.hatch.progress,
+          hatchOpen: sim.hatch.open,
+          sallyDist: Math.hypot(0 - sim.px, 108 - sim.pz),
+          hatchDist: Math.hypot(sim.hatch.x - sim.px, sim.hatch.z - sim.pz),
         });
       }
     };
@@ -2079,8 +2090,14 @@ export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
                   ? 'You wake on a steel bunk with a split lip. Somewhere in the processing they missed the sidearm — it is still in your waistband.'
                   : 'You came in through the sally port with a stolen pass and a smuggled pistol. Nobody has noticed yet.'}
               </p>
-              <p className="mt-4 text-[11px] tracking-[0.3em] text-[#d8b45a]">SHOOT THE LOCK · FIGHT INTO CONTROL A · HOLD THE MASTER HANDLE</p>
-              <p className="mt-1 text-[10px] tracking-[0.2em] text-[#7f9aa0]">THE MASTER RELEASE IS A LEVER, NOT A BUTTON — AIM AT IT AND HOLD LEFT MOUSE</p>
+              <p className="mt-4 text-[11px] tracking-[0.3em] text-[#d8b45a]">SHOOT THE LOCK ON YOUR BARS · THEN GET OUT</p>
+              <p className="mt-2 text-[10px] leading-relaxed tracking-[0.18em] text-[#8fd8c4]">
+                WAY OUT 1 · THE SALLY PORT — THE SOUTH WALL, DEAD AHEAD.<br/>
+                IT OPENS WITH THE LEVER IN CONTROL B, THE SOUTH-EAST CONTROL ROOM.<br/>
+                WAY OUT 2 · THE SERVICE GRATE — THE WORKSHOP ON THE EAST SIDE.<br/>
+                NO LEVER, NO KEY: HOLD LEFT MOUSE ON THE GRATE AND PRY IT UP.
+              </p>
+              <p className="mt-2 text-[10px] tracking-[0.2em] text-[#7f9aa0]">BOTH ROUTES ARE ON THE COMPASS AND IN THE OBJECTIVE BOX · CONTROL A HOLDS THE MASTER HANDLE</p>
             </div>
           </div>
         )}
@@ -2179,14 +2196,22 @@ export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
           </p>
         </div>
 
-        {/* objective */}
-        <div className="absolute bottom-6 left-7 max-w-[380px] text-[10px] leading-relaxed tracking-[0.18em] text-[#93aeb0]">
-          <p className="text-[#d8b45a]">OBJECTIVE</p>
-          {screen.cells === 0 && <p>1 · SHOOT THE LOCK ON YOUR BARS (3 HITS)</p>}
-          {!screen.sally && <p>2 · TWO WAYS OUT: CONTROL B → SALLY PORT, OR THE WORKSHOP FLOOR GRATE</p>}
-          <p>3 · {screen.cells < 320 ? 'CONTROL A · MASTER RELEASE (OPTIONAL MAYHEM)' : 'GET OUT THROUGH THE SOUTH GATE'}</p>
-          <p>4 · ARMORY · CARBINE, SHOTGUN, SMG + AMMUNITION</p>
-          {screen.sally && <p className="text-[#8fffc4]">SALLY PORT OPEN — RUN SOUTH</p>}
+        {/* objective, and — because "get out" is useless without "out of where" — both
+            escape routes by name, by side of the building, by distance and by state. */}
+        <div className="absolute bottom-6 left-7 max-w-[420px] text-[10px] leading-relaxed tracking-[0.18em] text-[#93aeb0]">
+          <p className="text-[#d8b45a]">OBJECTIVE · GET OUT OF THE CAGE</p>
+          {screen.cells === 0 && <p>1 · SHOOT THE GOLD LOCK ON YOUR BARS (3 HITS)</p>}
+          <p className="mt-1 text-[9px] tracking-[0.3em] text-[#79b3c1]">TWO WAYS OUT</p>
+          <p className={screen.sally ? 'text-[#8fffc4]' : ''}>
+            · SALLY PORT — SOUTH WALL, {Math.round(screen.sallyDist)} m ·{' '}
+            {screen.sally ? 'OPEN, RUN STRAIGHT SOUTH' : 'LOCKED: HOLD THE SALLY LEVER IN CONTROL B (SE)'}
+          </p>
+          <p className={screen.hatchOpen ? 'text-[#8fffc4]' : ''}>
+            · SERVICE GRATE — WORKSHOP, EAST SIDE, {Math.round(screen.hatchDist)} m ·{' '}
+            {screen.hatchOpen ? 'OPEN, STAND ON IT' : 'NO LEVER: HOLD LMB ON THE FLOOR GRATE'}
+          </p>
+          <p className="mt-1">{screen.cells < 320 ? 'OPTIONAL MAYHEM · CONTROL A (SW) MASTER HANDLE OPENS ALL 360 CELLS' : 'EXIT IS CLEAR — WALK OUT'}</p>
+          <p>ARMORY · CONTROL B SIDE · CARBINE, SHOTGUN, SMG + AMMUNITION</p>
           {screen.cuffed > 0 && <p className="text-[#e8b3a0]">CUFFED — WAIT FOR THE CELL DOOR</p>}
         </div>
 
@@ -2207,7 +2232,9 @@ export default function Prison3D({ mode, onExit, muted, onMuteChange }: Props) {
       {flashTap && (
         <div className="pointer-events-none absolute right-4 top-14 z-40 w-64 border border-[#8fd8c455] bg-[#041013ee] p-3 text-[10px] leading-relaxed text-[#c9dcdc]">
           Shoot the gold lock on any cell door to free the inmate behind it. Control A holds the master release:
-          it opens all 360 cells. Control B opens the sally port — that is your way back to the surface.
+          it opens all 360 cells. Control B opens the sally port in the south wall — one way back to the surface.
+          The other is the service grate in the floor of the WORKSHOP on the east side: hold left mouse on it for
+          about four seconds. It needs no lever and no key, and it is the quietest way out of the building.
           E uses buttons, R reloads, F toggles the flashlight.
         </div>
       )}
